@@ -8,15 +8,19 @@ import { TiledMapRenderer } from './TiledMapRenderer';
 import { Camera } from './Camera';
 import { Character, paintCup } from './Character';
 import { DeskScreen } from './DeskScreen';
+import { WorldClock } from './WorldClock';
 import { MessageEnvelope, type MessageAct } from './MessageEnvelope';
 import { hexToNumber, DEFAULT_CHARACTER } from './cast';
-import { pickSoloLine, pickExchange, type BreakSpot } from './cafeteriaLines';
+import { getCustomCharacter, isCustomCharacterId } from './customCast';
+import { pickSoloLine, pickExchange, cafeMoodFor, type BreakSpot, type CafeMood } from './cafeteriaLines';
+import { pickIdleCompanion, type CompanionCandidate } from './idleAffinity';
 import { colors } from '@/design/tokens';
-import { loadTheme, resolveThemeMap, themeTilesetUrls } from './themeLoader';
+import { loadTheme, resolveThemeMap } from './themeLoader';
 import {
   installContextLossRecovery, planInitFailure, DEFAULT_MAX_INIT_RETRIES
 } from './glRecovery';
-import type { Tile, Facing, ErrandKind, ErrandSpot } from './themeRegistry';
+import type { Tile, Facing, ErrandKind, ErrandSpot, TilesetEntry } from './themeRegistry';
+import { patchTilesetCanvas } from './tileArt';
 
 // The map, tileset atlases, desk-claim order, errand spots, coffee-economy
 // tiles, prop anchors, monitor gids and palette all come from the active
@@ -30,6 +34,10 @@ interface CafeChat {
   partnerId: string;
   idx: number;                     // next beat to speak
   beat: number;                    // seconds until the next beat
+  /** What the exchange is about (drives the relationship note at the end). */
+  mood: CafeMood;
+  /** True once the lines were swapped for a live model-written exchange. */
+  live: boolean;
 }
 
 interface CafeBreak {
@@ -74,6 +82,19 @@ interface Runtime {
   run?: CoffeeRun;
   /** When the current busy stretch (working/thinking/compacting) began. */
   busySince?: number;
+  /** Who this agent is currently gravitating toward while idle, how long that
+   *  choice still stands, and how hard it bends the roam. Set only by the
+   *  idle-affinity director (behind officeChatterEnabled). */
+  companion?: IdleCompanion;
+}
+
+/** An idle agent's current drift target — see idleAffinity.ts. */
+interface IdleCompanion {
+  id: string;
+  /** Seconds left before the choice is re-rolled. */
+  ttl: number;
+  /** 0..1 share of wander waypoints steered toward them. */
+  pull: number;
 }
 
 /** Only a busy stretch at least this long earns a cheer on finishing. Short
@@ -128,19 +149,42 @@ const CHEER_KEYS = [
   'office.cheer.6'
 ] as const;
 
-/** Load a texture via an <img> element. Unlike Pixi's Assets.load(), this
- *  handles extension-less data: URLs (Vite inlines small assets like the a5
- *  tileset as base64), which the Assets resolver fails to type-detect. */
-function loadTexture(url: string): Promise<Texture> {
+/** Load one tileset atlas image via an <img> element. Unlike Pixi's
+ *  Assets.load(), this handles extension-less data: URLs (Vite inlines small
+ *  assets like the a5 tileset as base64), which the Assets resolver fails to
+ *  type-detect.
+ *
+ *  When `entry.patches` is set (Phase 10 — see themeRegistry.ts's
+ *  OFFICE_TILESETS / tileArt.ts), the loaded image is first composited onto
+ *  an offscreen canvas and its floor/wall gid cells are repainted procedurally
+ *  BEFORE the Pixi texture is created — the "compose over the base atlas"
+ *  approach: office.tmj keeps referencing the exact same gids at the exact
+ *  same atlas positions, only the pixels living there change, so no map/gid
+ *  change was needed anywhere. Every atlas without `patches` (every atlas in
+ *  every theme except office's own copy of a5-office-floors-walls.png) takes
+ *  the plain `Texture.from(img)` path below, byte-identical to before. */
+function loadTilesetTexture(entry: TilesetEntry): Promise<Texture> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      const tex = Texture.from(img);
+      let source: HTMLImageElement | HTMLCanvasElement = img;
+      if (entry.patches && entry.patches.length > 0) {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0);
+          patchTilesetCanvas(ctx, entry);
+          source = canvas;
+        }
+      }
+      const tex = Texture.from(source);
       tex.source.scaleMode = 'nearest';
       resolve(tex);
     };
-    img.onerror = () => reject(new Error('failed to load ' + url.slice(0, 40)));
-    img.src = url;
+    img.onerror = () => reject(new Error('failed to load ' + entry.url.slice(0, 40)));
+    img.src = entry.url;
   });
 }
 
@@ -278,7 +322,7 @@ export function OfficeFloor() {
 
       // Load tilesets in theme order (texture[i] lines up with map tilesets[i]).
       const tilesetTextures = await Promise.all(
-        themeTilesetUrls(theme).map(loadTexture),
+        theme.tilesets.map(loadTilesetTexture),
       );
       if (mountIdRef.current !== mountId) { safeDestroy(app); return; }
 
@@ -328,6 +372,13 @@ export function OfficeFloor() {
       }
       calG.rect(8, 11, 2, 2).fill(0xc94f4f);                  // today, circled red
       charLayer.addChild(calG);
+
+      // ─── World clock (China + Mexico City, always-on) ──────────────────────
+      // Fall back to the `clock` anchor if a theme bundle predates worldClock
+      // (themeBundle.ts's validator defaults it too, but this is cheap defense
+      // in depth against an anchor that's still missing some other way).
+      const worldClock = new WorldClock(theme.anchors.worldClock ?? theme.anchors.clock, mapRenderer.tileSize);
+      charLayer.addChild(worldClock.container);
 
       // Build the ordered seat list once: PC desks + named desks first, then
       // conference-room chairs as overflow. Each agent claims one and stays there;
@@ -435,6 +486,188 @@ export function OfficeFloor() {
 
       const agentById = (id: string): Agent | undefined =>
         useStore.getState().agents.find((a) => a.id === id);
+
+      // ─── Relationships + generated dialogue (the personality experiment) ───
+      // Every pair of agents carries a persistent (warmth, tension, familiarity)
+      // state in the main process, fed by REAL signals: routed hive messages
+      // (main-side hook), plus the scene events reported below (shared breaks,
+      // check-ins, celebrations). The floor reads a snapshot to (a) bias who
+      // seeks whom at break time, (b) draw a small heart/spark between chatting
+      // pairs, and (c) — behind officeChatterEnabled — swap the canned exchange
+      // for one written live by the model from persona + relationship + status.
+      // The flag is read live, not just once at mount: `applyChatterEnabled`
+      // is invoked both from the initial getConfig() and from every later
+      // config:changed broadcast, so flipping the toggle ON while the floor
+      // is already mounted starts the relationship poll immediately instead
+      // of waiting for a remount (which only happens on theme/language
+      // switch); flipping it OFF stops the poll and drops the last snapshot
+      // right away rather than leaving a stale one lying around.
+      let chatterEnabled = false;
+
+      // Relationship state is DIRECTIONAL (see src/main/officeRel.ts): the map is
+      // keyed by an ORDERED (from → to) edge, and the snapshot carries a settled
+      // pair twice. `relFor(x, y)` is always "how x reads y" — every caller below
+      // has to say whose point of view it wants.
+      interface RelRow { from: string; to: string; warmth: number; tension: number; familiarity: number; flavor: string }
+      const relByEdge = new Map<string, RelRow>();
+      const edgeKey = (from: string, to: string): string => `${from}|${to}`;
+      /** Unordered key, for things that genuinely belong to the PAIR rather than
+       *  to one side of it (the floating indicator, the meetup cooldown). */
+      const pairKeyOf = (x: string, y: string): string => (x < y ? `${x}|${y}` : `${y}|${x}`);
+      const relFor = (from: string, to: string): RelRow | undefined => relByEdge.get(edgeKey(from, to));
+      /** The reading an OUTSIDE observer gets of a pair: warmth only counts when
+       *  both feel it, friction shows if either does. Used for the one shared
+       *  visual between two avatars — it cannot take a side. */
+      const relBetween = (x: string, y: string): RelRow | undefined => {
+        const xy = relFor(x, y), yx = relFor(y, x);
+        if (!xy && !yx) return undefined;
+        if (!xy) return yx;
+        if (!yx) return xy;
+        return {
+          from: x, to: y,
+          warmth: Math.min(xy.warmth, yx.warmth),
+          tension: Math.max(xy.tension, yx.tension),
+          familiarity: Math.min(xy.familiarity, yx.familiarity),
+          flavor: xy.flavor
+        };
+      };
+      const pollRel = async (): Promise<void> => {
+        try {
+          if (!window.cth.officeRelSnapshot) return; // stale preload bridge
+          const rows = await window.cth.officeRelSnapshot();
+          // The flag can flip OFF while this round trip is in flight. The
+          // toggle-off clears the map and stops the interval, so repopulating it
+          // here would leave a stale snapshot nobody comes back to clear —
+          // visible as hearts/sparks drawn from data the experiment is supposed
+          // to have dropped. Re-check after the await, exactly like the threads
+          // panel's `alive` guard.
+          if (!chatterEnabled) return;
+          relByEdge.clear();
+          for (const r of rows) relByEdge.set(edgeKey(r.from, r.to), r);
+        } catch { /* keep last snapshot */ }
+      };
+      let relPoll: ReturnType<typeof setInterval> | null = null;
+      /** Pair indicators currently on screen (see `attachRelFx` below for what
+       *  they are). Declared up here so the toggle-off can take them down — the
+       *  interface itself is hoisted, only the map needs to exist first. */
+      const relFx = new Map<string, RelFx>();
+      /** Remove every pair indicator and free its Graphics. */
+      function clearAllRelFx(): void {
+        for (const fx of relFx.values()) {
+          fx.g.parent?.removeChild(fx.g);
+          fx.g.destroy();
+        }
+        relFx.clear();
+      }
+      /** True while at least one avatar carries an affinity lean on its roam, so
+       *  a toggle-off can undo them once instead of every frame. */
+      let idlePullsActive = false;
+      /** Drop every social lean on idle wandering — back to the uniform random
+       *  walk. Declared as a hoisted function so `applyChatterEnabled` (which the
+       *  config promise can fire early) can always reach it. */
+      function clearIdlePulls(): void {
+        for (const rt of runtimes.values()) {
+          rt.companion = undefined;
+          rt.character.setWanderPull(null);
+        }
+        idlePullsActive = false;
+      }
+      const applyChatterEnabled = (enabled: boolean): void => {
+        chatterEnabled = enabled;
+        if (enabled) {
+          if (relPoll) return;
+          void pollRel();
+          relPoll = setInterval(() => { void pollRel(); }, 60_000);
+          (app as any).__relPoll = relPoll;
+        } else {
+          if (relPoll) { clearInterval(relPoll); relPoll = null; }
+          (app as any).__relPoll = null;
+          relByEdge.clear(); // stale relationship reads must not survive a toggle-off
+          clearIdlePulls(); // …and neither must a lean computed from them
+          clearAllRelFx();  // …nor a heart/spark already painted from them
+        }
+      };
+      void window.cth.getConfig()
+        .then((c) => applyChatterEnabled(c.officeChatterEnabled === true))
+        .catch(() => { /* flag stays off */ });
+      (app as any).__unsubChatterConfig =
+        window.cth.onConfigChanged((c) => applyChatterEnabled(c.officeChatterEnabled === true));
+
+      const personaFor = (agent: Agent) => ({
+        id: agent.id,
+        name: agent.name,
+        character: theme.cast.byName[agent.character]?.displayName ?? agent.character,
+        role: agent.description || '',
+        status: agent.status
+      });
+
+      // A small pixel indicator hovering between two chatting avatars: a heart
+      // when BOTH read warm, a spark when EITHER reads tense (see relBetween —
+      // one indicator cannot show a lopsided pair, so it shows the shared floor
+      // of the two directions) — and a golden
+      // four-point star whenever the exchange itself is model-written (live),
+      // so a watcher can tell generated dialogue from the canned pools at a
+      // glance. Keyed by pair, repositioned each tick, removed with the chat.
+      interface RelFx { g: Graphics; aId: string; bId: string; t: number }
+
+      const drawRelFx = (g: Graphics, rel: RelRow | undefined, live: boolean): void => {
+        g.clear();
+        const warm = !!rel && rel.warmth >= 0.4 && rel.tension < 0.35;
+        const tense = !!rel && rel.tension >= 0.4;
+        if (warm) {
+          // 7×6 pixel heart, rose over a darker outline row
+          const px = (x: number, y: number, c: number) => g.rect(x, y, 1, 1).fill(c);
+          const rose = 0xd16ba5, deep = 0x9c4f7c;
+          for (const [x, y] of [[1, 0], [2, 0], [4, 0], [5, 0], [0, 1], [3, 1], [6, 1], [0, 2], [6, 2], [1, 3], [5, 3], [2, 4], [4, 4], [3, 5]] as const) px(x, y, deep);
+          for (const [x, y] of [[1, 1], [2, 1], [4, 1], [5, 1], [1, 2], [2, 2], [3, 2], [4, 2], [5, 2], [2, 3], [3, 3], [4, 3]] as const) px(x, y, rose);
+        } else if (tense) {
+          // a jagged spark — friction made visible
+          g.poly([3, 0, 5, 0, 2, 3, 4, 3, 0, 7, 2, 4, 0, 4]).fill(0xf0c93d);
+          g.rect(4, 0, 1, 1).fill(0xc94f4f);
+        }
+        if (live) {
+          // four-point star badge, offset up-right: "this dialogue is being written"
+          const ox = 9, oy = -3;
+          g.poly([ox, oy - 3, ox + 1, oy - 1, ox + 3, oy, ox + 1, oy + 1, ox, oy + 3, ox - 1, oy + 1, ox - 3, oy, ox - 1, oy - 1]).fill(0xffd54a);
+        }
+      };
+
+      const attachRelFx = (aId: string, bId: string, live: boolean): void => {
+        // Gated on the flag like every other consumer of relationship state.
+        // Everything this draws comes from the snapshot (or from a model-written
+        // exchange), so with the experiment off there is nothing to show — and a
+        // callback that lands after a toggle-off must not paint one anyway.
+        if (!chatterEnabled) return;
+        const key = pairKeyOf(aId, bId);
+        let fx = relFx.get(key);
+        if (!fx) {
+          const g = new Graphics();
+          g.eventMode = 'none';
+          g.zIndex = 99_000;
+          charLayer.addChild(g);
+          fx = { g, aId, bId, t: 0 };
+          relFx.set(key, fx);
+        }
+        drawRelFx(fx.g, relBetween(aId, bId), live);
+      };
+
+      const updateRelFx = (dt: number): void => {
+        for (const fx of relFx.values()) {
+          fx.t += dt;
+          const a = runtimes.get(fx.aId)?.character.getPixelPosition();
+          const b = runtimes.get(fx.bId)?.character.getPixelPosition();
+          if (!a || !b) continue;
+          const bob = Math.round(Math.sin(fx.t * 2.2) * 2);
+          fx.g.position.set(Math.round((a.x + b.x) / 2) - 3, Math.round((a.y + b.y) / 2) - 30 + bob);
+        }
+      };
+
+      /** Fire-and-forget a scene-level pair event into the relationship book.
+       *  `fromId` must be whoever INITIATED it — the book folds the initiator's
+       *  and the receiver's sides of the event in with different weights. */
+      const noteRel = (fromId: string, toId: string, kind: string): void => {
+        try { void window.cth.officeRelNote?.(fromId, toId, kind); } catch { /* best-effort */ }
+      };
 
       // ─── The coffee economy: sideboard → machine → desk → sink → sideboard ─
       // A finite stock of mugs lives on a sideboard next to the kitchen counter.
@@ -635,24 +868,68 @@ export function OfficeFloor() {
         const prt = runtimes.get(partnerId);
         if (!prt?.brk || prt.brk.phase !== 'lingering') return false;
         if (rt.brk.chat || rt.brk.chattingWith || prt.brk.chat || prt.brk.chattingWith) return false;
-        const character = agentById(id)?.character ?? DEFAULT_CHARACTER;
-        const lines = pickExchange(character, Math.floor(Math.random() * 1e6));
-        rt.brk.chat = { lines, partnerId, idx: 0, beat: 0 };
+        const speakerAgent = agentById(id);
+        const partnerAgent = agentById(partnerId);
+        const character = speakerAgent?.character ?? DEFAULT_CHARACTER;
+        const mood = cafeMoodFor(speakerAgent?.status, partnerAgent?.status);
+        const lines = pickExchange(character, Math.floor(Math.random() * 1e6), mood);
+        const chat: CafeChat = { lines, partnerId, idx: 0, beat: 0.4, mood, live: false };
+        rt.brk.chat = chat;
         prt.brk.chattingWith = id;
+        attachRelFx(id, partnerId, false);
+        // The experiment: swap in a model-written exchange when one has been
+        // brewed for this pair (see officeChat.ts — brew-ahead, never blocking).
+        // The 0.4s opening beat gives the IPC round trip (cache lookup only,
+        // milliseconds) room to land before the first canned line is spoken.
+        if (chatterEnabled && speakerAgent && partnerAgent && window.cth.officeChatRequest) {
+          void window.cth.officeChatRequest({
+            a: personaFor(speakerAgent),
+            b: personaFor(partnerAgent),
+            mood,
+            spot: spot.spot
+          }).then((res) => {
+            if (!res?.lines?.length) return;
+            if (rt.brk?.chat === chat && chat.idx === 0) {
+              chat.lines = res.lines;
+              chat.live = true;
+              attachRelFx(id, partnerId, true);
+              return;
+            }
+            // The conversation moved on (the opening beat already played, or the
+            // break ended). These lines were generated and paid for, so hand them
+            // back rather than dropping them: the director holds them for the next
+            // time THIS speaker opens with THIS partner — the exchange alternates
+            // starting with the opener, so the direction has to match.
+            // Returned (not voided) so the trailing catch covers a stale bridge.
+            return window.cth.officeChatStash?.(id, partnerId, res.lines);
+          }).catch(() => { /* canned lines stand */ });
+        }
         return true;
       };
 
       // Free a café seat and tidy up any conversation links so neither agent is
       // left mid-chat. Called when a break ends OR is interrupted by real work.
+      // Any chat this agent is part of ends here — drop its pair indicator too.
+      const removeRelFxInvolving = (id: string): void => {
+        for (const [key, fx] of relFx) {
+          if (fx.aId !== id && fx.bId !== id) continue;
+          fx.g.parent?.removeChild(fx.g);
+          fx.g.destroy();
+          relFx.delete(key);
+        }
+      };
+
       const releaseBreak = (rt: Runtime): void => {
         if (!rt.brk) return;
         if (rt.brk.chat) {
           const p = runtimes.get(rt.brk.chat.partnerId);
           if (p?.brk) p.brk.chattingWith = undefined;
+          removeRelFxInvolving(rt.brk.chat.partnerId);
         }
         if (rt.brk.chattingWith) {
           const o = runtimes.get(rt.brk.chattingWith);
           if (o?.brk) o.brk.chat = undefined;
+          removeRelFxInvolving(rt.brk.chattingWith);
         }
         cafeTaken[rt.brk.spotIdx] = null;
         rt.brk = undefined;
@@ -688,20 +965,11 @@ export function OfficeFloor() {
         }
       };
 
-      const startBreak = (id: string, rt: Runtime): void => {
-        // Prefer (≈half the time) a seat whose table-mate is already there, so
-        // pairs form and chat; otherwise any free spot.
-        const free: number[] = [];
-        const social: number[] = [];
-        for (let i = 0; i < cafeSpots.length; i++) {
-          if (cafeTaken[i]) continue;
-          free.push(i);
-          const p = cafeSpots[i].partner;
-          if (p >= 0 && cafeTaken[p]) social.push(i);
-        }
-        if (free.length === 0) return;
-        const pool = (social.length && Math.random() < 0.55) ? social : free;
-        const idx = pool[Math.floor(Math.random() * pool.length)];
+      // Walk one agent to a specific café spot and run the same arrival logic
+      // startBreak uses for its randomly-picked spot — factored out so a
+      // rendezvous between two NAMED agents (below) can seat them at a chosen
+      // shared table instead of wherever the random picker lands.
+      const startBreakAt = (id: string, rt: Runtime, idx: number): void => {
         const spot = cafeSpots[idx];
         cafeTaken[idx] = id;
         rt.brk = { spotIdx: idx, phase: 'walking', timer: 0, quipTimer: 0 };
@@ -726,10 +994,124 @@ export function OfficeFloor() {
         });
       };
 
+      const startBreak = (id: string, rt: Runtime): void => {
+        if (!chatterEnabled) {
+          // Toggle off = exact pre-experiment Phase-1 logic, byte for byte:
+          // pure random seat pick with no relationship weighting whatsoever.
+          const freeSpots: number[] = [];
+          const socialSpots: number[] = [];
+          for (let i = 0; i < cafeSpots.length; i++) {
+            if (cafeTaken[i]) continue;
+            freeSpots.push(i);
+            const p = cafeSpots[i].partner;
+            if (p >= 0 && cafeTaken[p]) socialSpots.push(i);
+          }
+          if (freeSpots.length === 0) return;
+          const pool = (socialSpots.length && Math.random() < 0.55) ? socialSpots : freeSpots;
+          startBreakAt(id, rt, pool[Math.floor(Math.random() * pool.length)]);
+          return;
+        }
+        // Prefer (≈half the time) a seat whose table-mate is already there, so
+        // pairs form and chat; otherwise any free spot. Relationships lean on
+        // the choice: an agent seeks out a warm table-mate and mostly avoids a
+        // table where open friction is waiting — affection and irritation made
+        // visible as WHO SITS WITH WHOM, not just what gets said.
+        const free: number[] = [];
+        const social: Array<{ idx: number; weight: number }> = [];
+        let warmest = 0;
+        for (let i = 0; i < cafeSpots.length; i++) {
+          if (cafeTaken[i]) continue;
+          free.push(i);
+          const p = cafeSpots[i].partner;
+          if (p < 0 || !cafeTaken[p]) continue;
+          // Directed read, and deliberately so: what decides whether this agent
+          // walks over is how THIS agent feels about the table-mate, not how it
+          // is felt about. Someone can keep seeking out a colleague who has
+          // quietly gone cold on them.
+          const rel = relFor(id, cafeTaken[p]!);
+          if (rel && rel.tension >= 0.55 && rel.warmth < 0.15 && Math.random() < 0.7) continue;
+          const warmth = rel ? Math.max(0, rel.warmth) : 0;
+          social.push({ idx: i, weight: 1 + warmth * 2.5 + (rel?.familiarity ?? 0) });
+          warmest = Math.max(warmest, warmth);
+        }
+        if (free.length === 0) return;
+        // Deep affinity shows over time: a warm colleague at a table raises the
+        // odds this agent joins them instead of drifting to a random spot.
+        const socialOdds = 0.55 + warmest * 0.3;
+        if (social.length && Math.random() < socialOdds) {
+          let total = 0;
+          for (const s of social) total += s.weight;
+          let roll = Math.random() * total;
+          for (const s of social) {
+            roll -= s.weight;
+            if (roll <= 0) { startBreakAt(id, rt, s.idx); return; }
+          }
+          startBreakAt(id, rt, social[social.length - 1].idx);
+          return;
+        }
+        const idx = free[Math.floor(Math.random() * free.length)];
+        startBreakAt(id, rt, idx);
+      };
+
       const breakEligible = (agent: Agent, rt: Runtime): boolean => {
         if (agent.isGod || rt.brk || rt.err || rt.run || rt.cupCarryHome) return false;
         if (agent.status !== 'idle' && agent.status !== 'success') return false;
         return !rt.character.isSitting();   // already parked at a desk → leave it
+      };
+
+      // ─── Agent rendezvous: a real hive handoff earns a café meetup ─────────
+      // When one agent hands work to another (the SAME real hive:message event
+      // that already flies a MessageEnvelope between their desks — see
+      // spawnHandoff below), send both to a shared table for a brief exchange
+      // if they're free to wander. Reuses the cafeteria break machinery above
+      // wholesale (walking, seating, the two-beat chat from cafeteriaLines.ts)
+      // instead of a parallel system. A little more permissive than a random
+      // break (status 'waiting' also qualifies — that's the common state right
+      // after handing work off) but otherwise the same "don't yank someone off
+      // real work" rule.
+      const meetEligible = (agent: Agent | undefined, rt: Runtime | undefined): rt is Runtime => {
+        if (!agent || !rt) return false;
+        if (agent.isGod || rt.brk || rt.err || rt.run || rt.cupCarryHome) return false;
+        if (agent.status !== 'idle' && agent.status !== 'success' && agent.status !== 'waiting') return false;
+        return !rt.character.isSitting();
+      };
+
+      // Throttles a chatty pair so the SAME two agents don't re-summon each
+      // other to the break room on every message in a fast back-and-forth.
+      const meetCooldown = new Map<string, number>();
+      const MEET_COOLDOWN_MS = 45_000;
+
+      const startRendezvous = (fromId: string, toId: string): void => {
+        // This whole mechanic did not exist before this feature — toggle off
+        // must mean it plays no part at all, not even the free-seat lookup.
+        if (!chatterEnabled) return;
+        if (fromId === toId) return;
+        const fromRt = runtimes.get(fromId);
+        const toRt = runtimes.get(toId);
+        if (!meetEligible(agentById(fromId), fromRt) || !meetEligible(agentById(toId), toRt)) return;
+        const pairKey = pairKeyOf(fromId, toId);   // the cooldown is mutual
+        const now = Date.now();
+        // Close pairs find excuses to meet more often; a frosty pair lets more
+        // handoffs pass without a table. Read from the SENDER's side — they're
+        // the one deciding the handoff is worth a coffee.
+        const rel = relFor(fromId, toId);
+        const cooldown = MEET_COOLDOWN_MS * (rel && rel.warmth >= 0.4 ? 0.5 : rel && rel.tension >= 0.5 ? 1.6 : 1);
+        if (now - (meetCooldown.get(pairKey) ?? 0) < cooldown) return;
+        // Needs a free SHARED table (two seats, same column, two tiles apart —
+        // see the partner-pairing above) so both avatars land at the same spot
+        // instead of two independent random breaks. If the break room is full,
+        // this handoff simply skips the meetup — the envelope still flies.
+        let seatA = -1, seatB = -1;
+        for (let i = 0; i < cafeSpots.length; i++) {
+          const spot = cafeSpots[i];
+          if (!spot.seated || cafeTaken[i]) continue;
+          const p = spot.partner;
+          if (p >= 0 && !cafeTaken[p]) { seatA = i; seatB = p; break; }
+        }
+        if (seatA < 0) return;
+        meetCooldown.set(pairKey, now);
+        startBreakAt(fromId, fromRt, seatA);
+        startBreakAt(toId, toRt, seatB);
       };
 
       let cafeCooldown = 5;
@@ -758,8 +1140,27 @@ export function OfficeFloor() {
                 if (prt?.brk) prt.brk.timer = Math.max(prt.brk.timer, 3.5);
               } else {
                 // Conversation over — release the partner and resume solo quips.
+                // The completed exchange is REAL shared history: fold it into the
+                // relationship book (a check-in or celebration bonds more than
+                // ordinary small talk — see officeRel.ts's impulse table).
                 const prt = runtimes.get(b.chat.partnerId);
                 if (prt?.brk) prt.brk.chattingWith = undefined;
+                // WHICH WAY the event is filed matters now that the book is
+                // directional. Normally the initiator is whoever opened the
+                // conversation (`id`). A check-in is the exception: the one
+                // doing the comforting is the agent who ISN'T stuck, even when
+                // the stuck one is the one who sat down and started talking.
+                const partnerId = b.chat.partnerId;
+                const kind = b.chat.mood === 'breaker-checkin' ? 'checkin'
+                  : b.chat.mood === 'celebration' ? 'celebrated'
+                  : 'cafe';
+                const struggling = (who: string): boolean => {
+                  const s = agentById(who)?.status;
+                  return s === 'looping' || s === 'blocked';
+                };
+                const flip = kind === 'checkin' && struggling(id) && !struggling(partnerId);
+                noteRel(flip ? partnerId : id, flip ? id : partnerId, kind);
+                removeRelFxInvolving(id);
                 b.chat = undefined;
               }
             }
@@ -791,6 +1192,84 @@ export function OfficeFloor() {
         if (candidates.length === 0) return;
         const [agent, rt] = candidates[Math.floor(Math.random() * candidates.length)];
         startBreak(agent.id, rt);
+      };
+
+      // ─── Idle affinity: who you drift toward when you've nothing to do ─────
+      // Phase 2 put relationships into WHO SITS WITH WHOM at the café. This is
+      // the same rule one step earlier, on the open floor: an agent between
+      // tasks roams, and the roam is no longer uniform noise — it leans toward
+      // the colleagues it reads warmly and steers clear of open friction.
+      //
+      // The read is DIRECTIONAL and stays that way on purpose: `relFor(id,
+      // otherId)` is how THIS agent reads the other, so an agent keeps drifting
+      // toward someone who has quietly gone cold on them. The social rule itself
+      // lives in idleAffinity.ts (pure, unit-tested); the floor only supplies
+      // "who is free right now" and the live tile to lean toward.
+      //
+      // The whole mechanic is new with the experiment, so with the flag off it
+      // must not merely pick nothing — it must not run at all, and any lean it
+      // already handed out is dropped (clearIdlePulls, once).
+
+      /** Seconds a companion choice stands before it is re-rolled. Long enough
+       *  that the drift is legible on screen, short enough that the floor keeps
+       *  reshuffling instead of freezing into fixed cliques. */
+      const COMPANION_TTL = 18;
+
+      /** Free to wander toward someone: no task, no break, no errand, no coffee
+       *  run, not parked in a chair. Same shape as breakEligible — and like it,
+       *  the boss is exempt: Michael runs the floor from his desk. */
+      const idleWanderer = (agent: Agent, rt: Runtime): boolean => {
+        if (agent.isGod || rt.brk || rt.err || rt.run || rt.cupCarryHome) return false;
+        if (agent.status !== 'idle' && agent.status !== 'success') return false;
+        return !rt.character.isSitting();
+      };
+
+      let affinityCooldown = 4;
+      const updateIdleAffinity = (dt: number): void => {
+        if (!chatterEnabled) {
+          if (idlePullsActive) clearIdlePulls();
+          return;
+        }
+        // Who is loose on the floor this frame — both as drifters and as targets.
+        const free = new Map<string, Runtime>();
+        for (const agent of useStore.getState().agents) {
+          const rt = runtimes.get(agent.id);
+          if (rt && idleWanderer(agent, rt)) free.set(agent.id, rt);
+        }
+
+        // Follow the standing choices: age them out, drop the ones whose target
+        // (or owner) went back to work, and otherwise refresh the lean against
+        // where that colleague actually is right now — they're wandering too.
+        for (const [id, rt] of runtimes) {
+          const comp = rt.companion;
+          if (!comp) continue;
+          comp.ttl -= dt;
+          const target = runtimes.get(comp.id);
+          if (comp.ttl <= 0 || !target || !free.has(id) || !free.has(comp.id)) {
+            rt.companion = undefined;
+            rt.character.setWanderPull(null);
+            continue;
+          }
+          rt.character.setWanderPull(target.character.getTilePosition(), comp.pull);
+        }
+
+        affinityCooldown -= dt;
+        if (affinityCooldown > 0) return;
+        affinityCooldown = 5 + Math.random() * 4;
+        for (const [id, rt] of free) {
+          if (rt.companion) continue;                 // already has someone
+          const candidates: CompanionCandidate[] = [];
+          for (const otherId of free.keys()) {
+            if (otherId === id) continue;
+            candidates.push({ id: otherId, rel: relFor(id, otherId) });
+          }
+          const choice = pickIdleCompanion(candidates);
+          if (!choice) continue;                      // nobody worth crossing the room for
+          rt.companion = { id: choice.id, ttl: COMPANION_TTL, pull: choice.pull };
+          rt.character.setWanderPull(
+            free.get(choice.id)!.character.getTilePosition(), choice.pull);
+          idlePullsActive = true;
+        }
       };
 
       // ─── Idle errands: small purposeful busywork for a quiet floor ─────────
@@ -1378,8 +1857,19 @@ export function OfficeFloor() {
       (app as any).__taskBoardPoll = taskBoardPoll;
 
       const addCharacter = async (agent: Agent) => {
-        const charName = theme.cast.byName[agent.character] ? agent.character : theme.cast.defaultCharacter;
-        const member = theme.cast.byName[charName];
+        // A custom character (id `custom:<uuid>`) is never a key of
+        // theme.cast.byName — its recipe lives in the customCast registry, not
+        // the fixed roster. Resolve it explicitly so getFrames() below receives
+        // the CUSTOM id (and therefore the custom recipe), not the default
+        // character's; `member` (used only for a shirt-color glow fallback) has
+        // no custom-registry equivalent, so it falls back to the default
+        // character's — the same safe degradation the fixed-roster branch
+        // already used for an unrecognized name.
+        const custom = isCustomCharacterId(agent.character) ? getCustomCharacter(agent.character) : undefined;
+        const charName = custom
+          ? agent.character
+          : (theme.cast.byName[agent.character] ? agent.character : theme.cast.defaultCharacter);
+        const member = theme.cast.byName[charName] ?? theme.cast.byName[theme.cast.defaultCharacter];
         const seatIndex = claimSeat(agent);
         const seatTile: Tile = (seatIndex != null ? seatTiles[seatIndex] : undefined)
           ?? mapRenderer.getSpawnPoint('entrance')
@@ -1399,7 +1889,7 @@ export function OfficeFloor() {
           seatTile,
           seatDirection: facingForSeat(seatTile),
           spawnTile: entrance, // walk in from the office door
-          glowColor: hexNum(colors.accent[agent.accent]) ?? hexToNumber(member.shirt),
+          glowColor: hexNum(colors.accent[agent.accent]) ?? hexToNumber(custom?.accent ?? member.shirt),
           onClick: (id) => useStore.getState().select(id),
         });
         character.show(charLayer);
@@ -1481,6 +1971,14 @@ export function OfficeFloor() {
             c.setStatusGlyph(agent.status === 'success' ? 'success' : 'none');
             return;
           }
+          if (agent.status === 'blocked') {
+            // Waiting on the human is a legitimate, often long-lived state —
+            // let it linger at the café (see cafeteriaLines.ts's breaker-checkin
+            // mood) instead of yanking it back to the wait tile. 'looping'
+            // still falls through to releaseBreak below.
+            c.setStatusGlyph('blocked');
+            return;
+          }
           releaseBreak(rt);
         }
         // Same for an idle errand (watering, window, fridge…): idle refreshes
@@ -1515,8 +2013,9 @@ export function OfficeFloor() {
           case 'waiting':
             // Parked at the desk awaiting god / another agent — not actively
             // working (no focus glow) and NOT at the door (that's reserved for
-            // agents that need the human).
-            c.setStatusGlyph('none');
+            // agents that need the human). Blue "…" dots distinguish this from
+            // the red "!" reserved for blocked-on-human.
+            c.setStatusGlyph('waiting');
             c.sitAtDesk(false);
             c.showThought(liveActivity(agent, t('office.activity.waiting')), agent.carrying);
             break;
@@ -1628,6 +2127,10 @@ export function OfficeFloor() {
       const offMessage = window.cth.onHiveMessage
         ? window.cth.onHiveMessage((e) => {
             for (const target of e.targets) spawnHandoff(e.from, target, e.act, e.needsHuman);
+            // A REAL handoff between two live agents also earns a quick café
+            // rendezvous (see startRendezvous above) — skipped for human
+            // escalations, since 'human' has no avatar on the floor to walk.
+            if (!e.needsHuman && e.to !== 'human') startRendezvous(e.from, e.to);
           })
         : () => { /* onHiveMessage unavailable — real handoffs disabled this session */ };
       // Demo path: with no live hive, the mock loop dispatches synthetic handoffs
@@ -1688,10 +2191,13 @@ export function OfficeFloor() {
         }
         updateCafeteria(dt);
         updateCoffeeRuns(dt);
+        updateIdleAffinity(dt);
         updateErrands(dt);
         updateBossAura(dt);
         updateDeskLife(dt);
         updateBoardMoves(dt);
+        updateRelFx(dt);
+        worldClock.update(dt);
         resolveBubbleOverlaps();
         for (let i = envelopes.length - 1; i >= 0; i--) {
           if (envelopes[i].update(dt)) {
@@ -1762,6 +2268,8 @@ export function OfficeFloor() {
         try { (a as any).__unsub?.(); } catch { /* noop */ }
         try { (a as any).__offMessage?.(); } catch { /* noop */ }
         try { clearInterval((a as any).__taskBoardPoll); } catch { /* noop */ }
+        try { clearInterval((a as any).__relPoll); } catch { /* noop */ }
+        try { (a as any).__unsubChatterConfig?.(); } catch { /* noop */ }
         safeDestroy(a);
       }
       appRef.current = null;

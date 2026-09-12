@@ -121,8 +121,18 @@ export interface HarnessConfig {
   knowledgeGraph?: KnowledgeGraphConfig;
   /** TV-show office themes feature flag (Settings picker + switch flow). Default OFF. */
   tvShowOffices?: boolean;
-  /** Active office map/cast theme (honored only when tvShowOffices is on). */
-  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts';
+  /** Active office map/cast theme (honored only when tvShowOffices is on).
+   *  `custom:<uuid>` (Phase 4) identifies a user-imported theme bundle —
+   *  see scene/office/customThemes.ts + themeRegistry.ts's ThemeId. */
+  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts' | `custom:${string}`;
+  /** EXPERIMENT: live LLM-generated café dialogue (default OFF). Mirrors
+   *  src/main/config.ts — see src/main/officeChat.ts for the director. */
+  officeChatterEnabled?: boolean;
+  /** Model for ROUTINE brewed chatter (default: a Haiku-class model). */
+  officeChatterModel?: string;
+  /** Model for MILESTONE exchanges — a pair's first encounter or a relationship
+   *  threshold crossing (default 'claude-fable-5'). */
+  officeChatterMilestoneModel?: string;
   /** Per-CLI-provider local/self-hosted base URL (Ollama/LM Studio/vLLM, …) for the
    *  OpenCode/Crush/pi/qwen engines; applied at spawn. API KEYS are NOT stored here —
    *  they live write-only in the secret broker. */

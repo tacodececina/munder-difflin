@@ -11,8 +11,9 @@ import {
   type TriggerMode,
   type WebhookTrigger
 } from '@shared/triggers';
-import { PixelPanel } from './PixelPanel';
+import { PixelModal } from './PixelModal';
 import { PixelButton } from './PixelButton';
+import { PixelTabs } from './PixelTabs';
 import { UpdatesSection } from './UpdatesSection';
 import { SettingsHeroCard } from './SettingsHeroCard';
 import { SetupPanel } from './SetupPanel';
@@ -90,10 +91,10 @@ const slackLabelStyle: CSSProperties = {
 /** The exact connect walkthrough shown behind the i icon. Steps 6 & 7 spell out
  *  the both-lists requirement: subscribe to message.channels / message.groups in
  *  BOTH "Subscribe to bot events" AND "Subscribe to events on behalf of users". */
-const SLACK_CONNECT_STEPS = `Connect Munder Difflin to Slack
+const SLACK_CONNECT_STEPS = `Connect The Hive to Slack
 
 1. api.slack.com/apps -> Create New App -> From scratch. Name it
-   "Munder Difflin" and pick your workspace.
+   "The Hive" and pick your workspace.
 2. Basic Information -> Signing Secret -> copy it into the
    "Signing secret" field here.
 3. OAuth & Permissions -> Bot Token Scopes: add
@@ -496,6 +497,15 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     catch { setTelemetryOn(!next); }
   };
 
+  // ─── Office chatter (EXPERIMENT: model-written café dialogue, default OFF) ─
+  const [officeChatterOn, setOfficeChatterOn] = useState<boolean>(config.officeChatterEnabled === true);
+  const toggleOfficeChatter = async () => {
+    const next = !officeChatterOn;
+    setOfficeChatterOn(next);
+    try { stage({ officeChatterEnabled: next }); }
+    catch { setOfficeChatterOn(!next); }
+  };
+
   // --- Free Flow (voice dictation → message queue) ---
   const setFreeflowEnabledStore = useStore((s) => s.setFreeflowEnabled);
   const setHasGroqKeyStore = useStore((s) => s.setHasGroqKey);
@@ -812,29 +822,24 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
       : t('settings.title');
 
   return (
-    <div
-      onClick={busy ? undefined : onClose}
-      style={{
-        position: 'fixed', inset: 0,
-        background: 'rgba(26, 19, 32, 0.7)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        zIndex: 300
-      }}
+    // backdrop/onClose behavior preserved EXACTLY: clicking outside still calls
+    // onClose directly (not requestClose), so it still bypasses the dirty-changes
+    // confirm — same pre-existing quirk as before this migration, not something
+    // to fix here. zIndex 300 / backdrop 0.7 both equal PixelModal's own
+    // defaults (tokens.zIndex.modal), so neither is overridden below.
+    // The old outer wrapper's `filter: drop-shadow(...)` (a soft, blurred
+    // shadow) is dropped rather than reproduced: PixelModal has no slot for it,
+    // and a blurred shadow is exactly what design/tokens.ts `elevation` says
+    // this app's pixel-art identity never uses — every other migrated modal
+    // already relies on PixelPanel's own hard border instead.
+    <PixelModal
+      onClose={busy ? undefined : onClose}
+      title={modalTitle}
+      width={840}
+      maxWidth="92vw"
+      noPadding
+      panelStyle={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', maxHeight: '88vh' }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 840, maxWidth: '92vw', maxHeight: '88vh',
-          display: 'flex', flexDirection: 'column',
-          filter: 'drop-shadow(4px 4px 0 rgba(26, 19, 32, 0.25))'
-        }}
-      >
-        <PixelPanel
-          variant="dialog"
-          title={modalTitle}
-          noPadding
-          style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', maxHeight: '88vh' }}
-        >
           {/* === Change home sub-modal === */}
           {changeHome ? (
             <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16, overflowY: 'auto' }}>
@@ -926,39 +931,18 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
               <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
 
                 {/* Left nav */}
-                <div style={{
-                  width: 160, flexShrink: 0,
-                  display: 'flex', flexDirection: 'column',
-                  borderRight: '2px solid var(--cth-ink-300)',
-                  paddingTop: 8, paddingBottom: 8,
-                  background: 'var(--cth-cream-200)'
-                }}>
-                  {NAV_SECTIONS.map((section) => {
-                    const active = activeSection === section;
-                    return (
-                      <button
-                        key={section}
-                        type="button"
-                        onClick={() => setActiveSection(section)}
-                        style={{
-                          display: 'block', width: '100%', textAlign: 'left',
-                          padding: '10px 16px 8px',
-                          border: 'none',
-                          borderLeft: active ? '3px solid var(--cth-lemon)' : '3px solid transparent',
-                          background: active ? 'var(--cth-ink-900)' : 'transparent',
-                          color: active ? 'var(--cth-cream-50)' : 'var(--cth-ink-700)',
-                          fontFamily: 'var(--cth-font-display)',
-                          fontSize: 8,
-                          lineHeight: '12px',
-                          cursor: 'pointer',
-                          letterSpacing: 0
-                        }}
-                      >
-                        {t(NAV_SECTION_KEYS[section])}
-                      </button>
-                    );
-                  })}
-                </div>
+                <PixelTabs
+                  variant="rail"
+                  current={activeSection}
+                  onChange={(key) => setActiveSection(key as Section)}
+                  items={NAV_SECTIONS.map((section) => ({ key: section, label: t(NAV_SECTION_KEYS[section]) }))}
+                  style={{
+                    width: 160, flexShrink: 0,
+                    borderRight: '2px solid var(--cth-ink-300)',
+                    paddingTop: 8, paddingBottom: 8,
+                    background: 'var(--cth-cream-200)'
+                  }}
+                />
 
                 {/* Right scrollable content pane. minWidth:0 lets this flex child
                     shrink to the row's width instead of growing to its content's
@@ -1176,6 +1160,25 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                             onClick={toggleTelemetry}
                           >
                             {telemetryOn ? t('common.on') : t('common.off')}
+                          </PixelButton>
+                        </div>
+                        <div style={{ height: 10 }} />
+                        {/* Office chatter — the generated-dialogue experiment (officeChat.ts) */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
+                              {t('settings.general.officeChatter')}
+                            </span>
+                            <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                              {t('settings.general.officeChatterDesc')}
+                            </span>
+                          </div>
+                          <PixelButton
+                            variant={officeChatterOn ? 'primary' : 'secondary'}
+                            size="sm"
+                            onClick={toggleOfficeChatter}
+                          >
+                            {officeChatterOn ? t('common.on') : t('common.off')}
                           </PixelButton>
                         </div>
                       </div>
@@ -2112,8 +2115,6 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
               </div>
             </>
           )}
-        </PixelPanel>
-      </div>
-    </div>
+    </PixelModal>
   );
 }

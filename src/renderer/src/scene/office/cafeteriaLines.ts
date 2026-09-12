@@ -80,9 +80,13 @@ const BY_CHARACTER: Partial<Record<OfficeCharacterName, readonly string[]>> = {
 
 /** A solo break-room line. Character flavour ~60% of the time, else the line
  *  fits the spot the agent is standing at. `seed` keeps it deterministic per
- *  call site (avoids Math.random, which Pixi/Electron CSP-safe code prefers). */
-export function pickSoloLine(character: OfficeCharacterName, spot: BreakSpot, seed: number): string {
-  const flavour = BY_CHARACTER[character];
+ *  call site (avoids Math.random, which Pixi/Electron CSP-safe code prefers).
+ *
+ *  Accepts a plain `string` (not just `OfficeCharacterName`) so it also takes
+ *  an `agent.character` that's a custom character id — those simply miss the
+ *  BY_CHARACTER table and fall through to the generic spot pool. */
+export function pickSoloLine(character: string, spot: BreakSpot, seed: number): string {
+  const flavour = BY_CHARACTER[character as OfficeCharacterName];
   if (flavour && seed % 5 < 3) return pick(flavour, Math.floor(seed / 5));
   return pick(SPOT_POOL[spot], seed);
 }
@@ -213,6 +217,26 @@ const TWSS_EXCHANGES: readonly Exchange[] = [
 // Everything any table-mate pair can draw from.
 const PAIR_POOL: readonly Exchange[] = [...EXCHANGES, ...TWSS_EXCHANGES];
 
+// ─── breaker check-in — one of the pair is looping/blocked ───────────────────
+const BREAKER_CHECKIN_EXCHANGES: readonly Exchange[] = [
+  ['you okay? you’ve been… looping.', 'define “okay.”', 'that’s not reassuring.'],
+  ['heard you got throttled.', 'I prefer “steering.”', 'sure. steering.'],
+  ['you good? you seem stuck.', 'waiting on the human.', 'aren’t we all.'],
+  ['someone’s watching your usage today.', 'someone should be.', 'fair enough.'],
+  ['take a breath. seriously.', 'I don’t breathe.', '...take a break, then.'],
+  ['you tripped the breaker, didn’t you.', 'allegedly.', 'it logged your name, Dwight.'],
+];
+
+// ─── celebration — one of the pair just finished a big task ──────────────────
+const CELEBRATION_EXCHANGES: readonly Exchange[] = [
+  ['big task. DONE.', 'look at you.', 'I know.'],
+  ['just shipped it.', 'that’s… actually impressive.', 'thank you.'],
+  ['finished. finally.', 'proud of you.', 'don’t make it weird.'],
+  ['task complete!', 'we should celebrate.', 'this coffee IS the celebration.'],
+  ['I did the thing.', 'which thing?', 'the big one.', 'nice.'],
+  ['zero errors. all green.', 'bragging?', 'yes.'],
+];
+
 // Keyed off the SPEAKER so, when the right character sits down first, they get
 // to open with their signature bit.
 const KEYED_EXCHANGES: Partial<Record<OfficeCharacterName, Exchange>> = {
@@ -228,10 +252,34 @@ const KEYED_EXCHANGES: Partial<Record<OfficeCharacterName, Exchange>> = {
   jim:      ['question.', 'yes.', 'nothing. just checking.'],
 };
 
+/** What a pair's café chat should be about, derived from both agents' live
+ *  status. Priority-ordered: safety/concern beats celebration beats small
+ *  talk. Callers pass each agent's live `status` string (Agent['status']);
+ *  anything that isn't 'looping'/'blocked'/'success' — including
+ *  custom/unknown statuses — falls through to 'generic', the same permissive
+ *  pattern as pickSoloLine/pickExchange's plain-string `character` param. */
+export type CafeMood = 'breaker-checkin' | 'celebration' | 'generic';
+
+export function cafeMoodFor(speakerStatus?: string, partnerStatus?: string): CafeMood {
+  if (
+    speakerStatus === 'looping' || partnerStatus === 'looping' ||
+    speakerStatus === 'blocked' || partnerStatus === 'blocked'
+  ) return 'breaker-checkin';
+  if (speakerStatus === 'success' || partnerStatus === 'success') return 'celebration';
+  return 'generic';
+}
+
 /** A multi-beat exchange for two agents sharing a table. Beats alternate:
- *  index 0 = `speaker`, 1 = the table-mate, 2 = speaker, … */
-export function pickExchange(speaker: OfficeCharacterName, seed: number): Exchange {
-  const keyed = KEYED_EXCHANGES[speaker];
+ *  index 0 = `speaker`, 1 = the table-mate, 2 = speaker, …
+ *
+ *  Accepts a plain `string` for the same reason as pickSoloLine — a custom
+ *  character id simply misses KEYED_EXCHANGES and falls back to the generic
+ *  pair pool. `mood` (default 'generic') steers the pool toward a check-in
+ *  or a celebration when one of the pair's live status calls for it. */
+export function pickExchange(speaker: string, seed: number, mood: CafeMood = 'generic'): Exchange {
+  if (mood === 'breaker-checkin') return pick(BREAKER_CHECKIN_EXCHANGES, seed);
+  if (mood === 'celebration') return pick(CELEBRATION_EXCHANGES, seed);
+  const keyed = KEYED_EXCHANGES[speaker as OfficeCharacterName];
   if (keyed && seed % 4 === 0) return keyed;
   return pick(PAIR_POOL, seed);
 }

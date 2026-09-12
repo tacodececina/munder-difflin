@@ -45,6 +45,10 @@ export interface HiddenClaudeOptions {
   timeoutMs?: number;
   /** Extra env merged over the resolved shell env (e.g. the shared MemPalace). */
   env?: Record<string, string>;
+  /** Abort the session early (e.g. app quit / feature toggled off mid-brew).
+   *  Checked before spawn (a queued call that's aborted never spawns) and
+   *  listened to once the PTY is live. */
+  signal?: AbortSignal;
 }
 
 export interface HiddenClaudeResult {
@@ -96,8 +100,11 @@ function extractLastAssistantText(cwd: string, spawnedAt: number): string | null
   } catch { return null; }
 }
 
-export function runHiddenClaude(prompt: string, opts: HiddenClaudeOptions): Promise<HiddenClaudeResult> {
+/** The actual spawn-prompt-capture-kill implementation. Only ever invoked
+ *  through the exported `runHiddenClaude` below, which serializes calls. */
+function runHiddenClaudeExclusive(prompt: string, opts: HiddenClaudeOptions): Promise<HiddenClaudeResult> {
   return new Promise((resolve) => {
+    if (opts.signal?.aborted) { resolve({ ok: false, error: 'aborted' }); return; }
     if (!prompt.trim()) { resolve({ ok: false, error: 'empty prompt' }); return; }
     // Defense-in-depth: `~` is shell syntax, not a path Node understands.
     const cwd = opts.cwd ? expandTilde(opts.cwd) : opts.cwd;
@@ -171,9 +178,15 @@ export function runHiddenClaude(prompt: string, opts: HiddenClaudeOptions): Prom
       if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
       clearTimeout(bootMaxTimer);
       clearTimeout(globalTimer);
+      if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
       kill();
       resolve(r);
     };
+
+    // Caller cancelled (app quit, feature toggled off) — kill the PTY now
+    // instead of waiting out the boot/idle/timeout timers.
+    const onAbort = () => finish({ ok: false, error: 'aborted' });
+    if (opts.signal) opts.signal.addEventListener('abort', onAbort);
 
     const captureAndFinish = () => {
       const text = extractLastAssistantText(opts.cwd, spawnedAt);
@@ -212,4 +225,23 @@ export function runHiddenClaude(prompt: string, opts: HiddenClaudeOptions): Prom
     // Session exited cleanly before idle — try to capture the transcript anyway.
     ptyProc.onExit(() => { if (!settled) captureAndFinish(); });
   });
+}
+
+/** Serializes every call across the whole process: reflect.ts's condense pass
+ *  and officeChat.ts's brew-ahead director both call runHiddenClaude against
+ *  the same cwd/harnessHome, each tracking only its OWN "in progress" flag —
+ *  with no shared lock, an overlapping condense + brew could each pick up the
+ *  other's transcript (extractLastAssistantText just grabs the newest .jsonl
+ *  in the window). Chaining every call through one tail promise guarantees
+ *  at most one hidden session is ever spawned at a time, process-wide, with
+ *  zero coordination required from either caller. */
+let hiddenClaudeQueue: Promise<unknown> = Promise.resolve();
+
+export function runHiddenClaude(prompt: string, opts: HiddenClaudeOptions): Promise<HiddenClaudeResult> {
+  const runOnce = () => runHiddenClaudeExclusive(prompt, opts);
+  const result = hiddenClaudeQueue.then(runOnce, runOnce);
+  // Keep the queue alive regardless of outcome; never let one caller's
+  // rejection wedge every later call behind a permanently-rejected tail.
+  hiddenClaudeQueue = result.then(() => undefined, () => undefined);
+  return result;
 }

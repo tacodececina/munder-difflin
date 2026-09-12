@@ -5,7 +5,7 @@ import {
   unlinkSync, mkdirSync, renameSync, createWriteStream, copyFileSync, lstatSync,
   readlinkSync, symlinkSync
 } from 'node:fs';
-import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { join, resolve, sep, basename, dirname, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { request as httpsRequest } from 'node:https';
@@ -15,7 +15,7 @@ import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import {
   readConfig, writeConfig, setAgentTokenCap, resetConfig, onConfigWritten, ensureHarnessHome, ensureClaudePermissionsAccepted,
-  modelForRole, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
+  modelForRole, chatterModelFor, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { listDir, readFileText, readFileBinary, writeFileText, statAbs, expandTilde } from './fs';
 import { normalizeWeekly, weeklyDelayMs } from '../shared/weeklySchedule';
@@ -31,6 +31,10 @@ import type { UsageProvider } from './usage';
 import { MemoryManager } from './memory';
 import { KnowledgeManager } from './knowledge';
 import { MemoryReflector, type ReflectSettings } from './reflect';
+import { RelationshipBook, REL_FILE_NAME, type RelEventKind } from './officeRel';
+import { EMPTY_REL_VIEW, OfficeChatDirector, type OfficeChatRequest } from './officeChat';
+import { BrewSlot } from './brewSlot';
+import { EMPTY_FLAVOR, OfficeVoiceDirector, type VoiceFlavorRequest } from './officeVoice';
 import { PersistStore } from './db';
 import { readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd } from './transcript';
 import { listIssues, listCIRuns } from './github';
@@ -60,6 +64,9 @@ import type { SpawnFailReason } from './analytics';
 import { IntegrationBroker } from './integrationBroker';
 import * as integrations from './integrations';
 import { validateBaseUrl, buildAuthHeaders, resolveUpstreamUrl, secretRefFor, INTEGRATION_TEMPLATES } from '../shared/integrations';
+import * as remoteEnvironments from './remoteEnvironments';
+import { RemoteDaemonManager, pairWithRemoteDaemon } from './remoteDaemon';
+import { isValidRemoteHost, isValidRemotePort, type RemoteEnvironment } from '../shared/remoteEnvironment';
 import { RosterStore } from './roster';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
@@ -69,6 +76,8 @@ import { resolveGodName } from '../shared/godIdentity';
 import { fetchHireManifest, readHireManifestFiles } from './hire';
 import { parseHireDeepLink, type HireManifest } from '../shared/hire';
 import { ClosingTimeController } from './closingTime';
+import { logRendererError, logProcessGone } from './rendererErrorLog';
+import type { RendererErrorPayload } from '../shared/rendererErrors';
 import {
   argsWithAutoModeFlag,
   inferAgentProvider,
@@ -107,6 +116,13 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const ptyManager = new PtyManager();
+/** PTYs that live on ANOTHER machine (Phase 3b). Deliberately a second manager
+ *  rather than a mode inside PtyManager: the local path — which is essentially
+ *  all usage — keeps exactly the code it had, and every routing site asks one
+ *  cheap question, `remoteManager.has(id)`, before falling through to it. Its
+ *  output reaches the renderer on the SAME `pty:data:<id>` / `pty:exit:<id>`
+ *  channels, so the terminal has no idea which machine it is looking at. */
+const remoteManager = new RemoteDaemonManager();
 
 function runCodexDaemonCommand(
   executable: string,
@@ -231,14 +247,127 @@ const ptyToAgent = new Map<string, string>();
  *  install disabled) so the freshly-installed CLI launches in the SAME pty/window —
  *  no user click. Cleared the moment it's consumed, so it can never loop installs. */
 const pendingInstallRelaunch = new Map<string, { opts: AgentSpawnOptions; owner: Electron.WebContents | null; bin: string; rung: string }>();
+/** `officeChatterEnabled`, cached in memory.
+ *
+ *  This flag is checked on paths that run constantly: the hive-message hook
+ *  below sits in the ROUTING path of every agent-to-agent message, and the two
+ *  polling IPC handlers fire every few seconds per open floor. `readConfig()` is
+ *  a synchronous readFileSync + JSON.parse + migration pass with no cache, so
+ *  reading the flag straight off disk put real blocking I/O in front of every
+ *  routed message — including when the experiment is OFF, since the read IS the
+ *  check. Every write to config.json goes through persistConfig, which notifies
+ *  `onConfigWritten`, so the cached copy is exact rather than merely fresh. */
+let officeChatterFlag: boolean | null = null;
+onConfigWritten((next) => { officeChatterFlag = next.officeChatterEnabled === true; });
+/** The flag, read from disk at most once per config write. Populated lazily so
+ *  module load never touches the filesystem. */
+const officeChatterOn = (): boolean => {
+  if (officeChatterFlag === null) officeChatterFlag = readConfig().officeChatterEnabled === true;
+  return officeChatterFlag;
+};
 const hive = new HiveManager(
   () => readConfig().harnessHome,
   (channel, payload) => {
+    // Every routed hive message also feeds the office relationship book — the
+    // real-interaction signal behind the floor's emergent pair dynamics. The
+    // book is DIRECTIONAL: `from` is the initiator, so noteRoute writes the
+    // sender's and the recipient's sides of the same message differently.
+    if (channel === 'hive:message' && officeChatterOn()) {
+      try {
+        const e = payload as { from?: string; targets?: string[]; act?: string };
+        if (e && typeof e.from === 'string' && Array.isArray(e.targets)) {
+          for (const t of e.targets) {
+            if (typeof t === 'string') officeRel.noteRoute(e.from, t, String(e.act ?? 'inform'));
+          }
+        }
+      } catch { /* relationship tracking is best-effort */ }
+    }
     const wc = liveWebContents();
     if (!wc) return false;
     try { wc.send(channel, payload); return true; } catch { return false; }
   }
 );
+// ─── Office relationships + generated café dialogue (experiment) ─────────────
+// Persistent pairwise affinity between agents (fed by real hive traffic above +
+// scene events reported over IPC below) and the brew-ahead dialogue director
+// that writes the break-room chatter when officeChatterEnabled is on. Routine
+// lines go to a Haiku-class model; Fable is reserved for milestone exchanges
+// (first encounter, relationship threshold crossing) — see chatterModelFor.
+const officeRel = new RelationshipBook(() => readConfig().harnessHome);
+// THE one background-Claude slot. Both personality features below share it, so
+// "at most one hidden session in flight, ever" holds across the pair instead of
+// per director — two private budgets would have meant two concurrent sessions.
+const officeBrewSlot = new BrewSlot({
+  getHome: () => readConfig().harnessHome,
+  getCommand: () => readConfig().defaultCommand ?? 'claude'
+});
+const officeChat = new OfficeChatDirector({
+  getHome: () => readConfig().harnessHome,
+  getCommand: () => readConfig().defaultCommand ?? 'claude',
+  getModel: (tier) => chatterModelFor(readConfig(), tier),
+  isEnabled: officeChatterOn,
+  rel: officeRel,
+  slot: officeBrewSlot
+});
+// The same soul-into-writing trick, pointed at REAL work messages instead of
+// café gossip: a short in-character aside rendered BESIDE a hive message in the
+// threads panel. The message itself — subject, body, act, on disk and on screen
+// — is never touched; see officeVoice.ts. Behind the same experimental flag, so
+// the default remains today's plain message.
+const officeVoice = new OfficeVoiceDirector({
+  getHome: () => readConfig().harnessHome,
+  getCommand: () => readConfig().defaultCommand ?? 'claude',
+  getModel: (tier) => chatterModelFor(readConfig(), tier),
+  isEnabled: officeChatterOn,
+  slot: officeBrewSlot
+});
+// All three handlers are no-ops when the flag is off — toggle off must mean
+// NOTHING from this feature runs: no snapshot read, no note written, no file
+// touched. (officeChat.request() gates itself the same way, before it reads the
+// relationship book at all.)
+// The snapshot is a list of DIRECTED edges: a settled pair shows up twice, once
+// per direction, and the renderer keys them on (from, to).
+ipcMain.handle('officeRel:snapshot', () => {
+  if (!officeChatterOn()) return [];
+  return officeRel.snapshot();
+});
+// `from` is the agent that INITIATED the scene event (the one who sat down, who
+// checked in, who started the celebration); `to` received it. Both sides of the
+// edge are written, with different weights — see officeRel.ts's impulse table.
+ipcMain.handle('officeRel:note', (_evt, from: unknown, to: unknown, kind: unknown) => {
+  if (!officeChatterOn()) return;
+  if (typeof from === 'string' && typeof to === 'string' && typeof kind === 'string') {
+    officeRel.note(from, to, kind as RelEventKind);
+  }
+});
+ipcMain.handle('officeChat:request', (_evt, req: unknown) => {
+  const r = req as OfficeChatRequest;
+  // `a === b` is nonsense (nobody chats with themselves at the café) and the
+  // loader discards a self-edge on the next launch anyway — so reject it here
+  // rather than letting a buggy renderer keep re-creating an 'x|x' row.
+  if (!r || !r.a?.id || !r.b?.id || r.a.id === r.b.id) {
+    return { lines: null, rel: EMPTY_REL_VIEW, relBack: EMPTY_REL_VIEW };
+  }
+  return officeChat.request(r);
+});
+// A brewed exchange that reached the floor too late to be spoken comes back here
+// instead of being dropped: it is held for the next time `from` opens a chat with
+// `to` (direction matters — the lines alternate starting with `from`).
+ipcMain.handle('officeChat:stash', (_evt, from: unknown, to: unknown, lines: unknown) => {
+  if (!officeChatterOn()) return;
+  if (typeof from !== 'string' || typeof to !== 'string' || !Array.isArray(lines)) return;
+  officeChat.stash(from, to, lines.filter((l): l is string => typeof l === 'string'));
+});
+// Persona flavour for REAL work messages. Instant + read-only from the caller's
+// side: it hands back the asides already written for these message ids and may
+// start ONE background brew. It receives the SUBJECT line only — never a body —
+// and it cannot change the message it decorates. Off with the flag, like the rest.
+ipcMain.handle('officeVoice:request', (_evt, req: unknown) => {
+  if (!officeChatterOn()) return EMPTY_FLAVOR;
+  const r = req as VoiceFlavorRequest;
+  if (!r || !Array.isArray(r.items)) return EMPTY_FLAVOR;
+  return officeVoice.request(r);
+});
 // #7C — operator control state (pause/gate/steer/halt), read by the HookServer
 // when deciding hook returns.
 const control = new ControlRegistry();
@@ -601,6 +730,12 @@ ptyManager.setExitHandler((id, exitCode) => {
   }
   teardownPty(id);
 });
+// A remote PTY's natural exit must run the exact same teardown as a local one.
+// (The missing-CLI installer relaunch above is local-only by construction — a
+// remote spawn never takes that path — so this is the plain teardown.)
+remoteManager.setExitHandler((id) => {
+  teardownPty(id);
+});
 
 /** Keep the system from suspending the harness while agents are running.
  *  Windows Modern Standby suspends desktop apps (and their child `claude`
@@ -619,7 +754,9 @@ type KeepAwakeMode = 'prevent-app-suspension' | 'prevent-display-sleep';
 let keepAwakeId: number | null = null;
 let keepAwakeMode: KeepAwakeMode | null = null;
 function syncKeepAwake(): void {
-  const live = ptyManager.list().length > 0;
+  // A remote agent still needs THIS machine awake: the app holds the only socket
+  // carrying its output, and a suspended app is a terminal that stops updating.
+  const live = ptyManager.list().length > 0 || remoteManager.list().length > 0;
   const desired: KeepAwakeMode | null = live
     ? (readConfig().strongKeepalive ? 'prevent-display-sleep' : 'prevent-app-suspension')
     : null;
@@ -2178,6 +2315,20 @@ app.on('open-url', (evt, url) => {
   void handleHireLink(url);
 });
 
+// `child-process-gone` is an APP-level event (unlike `render-process-gone`,
+// which is per-webContents) — it covers every non-renderer child process
+// (GPU, utility, sandbox helper) across the whole app, so it is registered
+// once here rather than per-window. A dying child process doesn't kill a
+// window's renderer directly — Chromium restarts the GPU process on its own,
+// and OfficeFloor's WebGL context-loss recovery (glRecovery.ts) handles the
+// fallout for the office canvas — but it is worth a durable log line: a GPU
+// process that keeps dying is the root cause behind an otherwise mysterious
+// render-process-gone or a permanently blank floor.
+app.on('child-process-gone', (_evt, details) => {
+  logProcessGone('child-process-gone',
+    `type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
+});
+
 // IPC: the renderer signals readiness and PULLS anything queued (deep links
 // that arrived before the window/subscription existed, incl. cold starts).
 ipcMain.handle('hire:drainPending', () => {
@@ -2228,7 +2379,14 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
     ...(geom && geom.x !== undefined && geom.y !== undefined ? { x: geom.x, y: geom.y } : {}),
     minWidth: MIN_WIN.width,
     minHeight: MIN_WIN.height,
-    title: isFloor ? 'Munder Difflin — Floor' : 'Munder Difflin',
+    title: isFloor ? 'The Hive — Floor' : 'The Hive',
+    // Packaged: electron-builder already bakes build/icon.{ico,icns} into the
+    // executable/app bundle itself (electron-builder.yml), so the OS shows it
+    // for the taskbar/dock without any runtime path — build/ isn't shipped
+    // inside the packaged app at all. Dev: nothing bakes the icon in, so
+    // without this the window/taskbar falls back to Electron's own default
+    // logo. Same packaged/dev resolution as slackReplyScriptPath() above.
+    icon: app.isPackaged ? undefined : join(app.getAppPath(), 'build', 'icon.png'),
     backgroundColor: '#FFF8E7',
     titleBarStyle: 'hiddenInset',
     show: false,
@@ -2328,7 +2486,7 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
       // A floor's close is NOT an app quit — confirm only its OWN terminals,
       // via a self-contained native dialog (no renderer modal). Confirming lets
       // the window close; its PTYs are stopped in the 'closed' handler.
-      const owned = ptyManager.countByOwner(wc);
+      const owned = ptyManager.countByOwner(wc) + remoteManager.countByOwner(wc);
       if (owned > 0) {
         const choice = dialog.showMessageBoxSync(win, {
           type: 'warning',
@@ -2343,7 +2501,7 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
       return;
     }
     // Primary window: existing app-wide quit warning (renderer modal).
-    const count = ptyManager.list().length;
+    const count = ptyManager.list().length + remoteManager.list().length;
     if (count === 0) return;
     e.preventDefault();
     win.focus();
@@ -2351,7 +2509,50 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
   });
 
   // The primary is the default PTY sink; floors route purely by per-PTY owner.
-  if (!isFloor) ptyManager.attachWebContents(wc);
+  if (!isFloor) { ptyManager.attachWebContents(wc); remoteManager.attachWebContents(wc); }
+
+  // ─── Renderer death recovery (Phase 0 hardening) ───────────────────────────
+  // `render-process-gone` fires when THIS window's renderer process dies
+  // outright (OOM, a GPU-driver crash taking the tab with it, `chrome://crash`)
+  // — distinct from a JS exception, which React's error boundaries already
+  // catch. Nothing handled this before: the window just sat there, blank,
+  // forever. `clean-exit` is an intentional shutdown (ours, during quit) and is
+  // logged but never reloaded — reloading a window that is on its way down
+  // would fight the quit sequence.
+  //
+  // The reload is bounded: a window that dies again within CRASH_RESET_MS of
+  // the reload counts against the same crash streak (cleared timer, no reset),
+  // so a renderer that crashes on load every time cannot loop forever. Once the
+  // streak passes MAX_AUTO_RELOADS, stop reloading and say so with a native
+  // dialog instead of silently giving up.
+  const MAX_AUTO_RELOADS = 3;
+  const CRASH_RESET_MS = 60_000;
+  let crashStreak = 0;
+  let crashResetTimer: NodeJS.Timeout | null = null;
+  const clearCrashResetTimer = () => { if (crashResetTimer) { clearTimeout(crashResetTimer); crashResetTimer = null; } };
+
+  win.webContents.on('render-process-gone', (_evt, details) => {
+    logProcessGone('render-process-gone',
+      `reason=${details.reason} exitCode=${details.exitCode}${isFloor ? ' floor=true' : ''}`);
+    if (details.reason === 'clean-exit') return;
+    if (win.isDestroyed()) return;
+
+    clearCrashResetTimer();
+    crashStreak += 1;
+    if (crashStreak > MAX_AUTO_RELOADS) {
+      dialog.showErrorBox(
+        'The Hive crashed repeatedly',
+        `This window's renderer crashed ${crashStreak} times in a row (last reason: ${details.reason}). ` +
+        'Automatic recovery has stopped to avoid a reload loop — please restart the app. ' +
+        `Details were written to ${join(app.getPath('userData'), 'renderer-errors.log')}.`
+      );
+      return;
+    }
+    try { win.webContents.reload(); } catch { /* window may already be gone */ }
+    // Only a full CRASH_RESET_MS of uninterrupted life clears the streak — a
+    // crash before this fires clears it via clearCrashResetTimer() above instead.
+    crashResetTimer = setTimeout(() => { crashStreak = 0; crashResetTimer = null; }, CRASH_RESET_MS);
+  });
 
   // A main-frame reload unmounts the renderer's hire subscription — queue again
   // until the fresh renderer drains. Guard on isMainFrame: a stray sub-frame
@@ -2369,9 +2570,13 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
 
   win.on('closed', () => {
     allWindows.delete(win);
+    clearCrashResetTimer();
     // A closed floor must not leave its terminals running headless. (Natural
     // onExit teardown — archive + worktree cleanup — still runs per PTY.)
-    if (isFloor) { try { ptyManager.killByOwner(wc); } catch { /* best-effort */ } }
+    if (isFloor) {
+      try { ptyManager.killByOwner(wc); } catch { /* best-effort */ }
+      try { remoteManager.killByOwner(wc); } catch { /* best-effort */ }
+    }
     if (mainWindow === win) {
       mainWindow = null;
       for (const w of allWindows) { if (!w.isDestroyed()) { mainWindow = w; break; } }
@@ -2506,7 +2711,7 @@ function findCodexHomeForSession(sessionId: string, siblingsRoot: string): strin
 
 /** Spawn options shared by the `pty:spawn` IPC handler and the god-triggered
  *  ephemeral-worker watcher. */
-type AgentSpawnOptions = SpawnOptions & { hive?: AgentMeta; isolate?: boolean; resume?: boolean; requireResume?: boolean; resumeSessionId?: string; provider?: AgentProvider; noAutoInstall?: boolean };
+type AgentSpawnOptions = SpawnOptions & { hive?: AgentMeta; isolate?: boolean; resume?: boolean; requireResume?: boolean; resumeSessionId?: string; provider?: AgentProvider; noAutoInstall?: boolean; remoteEnvironmentId?: string };
 
 /** Map a `ptyManager.spawn` failure string to the closed `agent_spawn_failed.reason`
  *  enum (analytics.ts). The two known strings come from PtyManager.spawn; anything
@@ -2535,6 +2740,18 @@ ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
  *  no renderer `evt`). `owner` is the window that should receive this PTY's output
  *  (null → the primary window). Behavior-identical to the prior inline handler. */
 async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null): Promise<{ ok: boolean; error?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string }> {
+  // ── REMOTE ENVIRONMENT (Phase 3b) — a whole different machine ───────────────
+  // Every step below this point is LOCAL-machine work: `~` expanded against THIS
+  // home, a `which` probe for the engine CLI on THIS PATH, git-worktree isolation
+  // of a repo on THIS disk, hive provisioning into THIS harnessHome. None of it
+  // is meaningful for a PTY that will run on another computer — and several parts
+  // are actively wrong there (a remote `~/dev/foo` must not become this user's
+  // home). So a remote spawn takes its own short path: resolve the environment,
+  // decrypt its pairing secret, hand the command to the daemon.
+  //
+  // Only reachable when the renderer explicitly names an environment, so the
+  // local path — which is virtually all usage — is byte-for-byte unchanged.
+  if (opts.remoteEnvironmentId) return spawnRemoteAgentCore(opts, opts.remoteEnvironmentId, owner);
   // ── cwd INGESTION — expand `~` exactly once, here ───────────────────────────
   // This is the single door every agent spawn comes through (`pty:spawn` IPC and
   // the god-triggered ephemeral-worker watcher), so it is where a user-typed
@@ -2940,16 +3157,76 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // record matches what the registry and the PTY actually used.
   return { ...res, cwd: opts.cwd, ...(worktreePath ? { worktreePath } : {}), ...(resumeNotFound ? { resumeNotFound: true } : {}), ...(didResume ? { resumed: true } : {}), ...(seedPrompt ? { seedPrompt } : {}) };
 }
+/** The remote counterpart of `spawnAgentCore`'s tail: no local resolution, no
+ *  worktree, no hive provisioning — just "start this command over there".
+ *
+ *  Kept as its own function rather than a set of `if (remote)` branches inside
+ *  spawnAgentCore for the same reason PtyManager keeps its shape: the local path
+ *  is the one that runs a thousand times a day, and it should not have to read
+ *  around a feature it never uses. Analytics fire with the same event names, so a
+ *  remote spawn still shows up in the activation funnel.
+ *
+ *  NOTE (first pass, deliberate): a remote agent is NOT hive-provisioned. The
+ *  hive lives on local disk, and an agent on another machine cannot read it, so
+ *  memory/mailbox/GOD routing are out of scope here — the same position the
+ *  "Externally managed" checkbox takes for local agents. */
+async function spawnRemoteAgentCore(
+  opts: AgentSpawnOptions,
+  envId: string,
+  owner: Electron.WebContents | null
+): Promise<{ ok: boolean; error?: string; cwd?: string }> {
+  const provider = inferAgentProvider(opts.command, opts.provider ?? opts.hive?.provider);
+  if (!opts.noAutoInstall) analytics.track('agent_spawn_attempted', { provider });
+  const env = remoteEnvironments.getEnvironment(envId);
+  if (!env) {
+    analytics.track('agent_spawn_failed', { provider, reason: 'spawn_error' });
+    return { ok: false, error: `unknown remote environment: ${envId}` };
+  }
+  // Decryption happens inside remoteEnvironments; the secret exists in this scope
+  // only long enough to be handed to the client, and is never logged or returned.
+  const creds = remoteEnvironments.credentialsFor(envId);
+  if (!creds) {
+    analytics.track('agent_spawn_failed', { provider, reason: 'spawn_error' });
+    return { ok: false, error: `no usable pairing secret for "${env.name}" — pair that machine again` };
+  }
+  const res = await remoteManager.spawn(
+    envId,
+    creds,
+    {
+      id: opts.id,
+      command: opts.command,
+      args: opts.args ?? [],
+      // A remote cwd is a path on THAT machine and must never be tilde-expanded
+      // or existence-checked here. Empty → the daemon falls back to its homedir.
+      cwd: opts.cwd?.trim() ? opts.cwd.trim() : undefined,
+      cols: opts.cols,
+      rows: opts.rows
+    },
+    owner
+  );
+  if (res.ok) analytics.track('agent_spawned', { provider });
+  else analytics.track('agent_spawn_failed', { provider, reason: spawnFailReason(res.error) });
+  syncKeepAwake();
+  return { ...res, cwd: opts.cwd };
+}
+
+// PTY control channels are id-routed: a remote session answers on exactly the
+// same `pty:*` channels as a local one, so the renderer never learns the
+// difference. `remoteManager.has(id)` is a Map lookup — the local path pays one
+// failed hash probe and is otherwise untouched.
 ipcMain.handle('pty:write', (_evt, id: string, data: string) => {
   if (typeof id !== 'string' || typeof data !== 'string') return { ok: false, error: 'invalid args' };
+  if (remoteManager.has(id)) return remoteManager.write(id, data);
   return ptyManager.write(id, data);
 });
 ipcMain.handle('pty:resize', (_evt, id: string, cols: number, rows: number) => {
   if (typeof id !== 'string' || typeof cols !== 'number' || typeof rows !== 'number') return { ok: false, error: 'invalid args' };
+  if (remoteManager.has(id)) return remoteManager.resize(id, cols, rows);
   return ptyManager.resize(id, cols, rows);
 });
 ipcMain.handle('pty:redraw', (_evt, id: string) => {
   if (typeof id !== 'string') return { ok: false, error: 'invalid id' };
+  if (remoteManager.has(id)) return remoteManager.redraw(id);
   return ptyManager.redraw(id);
 });
 ipcMain.handle('pty:kill', (_evt, id: string) => {
@@ -2957,11 +3234,11 @@ ipcMain.handle('pty:kill', (_evt, id: string) => {
   // Kill the process, then run the shared lifecycle teardown (archive the agent,
   // remove its isolated worktree, drop the maps). teardownPty is idempotent, so
   // node-pty firing onExit once the child actually dies is a harmless no-op.
-  const res = ptyManager.kill(id);
+  const res = remoteManager.has(id) ? remoteManager.kill(id) : ptyManager.kill(id);
   teardownPty(id);
   return res;
 });
-ipcMain.handle('pty:list', () => ptyManager.list());
+ipcMain.handle('pty:list', () => [...ptyManager.list(), ...remoteManager.list()]);
 
 // ─── IPC: analytics (the ONE renderer-facing seam) ──────────────────────────
 /** Count one human-sent message (TELEMETRY.md → `message_sent`). A COUNT, and
@@ -2993,6 +3270,28 @@ ipcMain.handle('app:copyToClipboard', (_evt, text: unknown) => {
   if (typeof text !== 'string') return { ok: false, error: 'invalid text' };
   try { clipboard.writeText(text); return { ok: true }; }
   catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
+});
+
+// ─── IPC: renderer crash reporting (Phase 0 hardening) ──────────────────────
+// See src/renderer/src/errorReporting.ts (the one call site every ErrorBoundary
+// and the global window.onerror/unhandledrejection hooks in main.tsx go
+// through) and src/main/rendererErrorLog.ts (the append-only file this writes
+// to). Validated loosely — this is a logging path, not a trust boundary, but a
+// malformed payload must still not throw and take the handler down.
+ipcMain.handle('app:logRendererError', (_evt, payload: unknown) => {
+  if (!payload || typeof payload !== 'object') return { ok: false };
+  const p = payload as Partial<RendererErrorPayload>;
+  if (typeof p.source !== 'string' || typeof p.message !== 'string') return { ok: false };
+  logRendererError({
+    source: p.source as RendererErrorPayload['source'],
+    message: p.message,
+    stack: typeof p.stack === 'string' ? p.stack : undefined,
+    componentStack: typeof p.componentStack === 'string' ? p.componentStack : undefined,
+    url: typeof p.url === 'string' ? p.url : undefined,
+    line: typeof p.line === 'number' ? p.line : undefined,
+    column: typeof p.column === 'number' ? p.column : undefined
+  });
+  return { ok: true };
 });
 ipcMain.handle('app:readClipboard', () => {
   try { return clipboard.readText(); } catch { return ''; }
@@ -3104,6 +3403,59 @@ ipcMain.handle('integrations:test', async (_evt, payload: unknown) => {
   }
 });
 
+// ─── IPC: remote environments (Phase 3b — paired remote PTY daemons) ─────────
+// The SAME write-only secret contract as integrations above: pairing is the only
+// moment a secret exists in this process, it goes straight into the encrypted
+// store, and NOTHING on this surface can read it back. `remote:pair` answers with
+// the metadata record only; `remote:list` returns exactly what config holds.
+ipcMain.handle('remote:pair', async (_evt, payload: unknown) => {
+  const p = (payload ?? {}) as { host?: unknown; port?: unknown; code?: unknown; name?: unknown };
+  if (!isValidRemoteHost(p.host)) return { ok: false, error: 'a host or IP is required' };
+  const port = typeof p.port === 'string' ? Number(p.port) : p.port;
+  if (!isValidRemotePort(port)) return { ok: false, error: 'a port between 1 and 65535 is required' };
+  if (typeof p.code !== 'string' || !p.code.trim()) return { ok: false, error: 'the pairing code is required' };
+  const name = typeof p.name === 'string' && p.name.trim() ? p.name.trim() : p.host;
+
+  const paired = await pairWithRemoteDaemon({
+    host: p.host,
+    port,
+    code: p.code.trim(),
+    // The daemon logs this name; it is a label for the OPERATOR's machine list.
+    name: `${name} (The Hive)`
+  });
+  if (!paired.ok) return { ok: false, error: paired.error };
+
+  const id = `remote-${randomUUID()}`;
+  // Store the secret FIRST and fail the whole pairing if it cannot be stored
+  // encrypted (safeStorage unavailable): a config entry we can never authenticate
+  // with is worse than no entry — it looks paired and silently never connects.
+  const stored = remoteEnvironments.setRemoteSecret(id, paired.secret);
+  if (!stored.ok) return { ok: false, error: stored.error ?? 'could not store the pairing secret' };
+
+  const added = remoteEnvironments.addEnvironment({
+    id,
+    name,
+    host: p.host,
+    port,
+    clientId: paired.clientId,
+    pairedAt: paired.pairedAt
+  });
+  if (!added.ok) {
+    remoteEnvironments.deleteRemoteSecret(id); // never orphan a secret
+    return { ok: false, error: added.error };
+  }
+  console.log(`[remote] paired "${added.env.name}" at ${added.env.host}:${added.env.port} as ${added.env.clientId}`);
+  return { ok: true, environment: added.env };
+});
+ipcMain.handle('remote:list', (): RemoteEnvironment[] => remoteEnvironments.listEnvironments());
+ipcMain.handle('remote:remove', (_evt, payload: unknown) => {
+  const id = typeof payload === 'string' ? payload : (payload as { id?: unknown } | null)?.id;
+  if (typeof id !== 'string' || !id) return { ok: false, error: 'id required' };
+  // Drop the live connection before the credentials that authenticate it.
+  try { remoteManager.disconnect(id); } catch { /* best-effort */ }
+  return remoteEnvironments.removeEnvironment(id);
+});
+
 // ─── IPC: config ────────────────────────────────────────────────────────────
 ipcMain.handle('config:get', (): HarnessConfig => readConfig());
 ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
@@ -3196,14 +3548,22 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { stopWebhookServer(); } catch (e) { console.error('[changeHome] webhook.stop:', e); }
   try { memory.stop(); } catch (e) { console.error('[changeHome] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[changeHome] reflector.stop:', e); }
+  try { officeChat.stop(); } catch (e) { console.error('[changeHome] officeChat.stop:', e); }
+  try { officeVoice.stop(); } catch (e) { console.error('[changeHome] officeVoice.stop:', e); }
+  // Relationship writes are debounced by 2s, and a move copies the file below —
+  // so settle the book against the OLD home before anything is read off disk,
+  // or the last couple of seconds of history never make the trip.
+  try { officeRel.flush(); } catch (e) { console.error('[changeHome] officeRel.flush:', e); }
 
   if (mode === 'move' && oldHome) {
     try {
       // roster.json + its backups ride along with hive/palace: the roster is the
       // renderer's half of the same state, and leaving it behind would move the
       // agents' sessions and memory to the new home while their names, notes and
-      // worktree paths stayed at the old one.
-      for (const sub of ['hive', 'palace', 'roster.json', 'roster-backups']) {
+      // worktree paths stayed at the old one. office-relationships.json is the
+      // same deal — it lives in the home ROOT and is keyed by the very agent ids
+      // being moved, so leaving it behind abandons the whole floor's history.
+      for (const sub of ['hive', 'palace', 'roster.json', 'roster-backups', REL_FILE_NAME]) {
         const src = join(oldHome, sub);
         if (!existsSync(src)) continue;
         // cpSync copies the whole tree incl. .git and is cross-device safe (unlike
@@ -3227,6 +3587,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   allowQuit = true;
   writeConfig({ harnessHome: newHome });
   try { ptyManager.killAll(); } catch (e) { console.error('[changeHome] killAll:', e); }
+  try { remoteManager.killAll(); } catch (e) { console.error("[changeHome] remote killAll:", e); }
   app.relaunch();
   app.exit(0);
   return { ok: true as const }; // unreachable (process exits) — typed for the renderer
@@ -3689,9 +4050,16 @@ function teardownAndQuit(): void {
   try { stopWebhookServer(); } catch (e) { console.error('[quit] webhook.stop:', e); }
   try { memory.stop(); } catch (e) { console.error('[quit] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[quit] reflector.stop:', e); }
+  try { officeChat.stop(); } catch (e) { console.error('[quit] officeChat.stop:', e); }
+  try { officeVoice.stop(); } catch (e) { console.error('[quit] officeVoice.stop:', e); }
+  // The relationship book defers every write by 2s, so anything noted in the
+  // last couple of seconds (a café break, a routed handoff) only exists in
+  // memory at this point — flush it or the quit silently eats it.
+  try { officeRel.flush(); } catch (e) { console.error('[quit] officeRel.flush:', e); }
   try { persist.close(); } catch (e) { console.error('[quit] persist.close:', e); }
   try { hive.stopAllProxyBridges(); } catch (e) { console.error('[quit] stopAllProxyBridges:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[quit] killAll:', e); }
+  try { remoteManager.killAll(); } catch (e) { console.error("[quit] remote killAll:", e); }
   app.quit();
 }
 ipcMain.handle('app:confirmClose', () => {
@@ -3749,8 +4117,11 @@ ipcMain.handle('app:resetAll', () => {
   try { stopSlackServer(); } catch (e) { console.error('[reset] slack.stop:', e); }
   try { memory.stop(); } catch (e) { console.error('[reset] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
+  try { officeChat.stop(); } catch (e) { console.error('[reset] officeChat.stop:', e); }
+  try { officeVoice.stop(); } catch (e) { console.error('[reset] officeVoice.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
+  try { remoteManager.killAll(); } catch (e) { console.error("[reset] remote killAll:", e); }
   try { hive.removeExposedCodexData(); } catch (e) { console.error('[reset] removeExposedCodexData:', e); }
   // Erase the hive (Michael's + every agent's memory, inboxes, tasks, board,
   // git history) and the semantic-memory palace. Only these harness-created
@@ -3766,6 +4137,13 @@ ipcMain.handle('app:resetAll', () => {
   // sessions and memory are gone.
   try { roster.archive(); }
   catch (e) { console.error('[reset] roster.archive:', e); }
+  // Same argument for the relationship book: its rows are keyed by the agent ids
+  // just retired, so leaving office-relationships.json in the home root would
+  // let re-selecting this folder resurrect a floor's worth of warmth, tension
+  // and history attached to agents that no longer exist. purge() also cancels
+  // the pending debounced save, so nothing rewrites the file we just removed.
+  try { officeRel.purge(); }
+  catch (e) { console.error('[reset] officeRel.purge:', e); }
   // Back to first-run defaults, then relaunch clean so all in-memory services
   // re-bootstrap from scratch and the renderer lands on onboarding.
   resetConfig();

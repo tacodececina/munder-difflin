@@ -3,15 +3,29 @@ import { useTranslation } from 'react-i18next';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { useRtl } from '@/i18n/useDirection';
+import { useStore } from '@/store/store';
+import { getCustomCharacter, isCustomCharacterId } from '@/scene/office/customCast';
 
 // Derive the message shape from the preload-exposed API so the renderer never
 // reaches across project boundaries for a type (window.cth is globally typed).
 type HiveMessage = Awaited<ReturnType<Window['cth']['hiveInbox']>>[number];
+type VoiceItem = Parameters<Window['cth']['officeVoiceRequest']>[0][number];
 
 /**
  * Human-readable threaded view of an agent's hive inbox. Groups messages by
  * `conversation`, renders each as a collapsible thread, and lets the human reply
  * inline (sent as the "human" sender via window.cth.hiveSend).
+ *
+ * PERSONA FLAVOUR (experimental, behind "Office chatter"). The office floor has
+ * always known which character fronts each agent; these threads never did — every
+ * handoff read like every other handoff. With the flag on, each message can carry
+ * a short in-character ASIDE from its sender, written in the background by the
+ * same brew-ahead director that writes the café dialogue (src/main/officeVoice.ts).
+ *
+ * The aside is strictly ADDITIVE: `m.subject` and `m.body` are still rendered
+ * verbatim, exactly as the sending agent wrote them, and nothing here can alter
+ * the stored message. With the flag off, `asides` stays empty and this panel is
+ * byte-for-byte the panel it has always been.
  */
 export interface ThreadsPanelProps {
   agentId: string;
@@ -47,6 +61,14 @@ function groupThreads(msgs: HiveMessage[], noSubject: string): Thread[] {
     });
 }
 
+/** The display name of the Office character fronting an agent. Custom characters
+ *  are stored as `custom:<uuid>` and carry their own label. */
+function characterLabel(character: string | undefined): string {
+  if (!character) return '';
+  if (isCustomCharacterId(character)) return getCustomCharacter(character)?.displayName ?? '';
+  return character;
+}
+
 export function ThreadsPanel({ agentId }: ThreadsPanelProps) {
   const { t } = useTranslation();
   const rtl = useRtl();
@@ -54,19 +76,75 @@ export function ThreadsPanel({ agentId }: ThreadsPanelProps) {
   const [openThreads, setOpenThreads] = useState<Record<string, boolean>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // message id → the sender's in-character aside. Empty unless the experimental
+  // flag is on; never used for anything but display.
+  const [asides, setAsides] = useState<Record<string, string>>({});
+  const [flavorOn, setFlavorOn] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    const apply = (on: boolean): void => {
+      if (!alive) return;
+      setFlavorOn(on);
+      // A toggle-off must drop what was already written, not leave stale
+      // model-authored text sitting next to real work messages.
+      if (!on) setAsides({});
+    };
+    window.cth.getConfig()
+      .then((c) => apply(c.officeChatterEnabled === true))
+      .catch(() => { /* flag stays off */ });
+    const unsub = window.cth.onConfigChanged((c) => apply(c.officeChatterEnabled === true));
+    return () => { alive = false; unsub(); };
+  }, []);
 
   useEffect(() => {
     let alive = true;
     const load = async () => {
       try {
         const inbox = await window.cth.hiveInbox(agentId);
-        if (alive) setMessages(inbox);
+        if (!alive) return;
+        setMessages(inbox);
+        if (flavorOn) await loadFlavor(inbox);
       } catch { /* keep last good state */ }
+    };
+    // Ask for whatever asides are already written for the messages on screen and
+    // let the director decide whether to brew one more. Newest first, so the
+    // single background brew is spent on the message the human is looking at.
+    const loadFlavor = async (inbox: HiveMessage[]): Promise<void> => {
+      if (!window.cth.officeVoiceRequest) return; // stale preload bridge
+      // Read the roster imperatively: this panel has no reason to re-render every
+      // time an unrelated agent's live status ticks over.
+      const roster = useStore.getState().agents;
+      const items: VoiceItem[] = [];
+      for (const m of [...inbox].sort((a, b) => (a.created_at < b.created_at ? 1 : -1))) {
+        const sender = roster.find((a) => a.id === m.from);
+        if (!sender) continue; // 'human' and departed agents have no soul on the floor
+        items.push({
+          id: m.id,
+          act: m.act,
+          // SUBJECT only — bodies carry code, paths and secrets and are never
+          // handed to the flavour director.
+          subject: m.subject,
+          soul: {
+            id: sender.id,
+            name: sender.name,
+            character: characterLabel(sender.character),
+            role: sender.description || '',
+            status: sender.status
+          }
+        });
+      }
+      if (items.length === 0) return;
+      try {
+        const res = await window.cth.officeVoiceRequest(items);
+        if (!alive || !res?.asides) return;
+        setAsides((prev) => ({ ...prev, ...res.asides }));
+      } catch { /* flavour is optional; the messages stand on their own */ }
     };
     load();
     const timer = setInterval(load, 3000);
     return () => { alive = false; clearInterval(timer); };
-  }, [agentId]);
+  }, [agentId, flavorOn]);
 
   const threads = useMemo(() => groupThreads(messages, t('threads.noSubject')), [messages, t]);
 
@@ -119,6 +197,8 @@ export function ThreadsPanel({ agentId }: ThreadsPanelProps) {
                   const isExp = expanded[m.id];
                   const long = m.body.length > 120;
                   const shown = isExp || !long ? m.body : m.body.slice(0, 120) + '…';
+                  // Flavour only — `shown` above is still the message verbatim.
+                  const aside = flavorOn ? asides[m.id] : undefined;
                   return (
                     <div key={m.id} style={{ borderLeft: '2px solid var(--cth-ink-100)', paddingLeft: 8 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -141,6 +221,24 @@ export function ThreadsPanel({ agentId }: ThreadsPanelProps) {
                           >{isExp ? t('threads.less') : t('threads.more')}</button>
                         )}
                       </div>
+                      {aside && (
+                        // The sender's in-character aside. Deliberately set apart
+                        // from the message: dimmer, italic, and prefixed with the
+                        // same golden star the floor uses for model-written lines,
+                        // so nobody can mistake it for something the agent
+                        // actually sent.
+                        <div
+                          dir={rtl ? 'auto' : undefined}
+                          style={{
+                            fontFamily: 'var(--cth-font-ui)', fontSize: 12, lineHeight: '16px',
+                            color: 'var(--cth-ink-500)', fontStyle: 'italic', marginTop: 3,
+                            display: 'flex', gap: 5, alignItems: 'baseline'
+                          }}
+                        >
+                          <span aria-hidden="true" style={{ color: 'var(--cth-lemon)', fontStyle: 'normal' }}>✦</span>
+                          <span style={{ minWidth: 0, wordBreak: 'break-word' }}>{aside}</span>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

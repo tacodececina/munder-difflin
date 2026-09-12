@@ -13,6 +13,7 @@ import { defaultMcpDefaults } from '../shared/mcpCatalog';
 import { MAX_AGENT_TOKEN_CAP } from '../shared/tokenCaps';
 import { expandTilde, normalizeHiveHome } from './fs';
 import type { IntegrationRecord } from '../shared/integrations';
+import type { RemoteEnvironment } from '../shared/remoteEnvironment';
 import {
   DEFAULT_CONTEXT_TRIGGER,
   DEFAULT_ORG_TRIGGER,
@@ -264,6 +265,13 @@ export interface HarnessConfig {
    *  handle, never the secret value (secrets live encrypted in a separate file via
    *  Electron safeStorage — see src/main/integrations.ts). Default []. */
   integrations?: IntegrationRecord[];
+  /** Paired remote environments (Phase 3b) — machines running the standalone
+   *  remote PTY daemon (`remote-daemon/`) that agents can be spawned on instead
+   *  of this one. METADATA ONLY, exactly like `integrations` above: each record
+   *  carries the daemon-issued `clientId`, never the HMAC secret minted at
+   *  pairing (that lives encrypted in a separate file via Electron safeStorage —
+   *  see src/main/remoteEnvironments.ts). Default []. */
+  remoteEnvironments?: RemoteEnvironment[];
   /** Default per-worker TOTAL-token cap (input+output+cache) applied to every
    *  god-triggered ephemeral worker; a worker's own spawn-request `tokenCap`
    *  overrides it. When the effective cap is exceeded the worker is reaped (its
@@ -314,8 +322,26 @@ export interface HarnessConfig {
   tvShowOffices?: boolean;
   /** Which office map/cast theme the pixel office renders. Only honored when
    *  `tvShowOffices` is on; otherwise the office theme is used. Unbuilt show
-   *  themes fall back to 'office' in the loader. */
-  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts';
+   *  themes fall back to 'office' in the loader. `custom:<uuid>` (Phase 4)
+   *  identifies a user-imported theme bundle — see the renderer's
+   *  customThemes.ts / themeRegistry.ts ThemeId, which this type mirrors
+   *  (main cannot import renderer code, so the union is duplicated here). */
+  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts' | `custom:${string}`;
+  /** EXPERIMENT: live LLM-generated café dialogue between agents (officeChat.ts).
+   *  When on, pair chats on the floor are written by a hidden Claude session from
+   *  each agent's persona + persistent relationship state instead of the canned
+   *  pools in cafeteriaLines.ts. Default OFF — flag guards both the model spend
+   *  and the experiment itself (easy A/B against canned lines). */
+  officeChatterEnabled?: boolean;
+  /** Model the dialogue director brews ROUTINE chatter with. Default is a
+   *  Haiku-class model: most break-room exchanges are wallpaper and must cost
+   *  like wallpaper. See officeChatterMilestoneModel for the exceptions. */
+  officeChatterModel?: string;
+  /** Model reserved for MILESTONE exchanges — a pair's first ever encounter, or
+   *  a relationship axis crossing a band boundary (officeChat.ts's `tierFor`).
+   *  Default 'claude-fable-5': the experiment wants Fable writing the moments
+   *  that actually change how two agents read each other, not every coffee. */
+  officeChatterMilestoneModel?: string;
   /** Per-CLI-provider local/self-hosted base URL (Ollama/LM Studio/vLLM, …) for the
    *  OpenCode/Crush/pi/qwen engines; applied at spawn (config-injection or proxy
    *  upstream). API KEYS are NOT stored here — they live write-only in the secret
@@ -417,6 +443,29 @@ export interface HarnessConfig {
   reflectMinBytes?: number;
 }
 
+// ─── Office chatter model tiering ───────────────────────────────────────────
+/** Routine break-room chatter: cheap by construction. */
+export const ROUTINE_CHATTER_MODEL = 'claude-haiku-4-5-20251001';
+/** First encounters + relationship threshold crossings only — see officeChat.ts. */
+export const MILESTONE_CHATTER_MODEL = 'claude-fable-5';
+/** The pre-tiering default, when EVERY line was brewed with Fable. `writeConfig`
+ *  persists the whole merged config, so any install that ever saved a setting has
+ *  this value baked into `officeChatterModel`, indistinguishable from a deliberate
+ *  choice. The field has never been exposed in any picker, so it can only be the
+ *  stale default — treat it as unset so upgrades actually land on the cheap tier.
+ *  A config that genuinely wants Fable for routine chatter can name any other
+ *  Fable alias, and the milestone tier is Fable regardless. */
+const LEGACY_CHATTER_MODEL = 'claude-fable-5';
+
+/** The model the dialogue director should brew with at a given spend tier. */
+export function chatterModelFor(cfg: HarnessConfig, tier: 'routine' | 'milestone'): string {
+  if (tier === 'milestone') {
+    return cfg.officeChatterMilestoneModel?.trim() || MILESTONE_CHATTER_MODEL;
+  }
+  const routine = cfg.officeChatterModel?.trim();
+  return !routine || routine === LEGACY_CHATTER_MODEL ? ROUTINE_CHATTER_MODEL : routine;
+}
+
 const DEFAULTS: HarnessConfig = {
   onboardingComplete: false,
   harnessHome: null,
@@ -437,6 +486,7 @@ const DEFAULTS: HarnessConfig = {
   maxConcurrentWorkers: 4,
   workerIdleTimeoutMinutes: 20,
   integrations: [],
+  remoteEnvironments: [],
   defaultWorkerTokenCap: 0, // 0 = unlimited (human directive: NO per-worker cap)
   semanticMemory: true,
   embeddingModel: 'minilm',
@@ -448,6 +498,9 @@ const DEFAULTS: HarnessConfig = {
   multiWindow: true,
   tvShowOffices: false,
   officeTheme: 'office',
+  officeChatterEnabled: false,
+  officeChatterModel: ROUTINE_CHATTER_MODEL,
+  officeChatterMilestoneModel: MILESTONE_CHATTER_MODEL,
   slackEnabled: false,
   slackSigningSecret: undefined,
   slackBotToken: undefined,

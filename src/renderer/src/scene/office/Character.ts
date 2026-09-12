@@ -11,7 +11,7 @@ import { ThoughtBubble } from './ThoughtBubble';
 // cover our status model.
 
 export type CharacterAnimation = 'idle' | 'walk' | 'type' | 'read';
-export type StatusGlyph = 'none' | 'blocked' | 'success' | 'compacting' | 'looping';
+export type StatusGlyph = 'none' | 'blocked' | 'waiting' | 'success' | 'compacting' | 'looping';
 
 function lerp(a: number, b: number, t: number): number {
   const tt = Math.min(Math.max(t, 0), 1);
@@ -85,6 +85,11 @@ export class Character {
   private wandering = false;
   private idleTimer = 0;
   private idleWanderDelay = 1 + Math.random() * 3;
+  /** Optional social lean on the random walk: a tile to drift toward and how
+   *  often to actually do it. Null = the plain uniform roam (see updateWander).
+   *  Only ever set by the floor's idle-affinity director, which itself only
+   *  runs behind `officeChatterEnabled`. */
+  private wanderPull: { x: number; y: number; strength: number } | null = null;
   // Idle 30/30 loop state (see constants above). Active only between tasks.
   private idleLoop = false;
   private idleLoopPhase: 'linger' | 'toDesk' | 'resting' = 'linger';
@@ -300,6 +305,18 @@ export class Character {
     this.idleLoopPhase = 'linger';
     this.idleLoopTimer = 0;
     this.beginWander();
+  }
+
+  /** Lean this agent's idle roaming toward `tile` (a colleague it reads warmly),
+   *  or clear the lean with `null`. `strength` is the share of wander waypoints
+   *  that get steered — the rest stay random, so the drift reads as gravitating
+   *  toward someone rather than as beelining at them.
+   *
+   *  With no pull set, `updateWander` runs byte-for-byte the code it always ran
+   *  (it does not even draw a random number for the branch), so the office with
+   *  the chatter flag off behaves exactly as before. */
+  setWanderPull(tile: { x: number; y: number } | null, strength = 0.6): void {
+    this.wanderPull = tile ? { x: tile.x, y: tile.y, strength } : null;
   }
 
   /** Low-level: start roaming the floor now. Drives the linger phase of the
@@ -749,6 +766,13 @@ export class Character {
       g.rect(-0.5, yTop - s, 1, s * 2).fill(0xffd93d);
       g.rect(-s, yTop - 0.5, s * 2, 1).fill(0xffd93d);
       if (this.glyphElapsed > 0.9) this.setStatusGlyph('none');
+    } else if (this.statusGlyph === 'waiting') {
+      // Parked pending a peer/god — distinct from the red "!" so "stalled on
+      // someone else" doesn't read as "stalled on you". A slow 2-dot blink,
+      // cheaper than the looping ring since this is a passive state.
+      const idx = Math.floor(this.glyphElapsed * 2) % 2;
+      g.rect(-3, yTop + 2, 2, 2).fill(idx === 0 ? 0x8fa6c9 : 0x4d5b73);
+      g.rect(1, yTop + 2, 2, 2).fill(idx === 1 ? 0x8fa6c9 : 0x4d5b73);
     } else if (this.statusGlyph === 'compacting') {
       // #5C — violet box that rhythmically "packs down" (boxing up context).
       const p = (Math.sin(this.glyphElapsed * 6) + 1) / 2; // 0..1
@@ -858,15 +882,37 @@ export class Character {
     // Pick a nearby walkable tile and stroll to it.
     const cur = this.getTilePosition();
     const range = 6;
+    // Social lean: when the floor has named someone this agent gravitates
+    // toward, sample the SAME random candidates and take the one that closes
+    // the distance instead of the first that happens to be walkable. The
+    // candidate set is unchanged, so the agent still wanders its own corner of
+    // the office — it just keeps ending up on the side of it where its friend
+    // is. `strength` leaves the rest of the waypoints purely random.
+    const pull = this.wanderPull;
+    const biased = !!pull && Math.random() < pull.strength;
+    let best: { x: number; y: number } | null = null;
+    let bestDist = Infinity;
     for (let attempt = 0; attempt < 14; attempt++) {
       const tx = cur.x + Math.floor(Math.random() * range * 2) - range;
       const ty = cur.y + Math.floor(Math.random() * range * 2) - range;
       if ((tx !== cur.x || ty !== cur.y) && this.mapRenderer.isWalkable(tx, ty)) {
-        const wasWandering = this.wandering;
-        this.moveTo({ x: tx, y: ty });   // moveTo() leaves state='walk'
-        this.wandering = wasWandering;   // keep wandering through the walk
-        return;
+        if (!biased) {
+          const wasWandering = this.wandering;
+          this.moveTo({ x: tx, y: ty });   // moveTo() leaves state='walk'
+          this.wandering = wasWandering;   // keep wandering through the walk
+          return;
+        }
+        // Avatars don't block each other, so "closest" has to exclude the
+        // colleague's own tile or two friends end up standing inside one sprite.
+        if (tx === pull!.x && ty === pull!.y) continue;
+        const d = Math.hypot(tx - pull!.x, ty - pull!.y);
+        if (d < bestDist) { bestDist = d; best = { x: tx, y: ty }; }
       }
+    }
+    if (best) {
+      const wasWandering = this.wandering;
+      this.moveTo(best);
+      this.wandering = wasWandering;
     }
   }
 

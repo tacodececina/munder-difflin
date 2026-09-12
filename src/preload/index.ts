@@ -4,6 +4,8 @@ import type { HireManifest } from '../shared/hire';
 export type { HireManifest } from '../shared/hire';
 import type { IntegrationRecord, IntegrationTemplate } from '../shared/integrations';
 export type { IntegrationRecord, IntegrationTemplate } from '../shared/integrations';
+import type { RemoteEnvironment } from '../shared/remoteEnvironment';
+export type { RemoteEnvironment } from '../shared/remoteEnvironment';
 import type { UpdateStatus } from '../shared/updateState';
 export type { UpdateStatus } from '../shared/updateState';
 import type { ToolStatus } from '../shared/toolCatalog';
@@ -12,6 +14,8 @@ import type { HeroPayload } from '../shared/heroPayload';
 export type { HeroPayload } from '../shared/heroPayload';
 import type { HookEvent } from '../shared/hookEvents';
 export type { HookEvent } from '../shared/hookEvents';
+import type { RendererErrorPayload } from '../shared/rendererErrors';
+export type { RendererErrorPayload } from '../shared/rendererErrors';
 import type { LocalSkill, CatalogSkill } from '../main/skills';
 export type { LocalSkill, CatalogSkill } from '../main/skills';
 import type {
@@ -174,6 +178,58 @@ export interface HiveTask {
  *  the envelope-handoff animation on the office floor. `needsHuman` is set when
  *  the sender aimed at "human" (now routed to the god proxy) — cosmetic tint
  *  only; there is no approval queue. */
+/** One DIRECTED edge's decayed relationship state — how `from` reads `to`
+ *  (mirrors src/main/officeRel.ts). The reverse edge is a separate row and can
+ *  hold completely different numbers. */
+export interface OfficeRelSummary {
+  from: string;
+  to: string;
+  warmth: number;
+  tension: number;
+  familiarity: number;
+  interactions: number;
+  flavor: string;
+}
+
+/** A persona handed to the dialogue director (mirrors src/main/officeChat.ts). */
+export interface OfficeChatPersona {
+  id: string;
+  name: string;
+  character: string;
+  role: string;
+  status: string;
+}
+
+export interface OfficeChatRelView {
+  warmth: number; tension: number; familiarity: number; flavor: string;
+}
+
+export interface OfficeChatResult {
+  lines: string[] | null;
+  /** How persona `a` reads `b`. */
+  rel: OfficeChatRelView;
+  /** How persona `b` reads `a` — the other direction, independently tracked. */
+  relBack: OfficeChatRelView;
+}
+
+/** One real hive message submitted for persona flavour, plus the soul of whoever
+ *  SENT it (mirrors VoiceFlavorItem in src/main/officeVoice.ts). Only the SUBJECT
+ *  crosses — bodies are never sent for flavouring. */
+export interface OfficeVoiceItem {
+  /** The hive message id — what the aside is cached against. */
+  id: string;
+  act: HiveMessage['act'] | string;
+  subject: string;
+  soul: OfficeChatPersona;
+}
+
+export interface OfficeVoiceResult {
+  /** message id → a short in-character aside, shown BESIDE the message. Sparse:
+   *  only messages already written appear, and the message itself is never
+   *  altered by this. */
+  asides: Record<string, string>;
+}
+
 export interface HiveRouteEvent {
   id: string;
   from: string;
@@ -221,6 +277,15 @@ export interface SpawnPtyOptions {
    *  main process seeds that session's `.jsonl` into the target cwd's project dir
    *  (copying it from wherever it lives) and launches `claude --resume <id>`. */
   resumeSessionId?: string;
+  /** Run this agent on a PAIRED REMOTE MACHINE (Phase 3b) instead of this one.
+   *
+   *  Omitted/undefined = local, which is what every existing caller already gets.
+   *  When set, `cwd` is a path on THAT machine (never tilde-expanded or checked
+   *  for existence here), and main hands the command to that environment's remote
+   *  PTY daemon over Tailscale. Output still arrives on `pty:data:<id>`, so the
+   *  terminal is identical. `isolate` / `resume` are local-disk operations and do
+   *  not apply on the remote path. */
+  remoteEnvironmentId?: string;
 }
 
 export interface PtyExit { exitCode: number; signal?: number | undefined }
@@ -321,8 +386,18 @@ export interface HarnessConfig {
   terminalTheme?: 'light' | 'dark';
   /** TV-show office themes feature flag (Settings picker + switch flow). Default OFF. */
   tvShowOffices?: boolean;
-  /** Active office map/cast theme (honored only when tvShowOffices is on). */
-  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts';
+  /** Active office map/cast theme (honored only when tvShowOffices is on).
+   *  `custom:<uuid>` (Phase 4) identifies a user-imported theme bundle —
+   *  mirrors main + renderer HarnessConfig's officeTheme (see themeRegistry.ts's ThemeId). */
+  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts' | `custom:${string}`;
+  /** EXPERIMENT: live LLM-generated café dialogue (default OFF). Mirrors main +
+   *  renderer HarnessConfig — see src/main/officeChat.ts. */
+  officeChatterEnabled?: boolean;
+  /** Model for ROUTINE brewed chatter (default: a Haiku-class model). */
+  officeChatterModel?: string;
+  /** Model for MILESTONE exchanges — first encounter / relationship threshold
+   *  crossing (default 'claude-fable-5'). */
+  officeChatterMilestoneModel?: string;
   /** Per-CLI-provider local/self-hosted base URL (Ollama/LM Studio/vLLM, …) for the
    *  OpenCode/Crush/pi/qwen engines; applied at spawn. API KEYS are NOT stored here —
    *  they live write-only in the secret broker. */
@@ -633,6 +708,14 @@ const api = {
   // ─── Clipboard ─────────────────────────────────────────────────────────────
   copyToClipboard: (text: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('app:copyToClipboard', text),
+
+  // ─── Renderer crash reporting (Phase 0 hardening) ───────────────────────────
+  /** Ship an error-boundary catch, a bare `window.onerror`, or an unhandled
+   *  rejection to main for durable logging (userData/renderer-errors.log —
+   *  see src/main/rendererErrorLog.ts). Fire-and-forget from the caller's side;
+   *  always resolves, never rejects. */
+  logRendererError: (payload: RendererErrorPayload): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('app:logRendererError', payload),
   /** Read the system clipboard as plain text ('' when empty/unreadable). */
   readClipboard: (): Promise<string> =>
     ipcRenderer.invoke('app:readClipboard'),
@@ -759,6 +842,34 @@ const api = {
     ipcRenderer.invoke('hive:setAgentHold', id, hold),
   hiveBoard: (): Promise<string> => ipcRenderer.invoke('hive:board'),
   hiveTasks: (): Promise<unknown> => ipcRenderer.invoke('hive:tasks'),
+  /** Office relationship experiment — every known DIRECTED edge's decayed
+   *  state. A settled pair appears twice, once per direction. */
+  officeRelSnapshot: (): Promise<OfficeRelSummary[]> =>
+    ipcRenderer.invoke('officeRel:snapshot'),
+  /** Report a scene-level pair event (shared break / check-in / celebration).
+   *  `from` is whoever INITIATED it, `to` whoever received it — the two sides
+   *  are folded into the edge differently, so the order is load-bearing. */
+  officeRelNote: (from: string, to: string, kind: string): Promise<void> =>
+    ipcRenderer.invoke('officeRel:note', from, to, kind),
+  /** Ask the dialogue director for a brewed exchange for this pair (instant;
+   *  null lines → play the canned pools). */
+  officeChatRequest: (req: {
+    a: OfficeChatPersona; b: OfficeChatPersona; mood: string; spot: string;
+  }): Promise<OfficeChatResult> =>
+    ipcRenderer.invoke('officeChat:request', req),
+  /** Give a generated exchange BACK when it arrived too late to be spoken (the
+   *  chat had already opened with canned lines). It is replayed the next time
+   *  `from` sits down with `to` — same direction, since the lines alternate
+   *  starting with `from` — instead of being thrown away. */
+  officeChatStash: (from: string, to: string, lines: string[]): Promise<void> =>
+    ipcRenderer.invoke('officeChat:stash', from, to, lines),
+  /** Ask the voice director for persona ASIDES on real work messages (instant;
+   *  a missing id just means "no flavour yet"). Order items most-interesting
+   *  first — at most one background brew is started, for the first bare item.
+   *  Returns empty while `officeChatterEnabled` is off. Purely additive: the
+   *  message's own subject/body are never modified by this call. */
+  officeVoiceRequest: (items: OfficeVoiceItem[]): Promise<OfficeVoiceResult> =>
+    ipcRenderer.invoke('officeVoice:request', { items }),
   hiveLog: (n?: number): Promise<unknown[]> => ipcRenderer.invoke('hive:log', n ?? 200),
   hiveMemory: (id: string): Promise<string> => ipcRenderer.invoke('hive:memory', id),
   hiveInbox: (id: string): Promise<HiveMessage[]> => ipcRenderer.invoke('hive:inbox', id),
@@ -1282,6 +1393,25 @@ const api = {
     ipcRenderer.invoke('integrations:remove', req),
   integrationsTest: (req: { id: string; path?: string }): Promise<{ ok: boolean; status?: number; error?: string }> =>
     ipcRenderer.invoke('integrations:test', req),
+
+  // ─── Remote environments (Phase 3b — machines running the remote PTY daemon) ──
+  // The SAME write-only secret contract as the integrations block above. Pairing
+  // is the only moment the daemon's HMAC secret exists anywhere in this app; it
+  // goes straight into main's encrypted store and `remotePair` answers with the
+  // METADATA record only. There is no method here that returns a secret, because
+  // `RemoteEnvironment` has no field one could be put in.
+  /** Pair with a daemon: it prints a 6-character code on ITS console; pass that
+   *  here within its 2-minute window. On success the environment is persisted and
+   *  returned (no secret) and is immediately selectable in Add Agent. */
+  remotePair: (req: { host: string; port: number; code: string; name?: string }):
+    Promise<{ ok: true; environment: RemoteEnvironment } | { ok: false; error: string }> =>
+    ipcRenderer.invoke('remote:pair', req),
+  /** Every paired environment (metadata only). */
+  remoteList: (): Promise<RemoteEnvironment[]> =>
+    ipcRenderer.invoke('remote:list'),
+  /** Forget an environment and delete its stored pairing secret. */
+  remoteRemove: (id: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('remote:remove', id),
   // Per-CLI-provider BYOK keys — WRITE-ONLY. `providerKeySet` stores a backend key one
   // way (never echoed); `providerKeyHas` returns only a boolean; no method ever returns
   // the plaintext. Keys are materialized MAIN-ONLY at spawn.
