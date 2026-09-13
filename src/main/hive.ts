@@ -205,6 +205,24 @@ function shortRand(): string {
   return randomBytes(3).toString('hex');
 }
 
+/**
+ * Drop a leading UTF-8 byte-order mark.
+ *
+ * Decoding as 'utf8' turns the three BOM bytes (EF BB BF) into a single U+FEFF
+ * code point at the head of the string, and `JSON.parse` rejects it outright —
+ * "Unexpected token  in JSON at position 0". Plenty of Windows tools (PowerShell's
+ * `Out-File`/`Set-Content`, Notepad, several editors' "UTF-8 with BOM" default)
+ * write one on every save, so a human or a script touching a hive file by hand is
+ * enough to make a perfectly valid document unreadable. Stripping it costs one
+ * comparison and removes the failure mode entirely.
+ *
+ * Exported so the raw readers elsewhere in this file (and the tests) go through
+ * exactly the same rule — a reader that forgets it is the bug we just fixed.
+ */
+export function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
 /** Non-memory files `mempalace mine` must not ingest (Claude Code hooks config,
  *  cursor, raw inbox/outbox JSON). `mempalace mine` honors .gitignore, so we drop
  *  one in each agent dir; written on birth here and refreshed by the mine loop.
@@ -933,7 +951,9 @@ export class HiveManager {
       if (agent.role === next) return { ok: true };
       agent.role = next;
       agent.lastSeen = Date.now();
-      this.writeJson(join(root, 'registry.json'), reg);
+      if (!this.atomicWriteJson(join(root, 'registry.json'), reg)) {
+        return { ok: false, error: 'registry.json is unreadable — the role change was not saved' };
+      }
       writeFileSync(join(this.agentDir(id), 'identity.md'), this.identityText(agent), 'utf8');
       this.appendLog({ kind: 'role', agentId: id, role: next });
       this.commit(`hive: role ${id}`);
@@ -990,7 +1010,11 @@ export class HiveManager {
       if (!!agent.onHold === hold) return { ok: true, onHold: hold };
 
       agent.onHold = hold;
-      this.writeJson(join(root, 'registry.json'), reg);
+      // Refused when registry.json on disk is unreadable. Say so instead of
+      // reporting success on a change that was never persisted.
+      if (!this.atomicWriteJson(join(root, 'registry.json'), reg)) {
+        return { ok: false, error: 'registry.json is unreadable — the change was not saved' };
+      }
 
       const fleetPath = join(root, 'fleet.json');
       if (existsSync(fleetPath)) {
@@ -1024,7 +1048,9 @@ export class HiveManager {
 
       const previousName = agent.name;
       agent.name = nextName;
-      this.writeJson(join(root, 'registry.json'), reg);
+      if (!this.atomicWriteJson(join(root, 'registry.json'), reg)) {
+        return { ok: false, error: 'registry.json is unreadable — the rename was not saved' };
+      }
 
       // fleet.json is ephemeral and may not exist yet. When it does, keep its
       // display name in lockstep with the registry so rosterContext() is fresh.
@@ -1670,7 +1696,7 @@ export class HiveManager {
         if (!f.endsWith('.json')) continue;
         const full = join(outbox, f);
         try {
-          const partial = JSON.parse(readFileSync(full, 'utf8')) as Partial<HiveMessage>;
+          const partial = JSON.parse(stripBom(readFileSync(full, 'utf8'))) as Partial<HiveMessage>;
           const msg = this.normalize(partial, id);
           msg.from = id; // sender is authoritative — the owning directory
           this.routeMessage(msg);
@@ -1688,18 +1714,30 @@ export class HiveManager {
 
   // — read helpers (for IPC / UI) —
 
+  /**
+   * The agent registry — the RECORD of who exists, who the god is, and every
+   * agent's session id. Nothing regenerates it, so it is read through
+   * `readStateJson`: an unreadable registry serves the last good copy (or the
+   * empty default only if this process never saw a good one) and blocks every
+   * registry write, instead of quietly reporting an empty hive and then making
+   * that lie true on the next save.
+   */
   registry(): Registry {
     const root = this.root();
     if (!root) return { godId: null, agents: {} };
-    return this.readJson<Registry>(join(root, 'registry.json'), { godId: null, agents: {} });
+    return this.readStateJson<Registry>(join(root, 'registry.json'), { godId: null, agents: {} });
   }
   board(): string {
     const root = this.root();
     return root && existsSync(join(root, 'board.md')) ? readFileSync(join(root, 'board.md'), 'utf8') : '';
   }
+  /** The task ledger — hand-written by the god and the only copy of the board.
+   *  Critical for the same reason as the registry, and worse in one way: the
+   *  `{ tasks: [] }` default does not just LOOK like an empty board, it becomes
+   *  one the moment `writeTasks` merges against it. Read through `readStateJson`. */
   tasks(): unknown {
     const root = this.root();
-    return root ? this.readJson(join(root, 'tasks.json'), { tasks: [] }) : { tasks: [] };
+    return root ? this.readStateJson(join(root, 'tasks.json'), { tasks: [] }) : { tasks: [] };
   }
 
   /** Persist the task ledger to hive/tasks.json and commit it. Mirrors the
@@ -1720,9 +1758,15 @@ export class HiveManager {
     if (!root) return;
     this.ensureHive();
     const path = join(root, 'tasks.json');
-    const current = this.readJson<{ tasks?: unknown }>(path, { tasks: [] });
+    const current = this.readStateJson<{ tasks?: unknown }>(path, { tasks: [] });
     const merged = mergeTaskLedger(current?.tasks, tasks);
-    this.writeJson(path, { tasks: merged });
+    // Refused when the ledger on disk is unreadable: merging against a default
+    // and writing the result is precisely how a corrupt board became an empty
+    // one. Log the refusal instead of the (never-persisted) count.
+    if (!this.atomicWriteJson(path, { tasks: merged })) {
+      this.appendLog({ kind: 'tasks-not-written', count: merged.length, reason: 'ledger on disk is unreadable' });
+      return;
+    }
     this.appendLog({ kind: 'tasks', count: merged.length });
     this.commit(`hive: tasks (${merged.length})`);
   }
@@ -1801,13 +1845,15 @@ export class HiveManager {
     // that as "the board is empty" wipes the baseline, and the next good read
     // then re-announces every card on the board as freshly closed. A failed read
     // must skip the tick, not redefine history.
-    let list: unknown[];
     const ledgerPath = join(root, 'tasks.json');
-    if (!existsSync(ledgerPath)) return [];
-    try {
-      const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8')) as { tasks?: unknown };
-      list = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
-    } catch { return []; } // unreadable ledger → skip, keep the last baseline
+    const read = this.classifyJson<{ tasks?: unknown }>(ledgerPath);
+    // Unreadable ledger → skip the tick, keep the last baseline. It also POISONS
+    // the path (noteCorruptState), which is what stops the next writeTasks from
+    // saving a merge built on a default over the top of the corrupt file.
+    if (read.status === 'corrupt') { this.noteCorruptState(ledgerPath, read.error); return []; }
+    if (read.status !== 'ok') return []; // absent/empty → nothing to observe yet
+    this.noteGoodState(ledgerPath, read.value);
+    const list: unknown[] = Array.isArray(read.value?.tasks) ? read.value.tasks : [];
 
     // A root switch (config:changeHome) invalidates the old baseline: those ids
     // describe a DIFFERENT hive, so re-baseline instead of reporting the new
@@ -1997,9 +2043,17 @@ export class HiveManager {
     for (const p of [join(gem, 'config', 'hooks.json'), join(gem, 'antigravity-cli', 'hooks.json')]) {
       try {
         mkdirSync(dirname(p), { recursive: true });
+        // This is the USER's own hooks file and we only add a key to it, so an
+        // unreadable copy must be left alone: falling back to `{}` and writing
+        // would delete every other hook they have. Skip the file instead — the
+        // agent loses hive events, which is recoverable; their config is not.
         let existing: Record<string, unknown> = {};
         if (existsSync(p)) {
-          try { existing = JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>; } catch { existing = {}; }
+          try { existing = JSON.parse(stripBom(readFileSync(p, 'utf8'))) as Record<string, unknown>; }
+          catch (e) {
+            console.error(`[hive] ${p} did not parse — leaving the user's hooks untouched:`, e);
+            continue;
+          }
         }
         existing['munder-hive'] = group;
         writeFileSync(p, JSON.stringify(existing, null, 2), 'utf8');
@@ -2448,7 +2502,10 @@ export class HiveManager {
     const root = this.root();
     if (!root) return null;
     try {
-      const raw = readFileSync(join(root, 'fleet.json'), 'utf8');
+      // stripBom: the snapshot is machine-written, but it is also the file a
+      // human is told to open and read, and an editor round-trip on Windows adds
+      // a BOM that would otherwise blank god's live roster with no trace.
+      const raw = stripBom(readFileSync(join(root, 'fleet.json'), 'utf8'));
       const snap = JSON.parse(raw) as {
         ts?: number;
         agents?: Array<{
@@ -2529,7 +2586,7 @@ export class HiveManager {
     return readdirSync(dir)
       .filter((f) => f.endsWith('.json'))
       .sort()
-      .map((f) => { try { return JSON.parse(readFileSync(join(dir, f), 'utf8')) as HiveMessage; } catch { return null; } })
+      .map((f) => { try { return JSON.parse(stripBom(readFileSync(join(dir, f), 'utf8'))) as HiveMessage; } catch { return null; } })
       .filter((m): m is HiveMessage => m !== null);
   }
 
@@ -2578,16 +2635,180 @@ export class HiveManager {
   }
 
   // — json + atomic io —
+  //
+  // THE SILENT-DEGRADATION INCIDENT this section exists to prevent:
+  // an external tool rewrote `hive/registry.json` with a UTF-8 BOM in front of
+  // otherwise perfect JSON. `JSON.parse` rejects a BOM, the old
+  // `readJson(path, default)` folded that rejection into its `{ godId: null,
+  // agents: {} }` fallback, and from there everything downstream believed the
+  // hive was EMPTY: the orchestrator lost its custom name and fell back to the
+  // default, the next fleet snapshot was written with zero agents, and the app
+  // carried on looking healthy. Hours passed before anyone noticed, and by then
+  // the next registry write had replaced the (recoverable) corrupt file with an
+  // empty one — the real state was gone for good.
+  //
+  // Three properties, in the order they cut the failure off:
+  //   (1) TOLERATE — a BOM in front of valid JSON is read as valid JSON. This
+  //       alone removes the entire class of failure that caused the incident.
+  //   (2) NEVER CLOBBER — a file that is PRESENT but does not parse is never
+  //       written over. We keep serving the last value that did parse and refuse
+  //       the write, so the corrupt bytes stay on disk for repair. A file that is
+  //       ABSENT is the normal first-run shape and still yields the default; that
+  //       distinction — absent vs present-but-unreadable — is the whole point.
+  //   (3) ANNOUNCE — corruption is logged (log.jsonl + console.error) and pushed
+  //       out on the existing `hive:degraded` channel, which the main process
+  //       already turns into a native toast.
+
+  /** Paths whose on-disk bytes did not parse on the last read. A poisoned path is
+   *  read as the last known good value and REFUSED for writing. Cleared as soon
+   *  as the file parses again (someone fixed it). */
+  private corruptState = new Map<string, string>();
+  /** The last value that actually parsed, per critical path — what we serve
+   *  instead of a fresh (lying) default while the file on disk is unreadable. */
+  private lastGoodState = new Map<string, unknown>();
+
+  /**
+   * Read + classify a JSON file. The classification is the product here: callers
+   * need to tell "there is no file yet" (normal) apart from "there are bytes I
+   * cannot read" (an incident).
+   *
+   *  - `absent` — no such file. First run, or a hive that was never initialised.
+   *  - `empty`  — the file exists but holds nothing but whitespace. Present, yet
+   *    there is no state in it to protect, so this stays writable (a crash
+   *    between `open` and `write` leaves exactly this, and refusing to write
+   *    would brick the hive forever instead of self-healing).
+   *  - `corrupt` — bytes we could not turn into JSON, or could not even read
+   *    (EACCES/EISDIR/EIO). THIS is the case that must never be overwritten.
+   *  - `ok` — parsed. A leading UTF-8 BOM is stripped first (see above).
+   */
+  private classifyJson<T>(p: string):
+  { status: 'ok'; value: T } | { status: 'absent' } | { status: 'empty' } | { status: 'corrupt'; error: string } {
+    let raw: string;
+    try {
+      raw = readFileSync(p, 'utf8');
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      // ENOENT/ENOTDIR are "nothing here yet". Every other errno means the file
+      // is there and we cannot have it — not the same thing, and not a default.
+      if (code === 'ENOENT' || code === 'ENOTDIR') return { status: 'absent' };
+      return { status: 'corrupt', error: e instanceof Error ? e.message : String(e) };
+    }
+    const text = stripBom(raw);
+    if (!text.trim()) return { status: 'empty' };
+    try { return { status: 'ok', value: JSON.parse(text) as T }; }
+    catch (e) { return { status: 'corrupt', error: e instanceof Error ? e.message : String(e) }; }
+  }
+
+  /**
+   * Read a REGENERABLE file (a cache). A default is a legitimate answer here,
+   * because the periodic snapshot rebuilds the file from the record. Still
+   * BOM-tolerant, and still says so in the log when the bytes are unreadable —
+   * silent is what we are getting rid of, at every level.
+   */
   private readJson<T>(p: string, fallback: T): T {
-    try { return JSON.parse(readFileSync(p, 'utf8')) as T; } catch { return fallback; }
+    const res = this.classifyJson<T>(p);
+    if (res.status === 'ok') return res.value;
+    if (res.status === 'corrupt') {
+      console.error(`[hive] cache ${p} did not parse: ${res.error} — using the default, it will be regenerated`);
+      this.appendLog({ kind: 'state-cache-corrupt', file: basename(p), path: p, error: res.error });
+    }
+    return fallback;
   }
-  private writeJson(p: string, data: unknown): void {
+
+  /**
+   * Read a file that HOLDS STATE NOBODY CAN RECONSTRUCT (registry.json,
+   * tasks.json). On unreadable bytes this returns the last value that parsed in
+   * this process — or the caller's default only if we never got a good read —
+   * and poisons the path so no write can land on top of the corrupt file.
+   */
+  private readStateJson<T>(p: string, fallback: T): T {
+    const res = this.classifyJson<T>(p);
+    if (res.status === 'ok') { this.noteGoodState(p, res.value); return res.value; }
+    // Absent = the hive has not been created yet; empty = nothing to protect.
+    // Both are legitimate defaults, and both keep writing enabled so the very
+    // first bootstrap still works.
+    if (res.status === 'absent') return fallback;
+    if (res.status === 'empty') {
+      if (!this.corruptState.has(p)) {
+        this.appendLog({ kind: 'state-empty', file: basename(p), path: p });
+      }
+      return fallback;
+    }
+    this.noteCorruptState(p, res.error);
+    return this.lastGoodState.has(p) ? (this.lastGoodState.get(p) as T) : fallback;
+  }
+
+  /** Remember a value that actually parsed, and un-poison the path if it was
+   *  poisoned — someone repaired the file, so writing may resume. */
+  private noteGoodState(p: string, value: unknown): void {
+    this.lastGoodState.set(p, value);
+    if (!this.corruptState.delete(p)) return;
+    console.error(`[hive] ${p} parses again — writes re-enabled`);
+    this.appendLog({ kind: 'state-recovered', file: basename(p), path: p });
+  }
+
+  /** Poison a path and raise the alarm — once per incident, because the pollers
+   *  re-read these files every few seconds and a toast per tick is a siren, not
+   *  a report. Re-arms when the file recovers and breaks again. */
+  private noteCorruptState(p: string, error: string): void {
+    const alreadyKnown = this.corruptState.has(p);
+    this.corruptState.set(p, error);
+    if (alreadyKnown) return;
+    const file = basename(p);
+    const message = `${file} in the hive could not be read (${error}). The harness is running on the `
+      + 'last good copy it read and will NOT write over the file, so nothing is lost — repair or delete '
+      + `${p}, then restart. Until then agent changes are not being saved.`;
+    console.error(`[hive] ${p} did not parse: ${error} — serving the last good value, refusing to overwrite`);
+    this.appendLog({ kind: 'state-corrupt', file, path: p, error });
+    this.emit?.('hive:degraded', { reason: 'state-parse', file, path: p, error, message });
+  }
+
+  /** True when `p` currently holds bytes we could not parse — in which case a
+   *  write is refused, loudly. This is the leg that stops a corrupt file from
+   *  being turned into an empty one on the next save. */
+  private writeRefused(p: string): boolean {
+    const error = this.corruptState.get(p);
+    if (error === undefined) return false;
+    console.error(`[hive] refused to write ${p}: the copy on disk does not parse (${error})`);
+    this.appendLog({ kind: 'state-write-refused', file: basename(p), path: p, error });
+    return true;
+  }
+
+  /**
+   * A plain truncate-and-write. For REGENERABLE files ONLY (fleet.json, the
+   * per-session settings.json, the first-run skeletons): a crash between the
+   * truncate and the last byte leaves a half-written file, and on a file holding
+   * unreconstructable state that IS the corrupt file the rest of this section
+   * exists to protect against — self-inflicted. Anything that must survive a
+   * power cut goes through `atomicWriteJson` below.
+   *
+   * @returns false when the write was refused because the file on disk is corrupt.
+   */
+  private writeJson(p: string, data: unknown): boolean {
+    if (this.writeRefused(p)) return false;
     writeFileSync(p, JSON.stringify(data, null, 2), 'utf8');
+    return true;
   }
-  private atomicWriteJson(p: string, data: unknown): void {
+  /**
+   * Temp-file + rename: a reader either sees the whole previous file or the whole
+   * new one, never a truncated middle. THE rule for `registry.json`/`tasks.json` —
+   * every mutation path (spawn, archive, session, role, hold, rename, the task
+   * ledger) must use this one.
+   *
+   * @returns false when the write was refused because the file on disk is corrupt.
+   */
+  private atomicWriteJson(p: string, data: unknown): boolean {
+    if (this.writeRefused(p)) return false;
     const tmp = `${p}.tmp-${shortRand()}`;
     writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
     renameSync(tmp, p);
+    return true;
+  }
+
+  /** Is a hive state file currently unreadable? Exposed for tests and for any
+   *  caller that wants to explain why a save did not stick. */
+  corruptStateFiles(): Array<{ path: string; error: string }> {
+    return [...this.corruptState.entries()].map(([path, error]) => ({ path, error }));
   }
 
   // — git (single committer, retry + stale-lock recovery) —

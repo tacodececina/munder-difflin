@@ -100,10 +100,47 @@ function detectLanguage(): string {
   return 'en';
 }
 
+/**
+ * Mirror the chosen language into the harness config, for the MAIN process.
+ *
+ * localStorage is renderer-only, so until this existed the main process had no
+ * way to know the app was running in anything but English — which is exactly how
+ * the brewed office dialogue (src/main/officeChat.ts, officeVoice.ts) ended up
+ * writing English lines next to the TRANSLATED canned ones in the break room.
+ *
+ * The renderer stays the owner: localStorage above is still what decides the UI
+ * language at launch, and nothing reads this value back. It travels on the same
+ * `updateConfig` channel every other setting uses.
+ *
+ * Writes only on an actual DIFFERENCE, so the once-per-launch reconcile below
+ * is silent for everyone already in sync — a config write broadcasts
+ * `config:changed` to every open floor, and a no-op save on every boot is not
+ * worth that. Entirely best-effort: a failed mirror costs a prompt some flavour,
+ * never the language switch the user asked for.
+ *
+ * ABSENT COUNTS AS ENGLISH, and that is not a detail. The field's contract (see
+ * `language` in src/main/config.ts) is "unset = never changed from the default,
+ * i.e. English", so an absent field and `'en'` are the SAME value and comparing
+ * the raw `undefined` against `'en'` made the reconcile fire on every install
+ * that had never picked a language — including a brand-new one still sitting in
+ * onboarding. `updateConfig` persists the whole DEFAULTS-merged config, so that
+ * conjured a config.json before onboarding had written one, which `readConfig`
+ * explicitly promises not to do, and broadcast a pointless `config:changed` on
+ * every first boot.
+ */
+async function mirrorLanguageToConfig(lng: string): Promise<void> {
+  try {
+    const cfg = await window.cth?.getConfig?.();
+    if (!cfg || (cfg.language ?? 'en') === lng) return;
+    await window.cth.updateConfig({ language: lng });
+  } catch { /* best-effort — the UI language has already changed either way */ }
+}
+
 /** Switch language now and persist the choice for next launch. */
 export function setLanguage(lng: string): void {
   void i18n.changeLanguage(lng);
   try { window.localStorage.setItem(STORAGE_KEY, lng); } catch { /* best-effort */ }
+  void mirrorLanguageToConfig(lng);
 }
 
 void i18n
@@ -127,5 +164,12 @@ void i18n
     interpolation: { escapeValue: false, defaultVariables: { godName: DEFAULT_GOD_NAME } },
     returnNull: false
   });
+
+// One reconcile per launch. Every install that picked a language BEFORE the
+// config learned about `language` has that choice only in localStorage, and
+// would otherwise keep getting English-only office dialogue until the next time
+// somebody opened Settings and picked the language they were already using.
+// No-op (and silent) once the two agree — see mirrorLanguageToConfig.
+void mirrorLanguageToConfig(i18n.language);
 
 export default i18n;

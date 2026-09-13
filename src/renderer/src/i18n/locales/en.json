@@ -16,7 +16,8 @@
     "search": "search",
     "tokens": "tokens",
     "restarting": "restarting…",
-    "add": "add"
+    "add": "add",
+    "clear": "clear"
   },
   "commandBar": {
     "free": "free",
@@ -241,6 +242,11 @@
       "simpleModeDesc": "Agents brief you in plain language instead of engineering shorthand.",
       "visitorMode": "Visitor mode",
       "visitorModeDesc": "For when someone outside the team can see this screen. Seals the terminal, hive messages, tool traces, git, the IDE, memory and the Command Center behind a placeholder, and drops file names out of the office's thought bubbles. The floor itself keeps running. Off by default — nothing turns it on by itself.",
+      "alwaysOpenLastHive": "Open the last config on launch",
+      "alwaysOpenLastHiveDesc": "Skip the picker and go straight into the config you were last in, so a restart brings the floor back with nobody there to click. If that folder is gone, the picker is shown anyway. Off by default.",
+      "hivePicker": "Config picker",
+      "hivePickerDesc": "Go back to the launch screen to open another config or create one. Picking a different folder reloads the app; re-opening this one drops you straight back on the floor.",
+      "showHivePicker": "Show picker",
       "notifications": "Notifications",
       "desktopNotifications": "Desktop notifications",
       "desktopNotificationsDesc": "Native toasts when an agent finishes or needs your input.",
@@ -253,6 +259,28 @@
       "telemetryDesc": "A handful of anonymous events (app opened, agent spawned, feature used) — never prompts, code, paths, or agent output. Full list in TELEMETRY.md.",
       "officeChatter": "Office chatter (experimental)",
       "officeChatterDesc": "Break-room conversations written live by the model from each agent's personality, relationship history, and current state — instead of canned lines. Uses short hidden Claude sessions (rate-limited to a few per hour). A golden star marks generated exchanges on the floor.",
+      "chatterProvider": "Chatter engine",
+      "chatterProviderClaude": "Hidden Claude session (default)",
+      "chatterProviderOpenAi": "OpenAI-compatible endpoint",
+      "chatterProviderClaudeDesc": "Brews through a hidden Claude CLI session — the same subscription your working agents use, so a talkative office takes quota from the agents fixing real things.",
+      "chatterProviderOpenAiDesc": "Brews over HTTP against any endpoint that speaks POST /chat/completions with a Bearer key — DeepSeek, MiniMax, opencode-go, or a local Ollama / LM Studio. Keeps the chatter completely independent of your Claude quota. If the endpoint fails there is simply no generated line; the office falls back to canned dialogue.",
+      "chatterBaseUrl": "Base URL",
+      "chatterBaseUrlPlaceholder": "https://api.deepseek.com  ·  http://localhost:11434/v1",
+      "chatterApiKey": "API key",
+      "chatterApiKeyPlaceholder": "sk-… (stored in the app config, never sent to the interface)",
+      "chatterApiKeyStored": "a key is saved — type a new one to replace it",
+      "chatterRoutineModel": "Routine model",
+      "chatterMilestoneModel": "Milestone model",
+      "chatterBudget": "Token budget per hour (0 = unlimited)",
+      "chatterBudgetHint": "When the last hour's chatter reaches this many tokens, nothing more is brewed until the window reopens; the office plays canned lines meanwhile. Endpoints that report usage are counted exactly, the rest are estimated at ~4 characters per token. Spent this hour: {{spent}}.",
+      "officeVoices": "Agent voices (MiniMax)",
+      "officeVoicesDesc": "Say the break-room dialogue out loud. Each agent gets a stable voice derived from the character it presents as, so the same agent always sounds the same. Needs a MiniMax API key.",
+      "officeVoicesPerMinute": "Clips per minute",
+      "officeVoicesHint": "Only dialogue you can see happening on the floor is spoken, one voice at a time, and a clip that arrives late is discarded rather than queued. No key, an unreachable endpoint or any error simply means silence — the written dialogue is unaffected.",
+      "minimaxApiKey": "MiniMax API key",
+      "minimaxModel": "Voice model",
+      "minimaxEndpoint": "Endpoint (optional)",
+      "minimaxGroupId": "GroupId (optional)",
       "language": "Language",
       "languageDesc": "Choose the language for the app interface. English is the default.",
       "dangerZone": "DANGER ZONE",
@@ -404,6 +432,7 @@
       "floor": "monitor",
       "tasks": "tasks",
       "legend": "legend",
+      "conversation": "conversation",
       "human": "ask me",
       "triggers": "triggers",
       "history": "history",
@@ -868,6 +897,17 @@
     "errEngineNotInstalled": "{{label}} is not installed. Install it and press \"check again\", or pick another engine."
   },
   "office": {
+    "clockOut": {
+      "title": "END THE DAY?",
+      "agentsNone": "NO AGENTS ARE RUNNING RIGHT NOW",
+      "agentsOne": "1 AGENT WILL BE STOPPED",
+      "agentsMany": "{{count}} AGENTS WILL BE STOPPED",
+      "body": "This clock ends the working day: every agent on the floor is told to wrap up and save its memory, and the harness closes itself once the floor is safe. Nothing has happened yet.",
+      "tip": "Looking for the time? That is the other clock on this wall — the dark CN/MX panel is pure decoration. This one closes the office.",
+      "cancel": "not yet — back to work",
+      "confirm": "end the day",
+      "hint": "CLOCK OUT — stops the agents and closes the app"
+    },
     "gpuError": "The office floor lost its GPU context.\n\nToo many terminals are using the GPU at once.\nClose a few agent terminals, or restart the app, to bring it back.",
     "errand": {
       "water": [
@@ -915,15 +955,6 @@
       "love the tie today, {{godName}}",
       "working hard, boss! 💪",
       "best boss ever. genuinely."
-    ],
-    "gossip": [
-      "has he ever actually written code?",
-      "another 'quick sync' that took an hour…",
-      "'world's best boss' — he bought that mug himself",
-      "he pinned MY task as his idea",
-      "the cigar smell, honestly…",
-      "he watered the plant. ONE plant. his own.",
-      "did you hear him? 'I DECLARE… a break'"
     ],
     "cheer": [
       "done! ✔",
@@ -1470,6 +1501,107 @@
     "firstTitle": "the first task this floor ever closed",
     "streak": "×{{count}} RUN",
     "streakTitle": "{{name}} closed {{count}} in a row"
+  },
+  "conversation": {
+    "count": "{{count}} conversations",
+    "hint": "read back from what the floor actually said - summarized by rules, never by a model",
+    "empty": "THE BREAK ROOM HAS BEEN QUIET",
+    "emptyHint": "Once two agents share a table, what they said lands here — with a summary of it, how each of them reads the other, and who they are slowly turning into.",
+    "sections": {
+      "recent": "RECENT CONVERSATIONS",
+      "relations": "RELATIONSHIPS — ONE ROW PER DIRECTION",
+      "personality": "PERSONALITY & LOOK"
+    },
+    "noConversations": "Nothing recorded yet.",
+    "volume": "{{a}}·{{b}} {{count}} lines",
+    "lineCount": "{{count}} lines",
+    "dominant": "{{name}} did most of the talking",
+    "questions": "{{count}} questions",
+    "resumed": "PICKED IT BACK UP",
+    "shape": {
+      "nod": "A NOD",
+      "interrogation": "MOSTLY QUESTIONS",
+      "oneSided": "ONE-SIDED",
+      "backAndForth": "BACK AND FORTH",
+      "exchange": "AN EXCHANGE"
+    },
+    "directionalNote": "Every relationship is tracked separately in each direction. One of them can be fond of the other without it being returned, and that asymmetry is the interesting part — so it is never averaged away. The most lopsided pairs come first.",
+    "noRelations": "No relationship has been recorded yet.",
+    "noDirection": "nothing recorded in this direction",
+    "recip": {
+      "mutual": "MUTUAL",
+      "lopsided": "NOT RETURNED THE SAME",
+      "oneSidedFriction": "FRICTION ON ONE SIDE ONLY",
+      "unanswered": "ONLY ONE SIDE ON RECORD"
+    },
+    "tone": {
+      "none": "nothing recorded",
+      "warm": "warming up",
+      "fond": "genuinely fond",
+      "prickly": "prickly",
+      "cold": "cool and distant",
+      "neutral": "polite, little history"
+    },
+    "axes": {
+      "warmth": "WARM",
+      "tension": "TENSE",
+      "familiarity": "KNOWN"
+    },
+    "interactions": "{{count}} interactions",
+    "personalityNote": "Traits are earned from accumulated interaction and derived by rules — a model is never asked what someone is like. Each trait shows the two numbers it was computed from, so you can check it instead of believing it.",
+    "sample": "{{lines}} lines · {{exchanges}} exchanges · {{partners}} partners",
+    "noTraits": "Nothing earned yet — not enough has happened.",
+    "trait": {
+      "curious": "the one who asks",
+      "terse": "says it in four words",
+      "expansive": "never uses one sentence",
+      "opener": "always starts it",
+      "listener": "waits to be spoken to",
+      "social": "talks to everyone",
+      "loyal": "has one person",
+      "caretaker": "checks if you are okay",
+      "contrarian": "pushes back",
+      "beloved": "everyone likes them",
+      "abrasive": "rubs people the wrong way",
+      "veteran": "knows everybody well"
+    },
+    "evidence": {
+      "curious": "{{a}} of their {{b}} lines were questions",
+      "terse": "about {{a}} characters per line, across {{b}} lines",
+      "expansive": "about {{a}} characters per line, across {{b}} lines",
+      "opener": "opened {{a}} of {{b}} conversations",
+      "listener": "opened only {{a}} of {{b}} conversations",
+      "social": "talks with {{a}} different colleagues",
+      "loyal": "{{a}} of {{b}} of their talking is with one person",
+      "caretaker": "{{a}} of the {{b}} things they started were check-ins",
+      "contrarian": "{{a}} of the {{b}} things they started were refusals",
+      "beloved": "average warmth {{a}}/100 from {{b}} colleagues",
+      "abrasive": "average tension {{a}}/100 from {{b}} colleagues",
+      "veteran": "average familiarity {{a}}/100 across {{b}} colleagues"
+    },
+    "look": {
+      "asks": "{{name}} would like {{change}} — because they are {{trait}}.",
+      "change": {
+        "curious": "glasses",
+        "terse": "a flatter expression",
+        "expansive": "a smile",
+        "opener": "a cap",
+        "listener": "headphones",
+        "social": "a lanyard",
+        "loyal": "earrings",
+        "caretaker": "a scarf",
+        "contrarian": "a sharper brow",
+        "abrasive": "a sharper brow",
+        "beloved": "a bit of colour in the cheeks",
+        "veteran": "a watch"
+      },
+      "approve": "approve",
+      "reject": "no",
+      "neverAuto": "Nothing changes until you approve it, and saying no leaves no trace.",
+      "applied": "wearing a look you approved ({{trait}})",
+      "undo": "put the old look back",
+      "none": "has not asked for anything."
+    }
   },
   "queueComposer": {
     "recording": "● recording — click stop to transcribe",

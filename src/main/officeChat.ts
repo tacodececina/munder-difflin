@@ -1,12 +1,50 @@
 /**
  * OfficeChatDirector — LLM-generated café dialogue for the office floor.
  *
- * THE EXPERIMENT: when two agents share a break-room table, instead of a canned
- * exchange from cafeteriaLines.ts, the floor can play dialogue written LIVE by a
- * model, given each agent's real persona, their persistent relationship state
- * (RelationshipBook — DIRECTIONAL, so the prompt carries both A's reading of B
- * and B's reading of A), and both agents' live operational status.
+ * THE EXPERIMENT: when two agents share a break-room table, the floor plays
+ * dialogue written LIVE by a model, given each agent's real persona, their
+ * persistent relationship state (RelationshipBook — DIRECTIONAL, so the prompt
+ * carries both A's reading of B and B's reading of A), both agents' live
+ * operational status, the CONVERSATION THEY WERE ALREADY HAVING, and a
+ * read-only view of the work actually on the board.
  * Feature-flagged off by default (`officeChatterEnabled`).
+ *
+ * NOTHING IS CANNED ANY MORE (v0.4.8). There used to be a fallback: ~200 hand-
+ * written exchanges in the renderer's cafeteriaLines.ts, played whenever a brew
+ * was not ready. They were the only fabricated thing on a floor where every
+ * other visible detail corresponds to something real, and they were written in
+ * English beside a UI the user had translated. They are gone. With the flag off
+ * — or on, but with no brewed exchange waiting — the break room is SILENT: two
+ * agents still walk there, still sit together, still carry mugs, still show
+ * their real status and tool bubbles, they just do not speak. Silence is
+ * honest; an invented quip is not.
+ *
+ * CONTINUITY: a pair's conversation is one thread, not a series of unrelated
+ * quips. Every exchange handed to the floor is appended (ATTRIBUTED, via
+ * RelationshipBook.noteTurns) to the pair's rolling transcript, and the next
+ * brew for that pair gets it back. If they last spoke recently the prompt asks
+ * the model to RESUME — same subject, later in the day; if it has been a while
+ * it asks for something new that remembers the old one happened. The length of
+ * an exchange is deliberately variable (2–6 beats, the model's choice from the
+ * situation) instead of the old fixed two-beat shape, and the floor paces each
+ * beat by how long its line takes to read.
+ *
+ * THAT WINDOW IS NOT A HISTORY. `lastTurns` holds six turns per pair and
+ * overwrites the oldest in place, because it is a PROMPT INPUT. The durable
+ * record — who said what to whom, when, and whether a model wrote it — is a
+ * separate append-only, retention-bounded file (officeChatLog.ts), written from
+ * the same hand-off through the optional `log` dep below. Nothing in this
+ * director reads it back: continuity still comes from the window.
+ *
+ * TALKING ABOUT WORK, WITHOUT TOUCHING IT: the prompt also carries a read-only,
+ * privacy-scrubbed projection of the task board (officeWork.ts — titles and
+ * statuses only, never descriptions, results, operator answers or paths), so
+ * two colleagues can trade an idea about the thing one of them is stuck on.
+ * The boundary is absolute and documented at length in officeWork.ts: this
+ * director can only READ. Its single output is `string[]`, and the only place
+ * that string can go is a thought cloud. No café line has ever changed, or can
+ * change, a decision, an assignment, a task status or any other operational
+ * state.
  *
  * LATENCY & COST SHAPE — brew-ahead, never block:
  * A hidden Claude session (runHiddenClaude, the same mechanism reflect.ts uses —
@@ -42,17 +80,23 @@
  *   • brewed exchanges expire after 45 min unused (stale status reads wrong)
  *   • a hung hidden session gives up after 25s and gets ONE short retry, rather
  *     than pinning the single brew slot for two minutes
+ *   • and, since v0.4.7, a rolling-hour TOKEN ceiling shared with every other
+ *     chatter lane (brewSlot's ChatterTokenLedger) — the continuity thread and
+ *     the work context below make each prompt a little longer, and that ceiling
+ *     is what keeps "a little longer" from becoming unbounded
  * Worst case is 8 short hidden sessions/hour, only while pairs actually meet,
  * only while the flag is on. The mechanics (slot, timeouts, retry, abort) live
  * in brewSlot.ts; only the café's own budget numbers are below.
  *
- * NOTHING PAID-FOR IS THROWN AWAY: an exchange that lands after the café chat
- * already opened with canned lines is handed back via `stash()` and replayed the
- * next time that SAME opener sits down with that SAME partner (see the directed
+ * NOTHING PAID-FOR IS THROWN AWAY: an exchange that lands after the pair has
+ * already left the table is handed back via `stash()` and replayed the next
+ * time that SAME opener sits down with that SAME partner (see the directed
  * `returned` map — the exchange is written for a specific speaker order).
  */
 import { BrewSlot, type LaneLimits } from './brewSlot';
-import type { RelationshipBook } from './officeRel';
+import { chatterLanguageDirective } from './chatterLanguage';
+import type { RelationshipBook, RelTurn } from './officeRel';
+import { workContextProse, type WorkContext } from './officeWork';
 
 export interface ChatPersona {
   id: string;
@@ -81,7 +125,9 @@ export const EMPTY_REL_VIEW: ChatRelView =
   Object.freeze({ warmth: 0, tension: 0, familiarity: 0, flavor: '' });
 
 export interface OfficeChatResponse {
-  /** Alternating beats (index 0 = persona `a`), or null → play canned lines. */
+  /** Alternating beats (index 0 = persona `a`), or null → THE PAIR SAYS
+   *  NOTHING. There is no canned fallback any more; null means the break room
+   *  stays quiet for these two this time. */
   lines: string[] | null;
   /** How `a` reads `b`. */
   rel: ChatRelView;
@@ -98,6 +144,16 @@ const CAFE_LIMITS: LaneLimits = {
 };
 const BREW_TTL_MS = 45 * 60_000;
 const MAX_LINE_CHARS = 70;
+/** Beats in one exchange. The floor used to get a fixed two-beat shape, which
+ *  is what made every café chat feel like the same machine firing; the model now
+ *  picks a length inside this range from the situation, and a six-beat argument
+ *  reads nothing like a two-beat nod. */
+const MIN_LINES = 2;
+const MAX_LINES = 6;
+/** How recently the pair must have spoken for the next exchange to be written
+ *  as a CONTINUATION rather than a fresh subject. Roughly "still the same
+ *  afternoon". Past it, the thread is context, not an open topic. */
+const RESUME_WINDOW_MS = 40 * 60_000;
 
 interface Brewed { lines: string[]; at: number }
 
@@ -111,7 +167,49 @@ interface Deps {
    *  cheap model; only milestones get the expensive one. */
   getModel: (tier: ChatTier) => string;
   isEnabled: () => boolean;
+  /** The UI language the user picked in Settings (the `language` field of the
+   *  harness config, e.g. 'es'), read through the same `readConfig()` path as
+   *  every other option above. The prompt below is English and used to say
+   *  nothing about which language to ANSWER in, so brewed lines came back in
+   *  English next to the TRANSLATED canned pools they alternate with. Optional:
+   *  absent — or English, or any locale with no directive — leaves the prompt
+   *  byte-for-byte as it was. See chatterLanguage.ts. */
+  getLanguage?: () => string | null | undefined;
+  /** A READ-ONLY view of what the office is actually working on, for the two
+   *  agents about to talk (officeWork.ts). Optional: absent — or returning
+   *  null — leaves the prompt with no work context at all, which is exactly
+   *  what it had before, and is also the honest answer when no hive is open.
+   *
+   *  READ-ONLY IS STRUCTURAL, NOT A CONVENTION. The director is handed a getter
+   *  that returns a frozen data value; it is never handed the hive, a writer, or
+   *  an ipc handle, so there is no path from a café line back into the work.
+   *  See the boundary note at the top of officeWork.ts. Called only at BREW
+   *  time (a handful of times an hour), never on the request hot path. */
+  getWork?: (aId: string, bId: string) => WorkContext | null;
   rel: RelationshipBook;
+  /** WHO THIS AGENT HAS TURNED OUT TO BE, as a short clause ("asks a lot of
+   *  questions; checks on people when they are struggling"), derived by rules
+   *  from accumulated interaction — see officeTraits.ts. Optional, and it
+   *  returns '' until an agent has actually earned a trait, which keeps the
+   *  prompt BYTE-IDENTICAL to the pre-traits one for every quiet floor.
+   *
+   *  This is the feedback loop that makes the personality visible in the
+   *  writing rather than only in a panel: the same clause the conversation tab
+   *  shows the user is the clause the model is told about, so a claim on screen
+   *  and the voice on the floor come from one source. Read at BREW time only. */
+  getTraits?: (agentId: string) => string;
+  /** Durable record of an exchange actually handed to the floor
+   *  (officeChatLog.ts). Called at the SAME moment as `rel.noteTurns` and for
+   *  the same reason the attribution there is derived rather than guessed: the
+   *  lines alternate starting with `from`, and hand-off is the only moment this
+   *  process hears about.
+   *
+   *  Optional, and it is the only thing this director does with the lines beyond
+   *  returning them: a test (or any future caller) can construct a director
+   *  without a log and the café behaves identically, just without a transcript.
+   *  The relationship window (`lastTurns`) remains what feeds the prompt — this
+   *  sink is write-only from here. */
+  log?: (from: string, to: string, lines: string[]) => void;
   /** The process-wide brew slot, shared with every other feature that spends a
    *  hidden Claude session in the background (officeVoice.ts). Optional so a
    *  test can construct a director on its own; production always passes the one
@@ -172,8 +270,9 @@ export class OfficeChatDirector {
   }
 
   /** Called when a pair sits down together. Returns a brewed exchange for them
-   *  (consuming it) or null; either way it may kick off a background brew for
-   *  the pair's NEXT meeting. Never blocks on the model. */
+   *  (consuming it) or null — null now means the pair simply says nothing, the
+   *  canned pools having been deleted. Either way it may kick off a background
+   *  brew for the pair's NEXT meeting. Never blocks on the model. */
   request(req: OfficeChatRequest): OfficeChatResponse {
     // Flag check FIRST: with the toggle off this feature must not so much as
     // read the relationship file, let alone create an edge for this pair.
@@ -189,7 +288,18 @@ export class OfficeChatDirector {
     const lines =
       this.take(this.returned, dirKey(req.a.id, req.b.id)) ??
       this.take(this.cache, pairKey(req.a.id, req.b.id));
-    if (lines) this.deps.rel.setLastLines(req.a.id, req.b.id, lines);
+    // APPEND to the pair's thread, attributed: the lines alternate starting
+    // with `a`, which is the order the floor plays them in. This is the only
+    // write here, and it is what the NEXT brew reads back as continuity.
+    // Recorded at hand-off rather than after the last beat is spoken, because
+    // hand-off is the only moment this process hears about: a break cut short
+    // by real work would otherwise leave the thread permanently behind.
+    if (lines) this.deps.rel.noteTurns(req.a.id, req.b.id, lines);
+    // …and the same exchange goes to the durable transcript, which is what the
+    // six-turn window above is NOT: it is overwritten in place, so without this
+    // nothing survives the pair's next sitting. Best-effort — a transcript is
+    // never worth failing a café beat over.
+    if (lines) { try { this.deps.log?.(req.a.id, req.b.id, lines); } catch { /* noop */ } }
     this.maybeBrew(req);
     return { lines, rel: view(ab), relBack: view(ba) };
   }
@@ -206,8 +316,8 @@ export class OfficeChatDirector {
       .map((l) => l.trim())
       .filter((l) => l.length > 0)
       .map((l) => (l.length > MAX_LINE_CHARS ? l.slice(0, MAX_LINE_CHARS - 1).trimEnd() + '…' : l))
-      .slice(0, 4);
-    if (clean.length < 2) return;
+      .slice(0, MAX_LINES);
+    if (clean.length < MIN_LINES) return;
     const now = Date.now();
     // Drop anything that went stale while it sat here, so the map cannot grow
     // past the handful of pairs currently on the floor.
@@ -291,13 +401,37 @@ export class OfficeChatDirector {
       .slice(-6)
       .map((e) => EVENT_PROSE[e.t]?.[e.role === 'subject' ? 'subject' : 'actor'] ?? e.t)
       .join('; ');
-    const avoid = this.deps.rel.lastLines(req.a.id, req.b.id);
-    const persona = (p: ChatPersona, label: string): string =>
-      `${label}: "${p.name}" — presents as ${p.character} from The Office; real job: ${p.role || 'software agent'}; right now: ${statusProse(p.status)}.`;
+    // THE THREAD. Attributed turns, oldest first — who said what, and how long
+    // ago. This is the whole continuity mechanism: the pair's own words come
+    // back in, so the next sitting can pick one up instead of firing a fresh
+    // isolated quip. Nothing new is stored for it; it is the same rolling
+    // window officeRel.ts has kept since the feature existed, only attributed.
+    const thread = this.deps.rel.lastTurns(req.a.id, req.b.id);
+    const threadProse = renderThread(thread, req.a, req.b);
+    const gapMs = thread.length ? Date.now() - thread[thread.length - 1].at : Infinity;
+    const resuming = gapMs <= RESUME_WINDOW_MS;
+    // WORK CONTEXT — read-only, privacy-scrubbed, titles and statuses only.
+    // Optional dep: absent ⇒ empty string ⇒ the prompt is exactly what it was.
+    const work = workContextProse(this.deps.getWork?.(req.a.id, req.b.id));
+    // The user's UI language, turned into prompt text (empty for English and for
+    // anything unrecognised, which is what keeps this a no-op by default).
+    const lang = chatterLanguageDirective(this.deps.getLanguage?.());
+    // A persona used to be assembled entirely from the LIVE roster — name,
+    // character, role, current status — so nothing an agent had become over
+    // weeks of talking ever reached the page. The trait clause is the durable
+    // half: earned, rule-derived, and appended only when there is something
+    // earned to say (see officeTraits.ts). No traits ⇒ the exact sentence this
+    // prompt has always had.
+    const persona = (p: ChatPersona, label: string): string => {
+      const base = `${label}: "${p.name}" — presents as ${p.character} from The Office; real job: ${p.role || 'software agent'}; right now: ${statusProse(p.status)}.`;
+      const traits = this.deps.getTraits?.(p.id);
+      return traits ? `${base} Over time they have come across as someone who ${traits}.` : base;
+    };
     return [
-      'You are writing one beat of ambient dialogue for a pixel-art office where AI',
-      'coding agents appear as characters from The Office (US). Two of them just sat',
-      'down together in the break room.',
+      'You are writing ambient dialogue for a pixel-art office where AI coding agents',
+      'appear as characters from The Office (US). Two of them just sat down together',
+      'in the break room. These two have an ongoing working relationship and an',
+      'ongoing conversation — this is a moment in it, not a self-contained sketch.',
       '',
       persona(req.a, 'SPEAKER A (sat down first, opens)'),
       persona(req.b, 'SPEAKER B (already at the table)'),
@@ -310,9 +444,27 @@ export class OfficeChatDirector {
       `    warmth ${ba.warmth.toFixed(2)} (-1..1), tension ${ba.tension.toFixed(2)} (0..1), familiarity ${ba.familiarity.toFixed(2)} (0..1), ${ba.interactions} past interactions.`,
       events ? `Recent history, from A's side: ${events}.` : 'No notable recent history between them.',
       `Scene mood: ${req.mood === 'breaker-checkin' ? 'one of them has been struggling (looping/blocked) — the other checks in' : req.mood === 'celebration' ? 'one of them just finished a big task' : 'ordinary coffee-break small talk'}.`,
-      avoid.length ? `Their LAST conversation (do not repeat its jokes or phrasing): ${JSON.stringify(avoid)}` : '',
       '',
-      'Write a 2–4 line exchange, alternating strictly A, B, A, B. Rules:',
+      threadProse,
+      work,
+      '',
+      `Write a ${MIN_LINES}–${MAX_LINES} line exchange, alternating strictly A, B, A, B. Rules:`,
+      // Rhythm first, because it is the rule that stops every exchange sounding
+      // like the same machine: the LENGTH is a judgement call about this moment,
+      // not a template to fill.
+      '- Choose the LENGTH from the situation, not by habit. A passing nod is two',
+      '  lines. Someone genuinely stuck, or an argument neither will drop, earns five',
+      '  or six. Do not pad to a fixed shape and do not always land on the same one.',
+      resuming
+        ? '- They were talking about this MINUTES ago and are picking it straight back up.'
+          + ' Continue that thread — no greetings, no re-introducing the subject, no'
+          + ' restating what was already said. Move it somewhere new: agree, escalate,'
+          + ' change their mind, or finally drop it.'
+        : thread.length
+          ? '- They have talked before (above) but not recently. Start something NEW.'
+            + ' You may glance back at the old thread the way coworkers do — a callback,'
+            + ' an outcome, an unfinished argument — but do not simply resume it.'
+          : '- They have no conversation on record yet. This is where it starts.',
       `- Each line ≤ ${MAX_LINE_CHARS} characters. Lowercase-casual, dry, in character.`,
       '- Let the relationship SHOW through subtext, not exposition. If they are close,',
       '  it can read tender; if there is friction, let it snip. Never name the numbers.',
@@ -320,9 +472,59 @@ export class OfficeChatDirector {
       '  the cooler one keeps it short. Do not flatten it into mutual feeling.',
       '- They are real coworkers (software agents): shipping code, breakers, reviews',
       '  and coffee are their world. No fourth-wall breaks about being AI models.',
+      // The work context is there to be USED — but only ever talked about. This
+      // is the model-facing half of the boundary enforced structurally in
+      // officeWork.ts; the director has no writer, so a line that "decides"
+      // something decides nothing.
+      work
+        ? '- They may absolutely talk shop: swap an idea about a card, grumble about a'
+          + ' blocker, offer a hand. But this is a COFFEE BREAK, not a standup. You are'
+          + ' writing overheard conversation — never a decision, an assignment, a status'
+          + ' change or an instruction, and nothing here reaches the real board.'
+        : '',
+      // Deliberately the LAST content rule, immediately before the output-shape
+      // line: the instruction that is easiest for a cheap model to forget is the
+      // one about language, and the canned lines it plays beside are translated.
+      lang,
       '- Output ONLY a JSON array of strings. No prose, no code fence.'
     ].filter(Boolean).join('\n');
   }
+}
+
+/** The pair's running conversation, rendered for the prompt.
+ *
+ *  Attribution is the point. The transcript is stored identically on both edges
+ *  of a DIRECTIONAL book, so "who is A here" changes with whoever sat down
+ *  first; each turn carries its speaker id and is mapped onto the A/B labels of
+ *  THIS scene. A turn by someone who is not at this table (the pair met, then
+ *  one of them was replaced by a same-id respawn, say) is labelled neutrally
+ *  rather than mis-attributed — a wrong attribution is worse than a vague one.
+ *
+ *  Empty thread ⇒ empty string, and the prompt simply has no such section. */
+export function renderThread(turns: RelTurn[], a: ChatPersona, b: ChatPersona): string {
+  if (!turns.length) return '';
+  const now = Date.now();
+  const lines = turns.map((t) => {
+    const who = t.by === a.id ? 'A' : t.by === b.id ? 'B' : '?';
+    return `  ${who}: ${JSON.stringify(t.text)}`;
+  });
+  return [
+    `What they last said to each other (${agoProse(now - turns[turns.length - 1].at)}, oldest first):`,
+    ...lines
+  ].join('\n');
+}
+
+/** Coarse, human phrasing of an elapsed span. Coarse on purpose: the model only
+ *  needs to know whether this is "still going" or "a while back". */
+function agoProse(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return 'earlier';
+  const mins = Math.round(ms / 60_000);
+  if (mins < 1) return 'moments ago';
+  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
 }
 
 /** Event prose from the READER's side: `actor` when A did the thing, `subject`
@@ -363,6 +565,6 @@ export function parseExchange(text: string): string[] | null {
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
     .map((l) => (l.length > MAX_LINE_CHARS ? l.slice(0, MAX_LINE_CHARS - 1).trimEnd() + '…' : l))
-    .slice(0, 4);
-  return lines.length >= 2 ? lines : null;
+    .slice(0, MAX_LINES);
+  return lines.length >= MIN_LINES ? lines : null;
 }

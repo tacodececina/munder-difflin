@@ -729,6 +729,31 @@ const RECIPES: Record<OfficeCharacterName, Recipe> = {
   meredith: { skin: 'light', hairc: [154, 82, 46],  hair: 'styleMessy',  hairargs: { length: 15 }, cloth: 'blouse', c1: [176, 86, 74], brow: 'raised', mouth: 'smile', lashes: true },
 };
 
+/** A COPY of one fixed cast member's recipe, or undefined for a name that is not
+ *  one of the fifteen (e.g. a `custom:<uuid>` id).
+ *
+ *  Exists so a caller that wants to DERIVE a new look from an existing character
+ *  — the appearance proposals in store/lookProposal.ts — has a base to start
+ *  from. It hands back a deep-enough copy (the RGB tuples are the only nested
+ *  values) precisely because that caller's whole job is to modify what it gets:
+ *  handing out the live table would let a cosmetic tweak silently repaint one of
+ *  the fifteen fixed characters for every agent wearing it. */
+export function recipeForFixedCharacter(name: string): Recipe | undefined {
+  const r = RECIPES[name as OfficeCharacterName];
+  if (!r) return undefined;
+  const rgb = (v: RGB | undefined): RGB | undefined => (v ? [v[0], v[1], v[2]] : undefined);
+  return {
+    ...r,
+    hairc: rgb(r.hairc)!,
+    c1: rgb(r.c1)!,
+    c2: rgb(r.c2),
+    tie: rgb(r.tie),
+    pants: rgb(r.pants),
+    accessoryColor: rgb(r.accessoryColor),
+    hairargs: r.hairargs ? { ...r.hairargs } : undefined
+  };
+}
+
 /** The face/hair group (head → face → facial hair → hair → glasses), no clothing. */
 function drawHeadGroup(buf: Buf, r: Recipe): void {
   const skinBase = SKIN[r.skin].base;

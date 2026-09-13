@@ -12,10 +12,12 @@ import { DeskScreen } from './DeskScreen';
 import { DeskShelf } from './DeskShelf';
 import { countDoneByAssignee } from './deskHistory';
 import { WorldClock } from './WorldClock';
+import { ToolBubble } from './ToolBubble';
 import { MessageEnvelope, type MessageAct } from './MessageEnvelope';
-import { hexToNumber, DEFAULT_CHARACTER } from './cast';
+import { hexToNumber } from './cast';
 import { getCustomCharacter, isCustomCharacterId } from './customCast';
-import { pickSoloLine, pickExchange, cafeMoodFor, type BreakSpot, type CafeMood } from './cafeteriaLines';
+import { cafeMoodFor, beatSeconds, type BreakSpot, type CafeMood } from './cafeMood';
+import { speakOfficeLine, setOfficeVoicesEnabled, stopOfficeVoices } from './voicePlayback';
 import { pickIdleCompanion, type CompanionCandidate } from './idleAffinity';
 import { FloorWeather } from './weather';
 import { WeatherOverlay } from './WeatherOverlay';
@@ -34,24 +36,35 @@ import { patchTilesetCanvas } from './tileArt';
 
 /** A cafeteria break in progress for one agent — set by the coffee-break
  *  director, cleared when the agent leaves or gets pulled back to work. */
+/** A conversation in progress at a café table. Every line in it was written by
+ *  the model for THESE two (see src/main/officeChat.ts) — there is no canned
+ *  pool any more, so a CafeChat only ever exists when a real exchange was
+ *  brewed. Two agents who sit together with nothing brewed simply share the
+ *  table in silence. */
 interface CafeChat {
   lines: readonly string[];        // alternating beats: even = initiator, odd = partner
   partnerId: string;
   idx: number;                     // next beat to speak
-  beat: number;                    // seconds until the next beat
-  /** What the exchange is about (drives the relationship note at the end). */
+  beat: number;                    // seconds until the next beat (per-line, see beatSeconds)
+  /** What the exchange is about (scene context for the director). */
   mood: CafeMood;
-  /** True once the lines were swapped for a live model-written exchange. */
-  live: boolean;
 }
 
 interface CafeBreak {
   spotIdx: number;                 // index into cafeSpots
   phase: 'walking' | 'lingering';
   timer: number;                   // walking → elapsed watchdog; lingering → countdown
-  quipTimer: number;               // until the next solo quip swap
   chat?: CafeChat;                 // set on the conversation's initiator
   chattingWith?: string;           // set on the partner: stays put & stays quiet
+  /** A dialogue request is in flight for this agent — stops the floor from
+   *  asking twice for the same sitting while the round trip is out. */
+  asking?: boolean;
+  /** The table-mate this sitting has already been FILED against in the
+   *  relationship book. "They shared a table" is one event per sitting, but the
+   *  pairing check runs repeatedly while they linger (a silent pair keeps
+   *  asking whether the director has written anything yet), so without this the
+   *  same coffee would be noted several times over. */
+  met?: string;
 }
 
 /** An idle errand in progress for one agent. */
@@ -136,16 +149,12 @@ const SUCK_UP_KEYS = [
   'office.suckUp.6'
 ] as const;
 
-/** What they actually say once he's out of earshot. */
-const GOSSIP_KEYS = [
-  'office.gossip.0',
-  'office.gossip.1',
-  'office.gossip.2',
-  'office.gossip.3',
-  'office.gossip.4',
-  'office.gossip.5',
-  'office.gossip.6'
-] as const;
+// (The break-room gossip pool that used to live here is gone, with the rest of
+// the canned café dialogue — see cafeMood.ts. What an agent said at the coffee
+// machine corresponded to nothing real, so it is no longer said at all. The
+// suck-up pool above stays: it fires because the boss's avatar is ACTUALLY
+// standing next to that worker, and it quotes that worker's REAL closed-task
+// count.)
 
 /** Lines an avatar throws over its shoulder right after finishing a task. */
 const CHEER_KEYS = [
@@ -499,9 +508,13 @@ export function OfficeFloor() {
 
       // ─── Cafeteria: purposeful coffee breaks ───────────────────────────────
       // Idle / finished agents occasionally stroll to the break area, sit at a
-      // café table (or stand at the coffee machine / vending machine), emit an
-      // in-character one-liner, then head back. Two agents at the same table
-      // trade a two-beat quip. This is what makes "lingering" feel purposeful.
+      // café table (or stand at the coffee machine / vending machine), linger,
+      // then head back — carrying, refilling and washing a real mug on the way.
+      // They used to mutter canned one-liners the whole time; they no longer
+      // say anything unless the dialogue director has written something for
+      // this specific pair (maybePairChat below). The walk, the seat, the mug
+      // and the relationship-weighted choice of table are all unchanged: what
+      // made lingering purposeful was never the scripted banter.
       interface CafeSpot { tile: Tile; facing: Facing; spot: BreakSpot; seated: boolean; partner: number; }
       const cafeSpots: CafeSpot[] = [];
 
@@ -540,8 +553,10 @@ export function OfficeFloor() {
       // (main-side hook), plus the scene events reported below (shared breaks,
       // check-ins, celebrations). The floor reads a snapshot to (a) bias who
       // seeks whom at break time, (b) draw a small heart/spark between chatting
-      // pairs, and (c) — behind officeChatterEnabled — swap the canned exchange
-      // for one written live by the model from persona + relationship + status.
+      // pairs, and (c) — behind officeChatterEnabled — play an exchange written
+      // live by the model from persona + relationship + status + the pair's own
+      // running conversation. With the flag off there is no (c) and no dialogue
+      // at all: the canned pools that used to stand in for it are deleted.
       // The flag is read live, not just once at mount: `applyChatterEnabled`
       // is invoked both from the initial getConfig() and from every later
       // config:changed broadcast, so flipping the toggle ON while the floor
@@ -634,11 +649,25 @@ export function OfficeFloor() {
           clearAllRelFx();  // …nor a heart/spark already painted from them
         }
       };
+      // VOICES ride on their own flag (`officeVoicesEnabled`), read through the
+      // same two paths as the chatter's so a toggle lands without a remount.
+      // Two flags rather than one on purpose: the dialogue and the SOUND of it
+      // are separate appetites, and plenty of people want a floor that talks in
+      // bubbles and stays quiet in the room. Voices are meaningless without the
+      // chatter (nothing is ever written to say), but they are never implied by
+      // it. With it off `setOfficeVoicesEnabled(false)` keeps the player's own
+      // short-circuit closed, so not one clip request leaves the renderer.
+      const applyVoicesEnabled = (c: { officeChatterEnabled?: boolean; officeVoicesEnabled?: boolean }): void => {
+        setOfficeVoicesEnabled(c.officeChatterEnabled === true && c.officeVoicesEnabled === true);
+      };
       void window.cth.getConfig()
-        .then((c) => applyChatterEnabled(c.officeChatterEnabled === true))
-        .catch(() => { /* flag stays off */ });
+        .then((c) => { applyChatterEnabled(c.officeChatterEnabled === true); applyVoicesEnabled(c); })
+        .catch(() => { /* flags stay off */ });
       (app as any).__unsubChatterConfig =
-        window.cth.onConfigChanged((c) => applyChatterEnabled(c.officeChatterEnabled === true));
+        window.cth.onConfigChanged((c) => {
+          applyChatterEnabled(c.officeChatterEnabled === true);
+          applyVoicesEnabled(c);
+        });
 
       const personaFor = (agent: Agent) => ({
         id: agent.id,
@@ -651,13 +680,16 @@ export function OfficeFloor() {
       // A small pixel indicator hovering between two chatting avatars: a heart
       // when BOTH read warm, a spark when EITHER reads tense (see relBetween —
       // one indicator cannot show a lopsided pair, so it shows the shared floor
-      // of the two directions) — and a golden
-      // four-point star whenever the exchange itself is model-written (live),
-      // so a watcher can tell generated dialogue from the canned pools at a
-      // glance. Keyed by pair, repositioned each tick, removed with the chat.
+      // of the two directions). Keyed by pair, repositioned each tick, removed
+      // with the chat.
+      //
+      // (There used to be a third glyph, a golden star, meaning "this exchange
+      // is model-written rather than canned". With the canned pools deleted
+      // there is nothing left for it to distinguish — every line on the floor is
+      // written live — so it went with them.)
       interface RelFx { g: Graphics; aId: string; bId: string; t: number }
 
-      const drawRelFx = (g: Graphics, rel: RelRow | undefined, live: boolean): void => {
+      const drawRelFx = (g: Graphics, rel: RelRow | undefined): void => {
         g.clear();
         const warm = !!rel && rel.warmth >= 0.4 && rel.tension < 0.35;
         const tense = !!rel && rel.tension >= 0.4;
@@ -672,18 +704,13 @@ export function OfficeFloor() {
           g.poly([3, 0, 5, 0, 2, 3, 4, 3, 0, 7, 2, 4, 0, 4]).fill(0xf0c93d);
           g.rect(4, 0, 1, 1).fill(0xc94f4f);
         }
-        if (live) {
-          // four-point star badge, offset up-right: "this dialogue is being written"
-          const ox = 9, oy = -3;
-          g.poly([ox, oy - 3, ox + 1, oy - 1, ox + 3, oy, ox + 1, oy + 1, ox, oy + 3, ox - 1, oy + 1, ox - 3, oy, ox - 1, oy - 1]).fill(0xffd54a);
-        }
       };
 
-      const attachRelFx = (aId: string, bId: string, live: boolean): void => {
+      const attachRelFx = (aId: string, bId: string): void => {
         // Gated on the flag like every other consumer of relationship state.
-        // Everything this draws comes from the snapshot (or from a model-written
-        // exchange), so with the experiment off there is nothing to show — and a
-        // callback that lands after a toggle-off must not paint one anyway.
+        // Everything this draws comes from the snapshot, so with the experiment
+        // off there is nothing to show — and a callback that lands after a
+        // toggle-off must not paint one anyway.
         if (!chatterEnabled) return;
         const key = pairKeyOf(aId, bId);
         let fx = relFx.get(key);
@@ -695,7 +722,7 @@ export function OfficeFloor() {
           fx = { g, aId, bId, t: 0 };
           relFx.set(key, fx);
         }
-        drawRelFx(fx.g, relBetween(aId, bId), live);
+        drawRelFx(fx.g, relBetween(aId, bId));
       };
 
       const updateRelFx = (dt: number): void => {
@@ -879,79 +906,93 @@ export function OfficeFloor() {
         }
       };
 
-      /** Distance from the god's avatar in px, or Infinity when he's absent. */
-      const godDistance = (px: number, py: number): number => {
-        const god = useStore.getState().agents.find((a) => a.isGod);
-        const grt = god ? runtimes.get(god.id) : undefined;
-        if (!grt) return Infinity;
-        const p = grt.character.getPixelPosition();
-        return Math.hypot(p.x - px, p.y - py);
-      };
-
-      const emitQuip = (id: string, rt: Runtime, spotIdx: number): void => {
+      // Two agents at one table. THE CHAT IS NO LONGER STARTED LOCALLY: there is
+      // no canned pool to open with, so the floor asks the director first and a
+      // conversation exists only if a real, model-written exchange comes back
+      // (see src/main/officeChat.ts — brew-ahead, so the answer is a cache
+      // lookup and lands in milliseconds). No exchange ⇒ the two share the
+      // table in silence, which is the honest rendering of "nothing was
+      // written". Nothing here ever blocks on the model.
+      //
+      // Sitting together is a REAL event either way, so the relationship note is
+      // filed at the moment the pair is established rather than when a
+      // conversation ends — otherwise a quiet table would stop feeding the very
+      // state that decides who seeks out whom.
+      const maybePairChat = (id: string, rt: Runtime, spotIdx: number): void => {
+        if (!chatterEnabled) return;         // flag off ⇒ the office is mute
         const spot = cafeSpots[spotIdx];
-        const character = agentById(id)?.character ?? DEFAULT_CHARACTER;
-        const seed = Math.floor(Math.random() * 1e6);
-        // Out of the boss's earshot, café talk turns to… the boss. In his
-        // presence it's the usual harmless quips (the sucking up happens via
-        // the proximity director below).
-        const p = rt.character.getPixelPosition();
-        if (godDistance(p.x, p.y) > 96 && Math.random() < 0.35) {
-          rt.character.showThought(t(GOSSIP_KEYS[Math.floor(Math.random() * GOSSIP_KEYS.length)]));
-          return;
-        }
-        rt.character.showThought(pickSoloLine(character, spot.spot, seed));
-      };
-
-      // If the newcomer's table-mate is already lingering (and neither is mid-
-      // conversation), start a multi-beat exchange. The newcomer is the
-      // initiator and owns the script; the partner just gets marked engaged.
-      // Returns true if a chat was started.
-      const maybePairChat = (id: string, rt: Runtime, spotIdx: number): boolean => {
-        const spot = cafeSpots[spotIdx];
-        if (spot.partner < 0 || !rt.brk) return false;
+        if (spot.partner < 0 || !rt.brk || rt.brk.asking) return;
         const partnerId = cafeTaken[spot.partner];
-        if (!partnerId) return false;
+        if (!partnerId) return;
         const prt = runtimes.get(partnerId);
-        if (!prt?.brk || prt.brk.phase !== 'lingering') return false;
-        if (rt.brk.chat || rt.brk.chattingWith || prt.brk.chat || prt.brk.chattingWith) return false;
+        if (!prt?.brk || prt.brk.phase !== 'lingering' || prt.brk.asking) return;
+        if (rt.brk.chat || rt.brk.chattingWith || prt.brk.chat || prt.brk.chattingWith) return;
         const speakerAgent = agentById(id);
         const partnerAgent = agentById(partnerId);
-        const character = speakerAgent?.character ?? DEFAULT_CHARACTER;
-        const mood = cafeMoodFor(speakerAgent?.status, partnerAgent?.status);
-        const lines = pickExchange(character, Math.floor(Math.random() * 1e6), mood);
-        const chat: CafeChat = { lines, partnerId, idx: 0, beat: 0.4, mood, live: false };
-        rt.brk.chat = chat;
-        prt.brk.chattingWith = id;
-        attachRelFx(id, partnerId, false);
-        // The experiment: swap in a model-written exchange when one has been
-        // brewed for this pair (see officeChat.ts — brew-ahead, never blocking).
-        // The 0.4s opening beat gives the IPC round trip (cache lookup only,
-        // milliseconds) room to land before the first canned line is spoken.
-        if (chatterEnabled && speakerAgent && partnerAgent && window.cth.officeChatRequest) {
-          void window.cth.officeChatRequest({
-            a: personaFor(speakerAgent),
-            b: personaFor(partnerAgent),
-            mood,
-            spot: spot.spot
-          }).then((res) => {
-            if (!res?.lines?.length) return;
-            if (rt.brk?.chat === chat && chat.idx === 0) {
-              chat.lines = res.lines;
-              chat.live = true;
-              attachRelFx(id, partnerId, true);
-              return;
-            }
-            // The conversation moved on (the opening beat already played, or the
-            // break ended). These lines were generated and paid for, so hand them
-            // back rather than dropping them: the director holds them for the next
-            // time THIS speaker opens with THIS partner — the exchange alternates
-            // starting with the opener, so the direction has to match.
+        if (!speakerAgent || !partnerAgent || !window.cth.officeChatRequest) return;
+        const mood = cafeMoodFor(speakerAgent.status, partnerAgent.status);
+
+        // They sat down together: that happened, so record it now — ONCE per
+        // sitting, whether or not anything gets said. A check-in is filed from
+        // the agent who ISN'T stuck, even when the stuck one is the one who
+        // walked over.
+        if (rt.brk.met !== partnerId) {
+          rt.brk.met = partnerId;
+          prt.brk.met = id;
+          const struggling = (who: string): boolean => {
+            const s = agentById(who)?.status;
+            return s === 'looping' || s === 'blocked';
+          };
+          const kind = mood === 'breaker-checkin' ? 'checkin'
+            : mood === 'celebration' ? 'celebrated'
+              : 'cafe';
+          const flip = kind === 'checkin' && struggling(id) && !struggling(partnerId);
+          noteRel(flip ? partnerId : id, flip ? id : partnerId, kind);
+        }
+
+        // Claim both sides for the duration of the round trip so the every-frame
+        // poll below cannot fire a second request for the same sitting.
+        rt.brk.asking = true;
+        prt.brk.asking = true;
+        const clearAsking = (): void => {
+          if (rt.brk) rt.brk.asking = false;
+          const p = runtimes.get(partnerId);
+          if (p?.brk) p.brk.asking = false;
+        };
+        void window.cth.officeChatRequest({
+          a: personaFor(speakerAgent),
+          b: personaFor(partnerAgent),
+          mood,
+          spot: spot.spot
+        }).then((res) => {
+          clearAsking();
+          if (!res?.lines?.length) return;   // nothing written → they sit quietly
+          // Re-read both breaks AFTER the await: either agent may have stood up,
+          // been pulled back to real work, or started another chat meanwhile.
+          const mine = rt.brk;
+          const theirs = runtimes.get(partnerId)?.brk;
+          const stillSeated = !!mine && !!theirs
+            && mine.spotIdx === spotIdx && mine.phase === 'lingering' && !mine.chat
+            && theirs.phase === 'lingering' && !theirs.chat && !theirs.chattingWith;
+          if (!stillSeated) {
+            // One of them got up (or was pulled back to real work) while the
+            // request was out. These lines were generated and paid for, so hand
+            // them back rather than dropping them: the director replays them the
+            // next time THIS speaker opens with THIS partner — the exchange
+            // alternates starting with the opener, so the direction has to match.
             // Returned (not voided) so the trailing catch covers a stale bridge.
             return window.cth.officeChatStash?.(id, partnerId, res.lines);
-          }).catch(() => { /* canned lines stand */ });
-        }
-        return true;
+          }
+          // A short opening pause so the first line doesn't land the instant they
+          // sit; after that each beat is paced by its own line (see beatSeconds).
+          mine.chat = { lines: res.lines, partnerId, idx: 0, beat: 0.5 + Math.random() * 0.7, mood };
+          theirs.chattingWith = id;
+          // Keep both at the table long enough for the whole exchange.
+          const needed = 2 + res.lines.length * 3;
+          mine.timer = Math.max(mine.timer, needed);
+          theirs.timer = Math.max(theirs.timer, needed);
+          attachRelFx(id, partnerId);
+        }).catch(() => { clearAsking(); /* they sit quietly */ });
       };
 
       // Free a café seat and tidy up any conversation links so neither agent is
@@ -1019,7 +1060,7 @@ export function OfficeFloor() {
       const startBreakAt = (id: string, rt: Runtime, idx: number): void => {
         const spot = cafeSpots[idx];
         cafeTaken[idx] = id;
-        rt.brk = { spotIdx: idx, phase: 'walking', timer: 0, quipTimer: 0 };
+        rt.brk = { spotIdx: idx, phase: 'walking', timer: 0 };
         const c = rt.character;
         // A mug still parked on the desk comes along to the break — it stays
         // in hand through the lingering (sipping at the table) and gets either
@@ -1035,9 +1076,11 @@ export function OfficeFloor() {
           else { c.setIdle(); c.faceDirection(spot.facing); }
           rt.brk.phase = 'lingering';
           rt.brk.timer = 8 + Math.random() * 8;   // 8–16s of lingering
-          rt.brk.quipTimer = 4 + Math.random() * 4;
-          // Start a conversation if the table-mate is here; otherwise a solo quip.
-          if (!maybePairChat(id, rt, idx)) emitQuip(id, rt, idx);
+          // Drop whatever status bubble the avatar walked in with: a break is a
+          // break, and there is nothing to replace it with unless the table-mate
+          // is here AND the director has an exchange written for the two of them.
+          c.hideThought();
+          maybePairChat(id, rt, idx);
         });
       };
 
@@ -1111,7 +1154,7 @@ export function OfficeFloor() {
       // that already flies a MessageEnvelope between their desks — see
       // spawnHandoff below), send both to a shared table for a brief exchange
       // if they're free to wander. Reuses the cafeteria break machinery above
-      // wholesale (walking, seating, the two-beat chat from cafeteriaLines.ts)
+      // wholesale (walking, seating, and whatever the director has written)
       // instead of a parallel system. A little more permissive than a random
       // break (status 'waiting' also qualifies — that's the common state right
       // after handing work off) but otherwise the same "don't yank someone off
@@ -1175,51 +1218,56 @@ export function OfficeFloor() {
           // lingering
           if (b.chat) {
             // Play the conversation one beat at a time, alternating speakers.
+            // The PACE is per-line now (beatSeconds): a three-word jab clears
+            // fast, a full sentence hangs. The flat 2.4s every line used to get
+            // is most of why these exchanges read like a metronome.
             b.chat.beat -= dt;
             if (b.chat.beat <= 0) {
               if (b.chat.idx < b.chat.lines.length) {
+                const line = b.chat.lines[b.chat.idx];
+                const speakerId = (b.chat.idx % 2 === 0) ? id : b.chat.partnerId;
                 const speaker = (b.chat.idx % 2 === 0) ? rt : runtimes.get(b.chat.partnerId);
-                speaker?.character.showThought(b.chat.lines[b.chat.idx]);
+                speaker?.character.showThought(line);
+                // …and, if voices are on, say it out loud in this agent's voice.
+                // THE ONLY PLACE SOUND IS EVER REQUESTED, and deliberately so:
+                // it is the exact moment a line becomes visible on the floor, so
+                // audio can only ever accompany dialogue the user can watch
+                // happening. Fire-and-forget — the beat does not wait for it, is
+                // not told whether anything was heard, and behaves identically
+                // when nothing is (see voicePlayback.ts).
+                const speakerAgent = agentById(speakerId);
+                speakOfficeLine({
+                  agentId: speakerId,
+                  // The RAW cast key, not the themed display name `personaFor`
+                  // sends the writer: the voice map is keyed on the character an
+                  // agent IS, which is also what its sprite is drawn from.
+                  character: speakerAgent?.character ?? '',
+                  text: line
+                });
                 b.chat.idx++;
-                b.chat.beat = 2.4;                // seconds per line
-                b.timer = Math.max(b.timer, 3.5); // keep both around to finish
+                b.chat.beat = beatSeconds(line, Math.random());
+                // Keep both around long enough to finish what's left.
+                const left = 1.5 + (b.chat.lines.length - b.chat.idx) * 3;
+                b.timer = Math.max(b.timer, left);
                 const prt = runtimes.get(b.chat.partnerId);
-                if (prt?.brk) prt.brk.timer = Math.max(prt.brk.timer, 3.5);
+                if (prt?.brk) prt.brk.timer = Math.max(prt.brk.timer, left);
               } else {
-                // Conversation over — release the partner and resume solo quips.
-                // The completed exchange is REAL shared history: fold it into the
-                // relationship book (a check-in or celebration bonds more than
-                // ordinary small talk — see officeRel.ts's impulse table).
+                // Conversation over. The relationship event was already filed
+                // when the pair SAT DOWN (see maybePairChat) — sitting together
+                // is the real thing that happened, and filing it there is what
+                // keeps a silent table feeding the book too.
                 const prt = runtimes.get(b.chat.partnerId);
                 if (prt?.brk) prt.brk.chattingWith = undefined;
-                // WHICH WAY the event is filed matters now that the book is
-                // directional. Normally the initiator is whoever opened the
-                // conversation (`id`). A check-in is the exception: the one
-                // doing the comforting is the agent who ISN'T stuck, even when
-                // the stuck one is the one who sat down and started talking.
-                const partnerId = b.chat.partnerId;
-                const kind = b.chat.mood === 'breaker-checkin' ? 'checkin'
-                  : b.chat.mood === 'celebration' ? 'celebrated'
-                  : 'cafe';
-                const struggling = (who: string): boolean => {
-                  const s = agentById(who)?.status;
-                  return s === 'looping' || s === 'blocked';
-                };
-                const flip = kind === 'checkin' && struggling(id) && !struggling(partnerId);
-                noteRel(flip ? partnerId : id, flip ? id : partnerId, kind);
                 removeRelFxInvolving(id);
                 b.chat = undefined;
               }
             }
           } else if (!b.chattingWith) {
-            // Not in a conversation (and not being spoken to) — swap a solo quip.
-            b.quipTimer -= dt;
-            if (b.quipTimer <= 0) {
-              b.quipTimer = 4 + Math.random() * 4;
-              emitQuip(id, rt, b.spotIdx);
-            }
-            // Occasionally strike up a chat with a table-mate who arrived too.
-            else if (Math.random() < 0.004) maybePairChat(id, rt, b.spotIdx);
+            // Sitting alone, or sitting with someone and nothing written for the
+            // two of them: no bubble. The floor says nothing it cannot back up.
+            // Keep checking whether a table-mate has since arrived — rarely, so
+            // one sitting cannot spam the director with requests.
+            if (Math.random() < 0.004) maybePairChat(id, rt, b.spotIdx);
           }
           b.timer -= dt;
           if (b.timer <= 0) endBreak(id, rt);
@@ -1465,8 +1513,10 @@ export function OfficeFloor() {
       // ─── The boss aura: performative excellence in Michael's presence ──────
       // When the god's avatar wanders close to a worker, the worker bursts
       // into suck-up mode — including REAL stats ("already shipped N tasks,
-      // Michael. raise?" with N from the actual ledger). What they say once
-      // he's out of earshot is a different story (see emitQuip's gossip).
+      // Michael. raise?" with N from the actual ledger). This one survived the
+      // cull of canned dialogue because it is anchored to two real facts: the
+      // boss's avatar really is standing there, and the number really is that
+      // worker's closed-task count.
       const lastSuckUp = new Map<string, number>();
       let doneByAssignee = new Map<string, number>();
       let statsAge = 999;
@@ -1641,21 +1691,106 @@ export function OfficeFloor() {
       drawTaskBoard([]);
 
       // ─── The office clock: clicking it is CLOCKING OUT ─────────────────────
-      // The wall clock beside Michael's window doubles as the quit entry:
-      // a click runs the real close flow (window.close() → the main process
-      // intercepts while agents run → the "Quitting now?" dialog with its
-      // closing-time option). The office clock literally opens quitting time.
+      // The wall clock beside Michael's window is the END-OF-DAY control: it
+      // opens the confirmation that leads into closing time and, eventually,
+      // the app closing.
+      //
+      // It used to be an INVISIBLE hit box over the wall tiles whose click went
+      // straight to window.close(). A user pressed it, the app went away, and
+      // they reported a crash — which is what an unannounced quit is, from the
+      // outside. Three things changed here, and each one is load-bearing:
+      //
+      //   1. It ASKS. The tap raises a store request; App.tsx renders the
+      //      confirmation (components/ClockOutConfirmModal.tsx) and only its
+      //      confirm button ever reaches window.close(). Nothing in this file
+      //      can close the app any more.
+      //   2. It is DRAWN, as a red alarm clock with a breathing outline — the
+      //      same "this is interactive" pulse the ASK ME board above already
+      //      uses. Phase 1 hung a second clock on this same wall (WorldClock.ts,
+      //      a dark digital CN/MX panel, eventMode 'none'), so the one that ends
+      //      the session has to be the one that does not look like wall dressing.
+      //   3. It ANNOUNCES ITSELF on hover, in words, before the click.
+      const CLOCK_INK = 0x4a3b52;    // the props' shared outline ink
+      const CLOCK_BODY = 0xc94f4f;   // coral — the app's destructive/attention hue
+      const CLOCK_FACE = 0xf2ead8;   // cream, same page white as the calendar
       const clockG = new Graphics();
       clockG.eventMode = 'static';
       clockG.cursor = 'pointer';
       clockG.position.set(theme.anchors.clock.x * ts0, theme.anchors.clock.y * ts0);
-      clockG.hitArea = { contains: (x: number, y: number) => x >= 0 && x <= 16 && y >= 0 && y <= 32 };
+      // Matches the drawn art (bells stick 3px above, feet 2px below), with a
+      // 2px grab margin. The old box was 16x32 of nothing in particular.
+      clockG.hitArea = { contains: (x: number, y: number) => x >= -2 && x <= 18 && y >= -6 && y <= 24 };
       clockG.zIndex = 3 * ts0;
+      let clockPulse = 0;
+      let clockHover = false;
+      // The ring breathes slowly, so a full per-frame rebuild of the prop is
+      // pure waste. Redraw ~12x/second — and immediately when hover flips, so
+      // the pointer feedback is never a frame behind the pointer.
+      let clockRedrawAcc = 0;
+      let clockDrawnHover = false;
+      /** The alarm clock, redrawn per frame so the attention ring can breathe.
+       *  `hover` brightens the ring and lifts the body a shade — the prop has
+       *  no other way to acknowledge the pointer. */
+      const drawClock = (pulse: number, hover: boolean): void => {
+        clockG.clear();
+        // bells + hammer bar
+        clockG.rect(1, -3, 4, 3).fill(CLOCK_BODY);
+        clockG.rect(11, -3, 4, 3).fill(CLOCK_BODY);
+        clockG.rect(5, -2, 6, 1).fill(CLOCK_INK);
+        // case
+        clockG.rect(0, 0, 16, 18).fill(CLOCK_INK);
+        clockG.rect(1, 1, 14, 16).fill(hover ? 0xe06a62 : CLOCK_BODY);
+        // feet
+        clockG.rect(1, 18, 3, 2).fill(CLOCK_INK);
+        clockG.rect(12, 18, 3, 2).fill(CLOCK_INK);
+        // face + quarter ticks
+        clockG.rect(3, 3, 10, 12).fill(CLOCK_FACE);
+        for (const [tx, ty] of [[7, 4], [7, 13], [4, 8], [11, 8]]) {
+          clockG.rect(tx, ty, 1, 1).fill(0x8a755f);
+        }
+        // hands at five o'clock — the same reading as the `clock` UI icon, and
+        // the office shorthand for the end of the day.
+        clockG.rect(8, 5, 1, 4).fill(CLOCK_INK);   // minute hand, straight up
+        clockG.rect(8, 9, 1, 1).fill(CLOCK_INK);   // pivot
+        clockG.rect(9, 10, 1, 1).fill(CLOCK_INK);  // hour hand, down-right
+        clockG.rect(9, 11, 1, 1).fill(CLOCK_INK);
+        // the attention ring: this prop DOES something (cf. the ASK ME board)
+        const a = hover ? 0.95 : 0.3 + 0.22 * Math.sin(pulse * 2);
+        clockG.rect(-2, -5, 20, 27).stroke({ color: CLOCK_BODY, width: 1, alpha: a });
+      };
+      drawClock(0, false);
+      charLayer.addChild(clockG);
+
+      // The hover label. The scene has no tooltip layer of any kind — props
+      // (calendar, boards, ASK ME) are silent until clicked, and a canvas has
+      // no native `title`. Rather than build a tooltip system for one prop,
+      // this reuses ToolBubble, the floor's existing "monospace text in a dark
+      // bubble" (the same class WorldClock.ts already points at as the house
+      // technique). If more props ever need labels, THIS is the thing to
+      // generalise — it is one bubble, positioned by hand, on purpose.
+      const clockHint = new ToolBubble();
+      clockHint.hide();
+      charLayer.addChild(clockHint.container);
+      const clockHintX = theme.anchors.clock.x * ts0 + 8;
+      // ToolBubble anchors ABOVE the point it is given (OFFSET_Y = -36). The
+      // clock hangs at the very top of the map, so aim well below it and let
+      // the bubble rise back into the gap under the clock instead of off-world.
+      const clockHintY = theme.anchors.clock.y * ts0 + 78;
+      clockG.on('pointerover', () => {
+        clockHover = true;
+        clockHint.showText(t('office.clockOut.hint'));
+        clockHint.setPosition(clockHintX, clockHintY);
+      });
+      clockG.on('pointerout', () => {
+        clockHover = false;
+        clockHint.hide();
+      });
       clockG.on('pointertap', (ev) => {
         ev.stopPropagation();
-        window.close(); // intercepted by the main process while PTYs are alive
+        clockHint.hide();
+        // ASKS — never closes. See ClockOutConfirmModal / store/clockOut.ts.
+        useStore.getState().requestClockOut();
       });
-      charLayer.addChild(clockG);
 
       // ─── The ASK ME board: tasks waiting on the HUMAN, first class ─────────
       // Hangs on the right wall run (between the second doorway and the war
@@ -2082,7 +2217,7 @@ export function OfficeFloor() {
           }
           if (agent.status === 'blocked') {
             // Waiting on the human is a legitimate, often long-lived state —
-            // let it linger at the café (see cafeteriaLines.ts's breaker-checkin
+            // let it linger at the café (see cafeMood.ts's breaker-checkin
             // mood) instead of yanking it back to the wait tile. 'looping'
             // still falls through to releaseBreak below.
             c.setStatusGlyph('blocked');
@@ -2335,6 +2470,16 @@ export function OfficeFloor() {
         updateBoardMoves(dt);
         updateRelFx(dt);
         worldClock.update(dt);
+        // The end-of-day clock breathes so it never reads as wall dressing,
+        // and its hover label fades in through ToolBubble's own state machine.
+        clockPulse += dt;
+        clockRedrawAcc += dt;
+        if (clockRedrawAcc >= 0.08 || clockHover !== clockDrawnHover) {
+          clockRedrawAcc = 0;
+          clockDrawnHover = clockHover;
+          drawClock(clockPulse, clockHover);
+        }
+        clockHint.update(dt);
         updateWeather(dt);
         resolveBubbleOverlaps();
         for (let i = envelopes.length - 1; i >= 0; i--) {
@@ -2400,6 +2545,11 @@ export function OfficeFloor() {
 
     return () => {
       mountIdRef.current++;
+      // Silence the break room before the scene it belongs to is gone: a clip
+      // still sounding (or still in the air) after the floor unmounts is a voice
+      // with nothing on screen behind it. Unconditional — it is a no-op when
+      // voices are off, which is the default.
+      try { stopOfficeVoices(); } catch { /* noop */ }
       const a = appRef.current;
       if (a) {
         (a as any).__glRecovery?.();

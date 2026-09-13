@@ -282,6 +282,33 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     setVisitorMode(next);
     stage({ visitorMode: next } as Partial<HarnessConfig>);
   };
+  /**
+   * UNATTENDED LAUNCH — open the last config instead of the launch picker.
+   *
+   * `=== true` for the same reason visitor mode uses it: OFF is the default and
+   * an absent value must read as off, so nobody's launch changes because they
+   * upgraded. Staged through the one-save path like every other toggle here.
+   *
+   * The picker stays reachable with it on — the button in the row below walks
+   * back to it — and the renderer still checks the folder exists before it opens
+   * anything (App.tsx), so this never boots into a hive that is no longer there.
+   */
+  const [alwaysOpenLastHive, setAlwaysOpenLastHive] = useState<boolean>(
+    cfgX.alwaysOpenLastHive === true
+  );
+  const toggleAlwaysOpenLastHive = (): void => {
+    const next = !alwaysOpenLastHive;
+    setAlwaysOpenLastHive(next);
+    stage({ alwaysOpenLastHive: next } as Partial<HarnessConfig>);
+  };
+  /** Walk back to the launch picker. App owns that screen (and this modal's open
+   *  state), so this goes through the same `cth:` window-event convention the
+   *  deep link into Settings uses rather than threading a prop down. Staged edits
+   *  would be dropped, so it asks first — exactly like closing the modal does. */
+  const showHivePicker = (): void => {
+    if (dirty && !window.confirm(t('settings.unsavedWarning'))) return;
+    window.dispatchEvent(new CustomEvent('cth:show-hive-picker'));
+  };
   const [simpleMode, setSimpleMode] = useState<boolean>(cfgX.audience === 'non-technical');
   // Renderer-local, not part of HarnessConfig — it only changes how this window
   // paints pty output. Read once; the setter keeps localStorage in step.
@@ -525,6 +552,164 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     catch { setOfficeChatterOn(!next); }
   };
 
+  // ─── Which ENGINE writes the chatter ───────────────────────────────────────
+  // Default 'claude-hidden' brews through a hidden `claude` CLI session — the
+  // SAME subscription the agents doing real work draw on, so a talkative office
+  // competes with the agents fixing real incidents. 'openai-compatible' points
+  // the decoration at any `POST /chat/completions` endpoint (DeepSeek, MiniMax,
+  // opencode-go, a local Ollama / LM Studio) and makes it genuinely independent.
+  //
+  // The KEY is write-only from here: `chatterStatus()` returns presence, never
+  // the value, and main strips it from every config payload. So the input starts
+  // EMPTY even when a key is stored, and submitting an empty string is how the
+  // user clears it — hence the separate "key is set" note.
+  const setHasChatterKeyStore = useStore((s) => s.setHasChatterKey);
+  const hasChatterKey = useStore((s) => s.hasChatterKey);
+  const [chatterProvider, setChatterProvider] =
+    useState<'claude-hidden' | 'openai-compatible'>(config.chatterProvider ?? 'claude-hidden');
+  const [chatterBaseUrl, setChatterBaseUrl] = useState(config.chatterBaseUrl ?? '');
+  const [chatterKey, setChatterKey] = useState('');
+  const [showChatterKey, setShowChatterKey] = useState(false);
+  const [chatterRoutineModel, setChatterRoutineModel] = useState('');
+  const [chatterMilestoneModel, setChatterMilestoneModel] = useState('');
+  const [chatterBudget, setChatterBudget] = useState('');
+  const [chatterSpent, setChatterSpent] = useState(0);
+  const [chatterNote, setChatterNote] = useState('');
+  const [chatterBusy, setChatterBusy] = useState(false);
+
+  /** Re-read the chatter settings from main (presence, not the key). */
+  const loadChatterStatus = async (): Promise<void> => {
+    try {
+      const s = await window.cth.chatterStatus();
+      setChatterProvider(s.provider);
+      setChatterBaseUrl(s.baseUrl);
+      setChatterRoutineModel(s.routineModel);
+      setChatterMilestoneModel(s.milestoneModel);
+      setChatterBudget(String(s.tokenBudgetPerHour));
+      setChatterSpent(s.tokensSpentThisHour);
+      setHasChatterKeyStore(s.hasApiKey);
+    } catch { /* older main build — the section stays on its seeded values */ }
+  };
+
+  const saveChatter = async (providerOverride?: 'claude-hidden' | 'openai-compatible'): Promise<void> => {
+    const provider = providerOverride ?? chatterProvider;
+    setChatterBusy(true); setChatterNote('');
+    try {
+      const budget = Number(chatterBudget);
+      await window.cth.chatterSetConfig({
+        provider,
+        baseUrl: chatterBaseUrl,
+        // Only send the key field when the user actually typed one, so a plain
+        // "save the base URL" does not silently wipe a stored credential. The
+        // explicit Clear button below is the one path that blanks it.
+        ...(chatterKey ? { apiKey: chatterKey } : {}),
+        routineModel: chatterRoutineModel,
+        milestoneModel: chatterMilestoneModel,
+        ...(Number.isFinite(budget) && budget >= 0 ? { tokenBudgetPerHour: budget } : {})
+      });
+      if (chatterKey) { setHasChatterKeyStore(true); setChatterKey(''); setShowChatterKey(false); }
+      setChatterNote('saved');
+      void loadChatterStatus();
+    } catch (e) {
+      setChatterNote(e instanceof Error ? e.message : String(e));
+    } finally { setChatterBusy(false); }
+  };
+
+  /** Forget the stored credential. The renderer cannot read it, so an explicit
+   *  empty write is the only way to remove one. */
+  const clearChatterKey = async (): Promise<void> => {
+    setChatterBusy(true); setChatterNote('');
+    try {
+      await window.cth.chatterSetConfig({ apiKey: '' });
+      setChatterKey('');
+      setHasChatterKeyStore(false);
+      setChatterNote('key cleared');
+    } catch (e) {
+      setChatterNote(e instanceof Error ? e.message : String(e));
+    } finally { setChatterBusy(false); }
+  };
+
+  // ─── Office VOICES (MiniMax TTS — the café dialogue said out loud) ─────────
+  // Its OWN toggle, deliberately not folded into the chatter switch: text and
+  // sound are separate appetites. The MiniMax key is write-only here for the
+  // same reason the chatter key is — main strips it from every config payload,
+  // so this process only ever learns whether one is SET.
+  const setHasMinimaxKeyStore = useStore((s) => s.setHasMinimaxKey);
+  const hasMinimaxKey = useStore((s) => s.hasMinimaxKey);
+  const [officeVoicesOn, setOfficeVoicesOn] = useState<boolean>(config.officeVoicesEnabled === true);
+  const [minimaxKey, setMinimaxKey] = useState('');
+  const [showMinimaxKey, setShowMinimaxKey] = useState(false);
+  // Mirrors DEFAULT_MINIMAX_MODEL in src/main/officeVoices.ts (the renderer
+  // cannot import main); it is only a placeholder until `officeVoices:status`
+  // answers with what is actually stored.
+  const [minimaxModel, setMinimaxModel] = useState('speech-2.6-turbo');
+  const [minimaxEndpoint, setMinimaxEndpoint] = useState('');
+  const [minimaxGroupId, setMinimaxGroupId] = useState('');
+  const [voiceMaxPerMinute, setVoiceMaxPerMinute] = useState('');
+  const [voicesNote, setVoicesNote] = useState('');
+  const [voicesBusy, setVoicesBusy] = useState(false);
+
+  /** Re-read voice settings from main (presence, not the key). */
+  const loadVoicesStatus = async (): Promise<void> => {
+    try {
+      const s = await window.cth.officeVoicesStatus?.();
+      if (!s) return;
+      setOfficeVoicesOn(s.enabled);
+      setMinimaxModel(s.model);
+      setMinimaxEndpoint(s.endpoint);
+      setMinimaxGroupId(s.groupId);
+      setVoiceMaxPerMinute(String(s.maxPerMinute));
+      setHasMinimaxKeyStore(s.hasApiKey);
+    } catch { /* section renders with its defaults */ }
+  };
+
+  /** Writes immediately rather than staging, unlike the chatter toggle beside
+   *  it. Same exception the API-key fields get: this whole block is served by
+   *  `officeVoices:setConfig` because the key cannot be read back into a staged
+   *  form, and routing the flag through the generic staged patch as well would
+   *  mean two writers for one section that can disagree with each other. */
+  const toggleOfficeVoices = async (): Promise<void> => {
+    const next = !officeVoicesOn;
+    setOfficeVoicesOn(next);
+    try { await window.cth.officeVoicesSetConfig({ enabled: next }); }
+    catch { setOfficeVoicesOn(!next); }
+  };
+
+  const saveVoices = async (): Promise<void> => {
+    setVoicesBusy(true); setVoicesNote('');
+    try {
+      const perMinute = Number(voiceMaxPerMinute);
+      await window.cth.officeVoicesSetConfig({
+        model: minimaxModel,
+        endpoint: minimaxEndpoint,
+        groupId: minimaxGroupId,
+        // Only send the key when one was typed: an empty field means "leave the
+        // stored one alone", because this process cannot read it back to resend.
+        ...(minimaxKey ? { apiKey: minimaxKey } : {}),
+        ...(Number.isFinite(perMinute) ? { maxPerMinute: perMinute } : {})
+      });
+      if (minimaxKey) { setHasMinimaxKeyStore(true); setMinimaxKey(''); setShowMinimaxKey(false); }
+      setVoicesNote('saved');
+      void loadVoicesStatus();
+    } catch (e) {
+      setVoicesNote(e instanceof Error ? e.message : String(e));
+    } finally { setVoicesBusy(false); }
+  };
+
+  /** Forget the stored MiniMax key — an explicit empty write is the only way,
+   *  since the renderer cannot read it. */
+  const clearMinimaxKey = async (): Promise<void> => {
+    setVoicesBusy(true); setVoicesNote('');
+    try {
+      await window.cth.officeVoicesSetConfig({ apiKey: '' });
+      setMinimaxKey('');
+      setHasMinimaxKeyStore(false);
+      setVoicesNote('key cleared');
+    } catch (e) {
+      setVoicesNote(e instanceof Error ? e.message : String(e));
+    } finally { setVoicesBusy(false); }
+  };
+
   // --- Free Flow (voice dictation → message queue) ---
   const setFreeflowEnabledStore = useStore((s) => s.setFreeflowEnabled);
   const setHasGroqKeyStore = useStore((s) => s.setHasGroqKey);
@@ -588,6 +773,11 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
       setFreeflowModel(cc.freeflowModel ?? 'whisper-large-v3-turbo');
       setIdleDisconnectMs((c as HarnessConfig).realtimeIdleDisconnectMs ?? 180_000);
     }).catch(() => { /* keep prop-seeded values */ });
+    // The chatter engine comes from its OWN handler, not from getConfig: the key
+    // is stripped there, and presence is the only thing this surface may know.
+    void loadChatterStatus();
+    // Same contract for the MiniMax voice key: its own handler, presence only.
+    void loadVoicesStatus();
     window.cth.kgStatus().then((s) => { if (alive) setKgDocCount(s.docCount); })
       .catch(() => { /* status unavailable */ });
     // Hydrate live connection state + the persisted Request URL: the
@@ -1049,6 +1239,42 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                               {visitorMode ? t('common.on') : t('common.off')}
                             </PixelButton>
                           </div>
+                          {/* Unattended launch. Sits with the environment
+                              toggles because it describes the machine this runs
+                              on — whether a restart here can bring the floor
+                              back with nobody in front of the screen. */}
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
+                                {t('settings.general.alwaysOpenLastHive')}
+                              </span>
+                              <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                {t('settings.general.alwaysOpenLastHiveDesc')}
+                              </span>
+                            </div>
+                            <PixelButton
+                              variant={alwaysOpenLastHive ? 'primary' : 'secondary'}
+                              size="sm"
+                              onClick={toggleAlwaysOpenLastHive}
+                            >
+                              {alwaysOpenLastHive ? t('common.on') : t('common.off')}
+                            </PixelButton>
+                          </div>
+                          {/* …and the way back to it, right underneath, so the
+                              toggle above can never strand anyone. */}
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
+                                {t('settings.general.hivePicker')}
+                              </span>
+                              <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                {t('settings.general.hivePickerDesc')}
+                              </span>
+                            </div>
+                            <PixelButton variant="secondary" size="sm" onClick={showHivePicker}>
+                              {t('settings.general.showHivePicker')}
+                            </PixelButton>
+                          </div>
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                               <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
@@ -1214,6 +1440,229 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                             {officeChatterOn ? t('common.on') : t('common.off')}
                           </PixelButton>
                         </div>
+                        {/* WHICH ENGINE writes it. Only shown with the experiment on —
+                            with it off nothing brews, so the choice is moot. */}
+                        {officeChatterOn && (
+                          <>
+                            <div style={{ height: 10 }} />
+                            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, width: 280 }}>
+                              <span style={slackLabelStyle}>{t('settings.general.chatterProvider')}</span>
+                              <select
+                                value={chatterProvider}
+                                onChange={(e) => {
+                                  const next = e.target.value === 'openai-compatible' ? 'openai-compatible' : 'claude-hidden';
+                                  setChatterProvider(next);
+                                  void saveChatter(next);
+                                }}
+                                style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                              >
+                                <option value="claude-hidden">{t('settings.general.chatterProviderClaude')}</option>
+                                <option value="openai-compatible">{t('settings.general.chatterProviderOpenAi')}</option>
+                              </select>
+                            </label>
+                            <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                              {chatterProvider === 'openai-compatible'
+                                ? t('settings.general.chatterProviderOpenAiDesc')
+                                : t('settings.general.chatterProviderClaudeDesc')}
+                            </span>
+
+                            {chatterProvider === 'openai-compatible' && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+                                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                  <span style={slackLabelStyle}>{t('settings.general.chatterBaseUrl')}</span>
+                                  <input
+                                    type="text"
+                                    value={chatterBaseUrl}
+                                    onChange={(e) => setChatterBaseUrl(e.target.value)}
+                                    placeholder={t('settings.general.chatterBaseUrlPlaceholder')}
+                                    style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                  />
+                                </label>
+
+                                {/* Write-only: the field is blank even when a key is
+                                    stored, because the value never reaches this process. */}
+                                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                  <span style={slackLabelStyle}>{t('settings.general.chatterApiKey')}</span>
+                                  <div style={{ display: 'flex', gap: 6 }}>
+                                    <input
+                                      type={showChatterKey ? 'text' : 'password'}
+                                      value={chatterKey}
+                                      onChange={(e) => setChatterKey(e.target.value)}
+                                      placeholder={hasChatterKey
+                                        ? t('settings.general.chatterApiKeyStored')
+                                        : t('settings.general.chatterApiKeyPlaceholder')}
+                                      style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                    />
+                                    <PixelButton variant="secondary" size="sm" onClick={() => setShowChatterKey((v) => !v)} disabled={!chatterKey}>
+                                      {showChatterKey ? t('common.hide') : t('common.show')}
+                                    </PixelButton>
+                                    <PixelButton variant="secondary" size="sm" onClick={() => void clearChatterKey()} disabled={!hasChatterKey || chatterBusy}>
+                                      {t('common.clear')}
+                                    </PixelButton>
+                                  </div>
+                                </label>
+
+                                <div style={{ display: 'flex', gap: 10 }}>
+                                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                                    <span style={slackLabelStyle}>{t('settings.general.chatterRoutineModel')}</span>
+                                    <input
+                                      type="text"
+                                      value={chatterRoutineModel}
+                                      onChange={(e) => setChatterRoutineModel(e.target.value)}
+                                      placeholder="deepseek-chat"
+                                      style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                    />
+                                  </label>
+                                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                                    <span style={slackLabelStyle}>{t('settings.general.chatterMilestoneModel')}</span>
+                                    <input
+                                      type="text"
+                                      value={chatterMilestoneModel}
+                                      onChange={(e) => setChatterMilestoneModel(e.target.value)}
+                                      placeholder="deepseek-reasoner"
+                                      style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                    />
+                                  </label>
+                                </div>
+
+                                <label style={{ display: 'flex', flexDirection: 'column', gap: 4, width: 280 }}>
+                                  <span style={slackLabelStyle}>{t('settings.general.chatterBudget')}</span>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    step={1000}
+                                    value={chatterBudget}
+                                    onChange={(e) => setChatterBudget(e.target.value)}
+                                    style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                  />
+                                </label>
+
+                                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                  <PixelButton variant="ghost" size="sm" onClick={() => void saveChatter()} disabled={chatterBusy}>
+                                    {t('common.save')}
+                                  </PixelButton>
+                                  {chatterNote && (
+                                    <span style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>{chatterNote}</span>
+                                  )}
+                                </div>
+
+                                <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                  {t('settings.general.chatterBudgetHint', { spent: chatterSpent })}
+                                </span>
+                              </div>
+                            )}
+
+                            {/* VOICES — the same dialogue, said out loud (MiniMax
+                                TTS). Nested under the chatter because there is
+                                nothing to speak without it, but on its OWN flag:
+                                turning the chatter on never turns sound on. */}
+                            <div style={{ height: 14 }} />
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
+                                  {t('settings.general.officeVoices')}
+                                </span>
+                                <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                  {t('settings.general.officeVoicesDesc')}
+                                </span>
+                              </div>
+                              <PixelButton
+                                variant={officeVoicesOn ? 'primary' : 'secondary'}
+                                size="sm"
+                                onClick={() => void toggleOfficeVoices()}
+                              >
+                                {officeVoicesOn ? t('common.on') : t('common.off')}
+                              </PixelButton>
+                            </div>
+
+                            {officeVoicesOn && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+                                {/* Write-only: blank even when a key is stored,
+                                    because the value never reaches this process. */}
+                                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                  <span style={slackLabelStyle}>{t('settings.general.minimaxApiKey')}</span>
+                                  <div style={{ display: 'flex', gap: 6 }}>
+                                    <input
+                                      type={showMinimaxKey ? 'text' : 'password'}
+                                      value={minimaxKey}
+                                      onChange={(e) => setMinimaxKey(e.target.value)}
+                                      placeholder={hasMinimaxKey
+                                        ? t('settings.general.chatterApiKeyStored')
+                                        : t('settings.general.chatterApiKeyPlaceholder')}
+                                      style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                    />
+                                    <PixelButton variant="secondary" size="sm" onClick={() => setShowMinimaxKey((v) => !v)} disabled={!minimaxKey}>
+                                      {showMinimaxKey ? t('common.hide') : t('common.show')}
+                                    </PixelButton>
+                                    <PixelButton variant="secondary" size="sm" onClick={() => void clearMinimaxKey()} disabled={!hasMinimaxKey || voicesBusy}>
+                                      {t('common.clear')}
+                                    </PixelButton>
+                                  </div>
+                                </label>
+
+                                <div style={{ display: 'flex', gap: 10 }}>
+                                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                                    <span style={slackLabelStyle}>{t('settings.general.minimaxModel')}</span>
+                                    <select
+                                      value={minimaxModel}
+                                      onChange={(e) => setMinimaxModel(e.target.value)}
+                                      style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                    >
+                                      <option value="speech-2.6-turbo">speech-2.6-turbo</option>
+                                      <option value="speech-2.6-hd">speech-2.6-hd</option>
+                                    </select>
+                                  </label>
+                                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, width: 140 }}>
+                                    <span style={slackLabelStyle}>{t('settings.general.officeVoicesPerMinute')}</span>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      step={1}
+                                      value={voiceMaxPerMinute}
+                                      onChange={(e) => setVoiceMaxPerMinute(e.target.value)}
+                                      style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                    />
+                                  </label>
+                                </div>
+
+                                <div style={{ display: 'flex', gap: 10 }}>
+                                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                                    <span style={slackLabelStyle}>{t('settings.general.minimaxEndpoint')}</span>
+                                    <input
+                                      type="text"
+                                      value={minimaxEndpoint}
+                                      onChange={(e) => setMinimaxEndpoint(e.target.value)}
+                                      placeholder="https://api.minimax.io/v1/t2a_v2"
+                                      style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                    />
+                                  </label>
+                                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, width: 180 }}>
+                                    <span style={slackLabelStyle}>{t('settings.general.minimaxGroupId')}</span>
+                                    <input
+                                      type="text"
+                                      value={minimaxGroupId}
+                                      onChange={(e) => setMinimaxGroupId(e.target.value)}
+                                      style={{ ...slackInputStyle, fontFamily: 'var(--cth-font-mono)' }}
+                                    />
+                                  </label>
+                                </div>
+
+                                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                  <PixelButton variant="ghost" size="sm" onClick={() => void saveVoices()} disabled={voicesBusy}>
+                                    {t('common.save')}
+                                  </PixelButton>
+                                  {voicesNote && (
+                                    <span style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>{voicesNote}</span>
+                                  )}
+                                </div>
+
+                                <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                  {t('settings.general.officeVoicesHint')}
+                                </span>
+                              </div>
+                            )}
+                          </>
+                        )}
                       </div>
 
                       {/* Office Theme — TV-show office maps (experimental; flag tvShowOffices, default off) */}

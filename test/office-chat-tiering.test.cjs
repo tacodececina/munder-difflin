@@ -40,20 +40,23 @@ const waitFor = async (cond, label, ms = 8000) => {
 };
 
 /** A director wired to a real RelationshipBook in a throwaway home, plus a stub
- *  hidden session whose behavior each test supplies. */
-function harness(reply) {
+ *  hidden session whose behavior each test supplies. `opts.language` is the UI
+ *  language the app is running in (the harness config's `language`); omitted =
+ *  unset, which is what every install that never touched the picker has. */
+function harness(reply, opts = {}) {
   const home = tmpHome();
   const book = new RelationshipBook(() => home);
   const calls = [];
   let enabled = true;
-  hidden.runHiddenClaude = async (prompt, opts) => {
-    calls.push({ prompt, ...opts });
+  hidden.runHiddenClaude = async (prompt, o) => {
+    calls.push({ prompt, ...o });
     return reply(calls.length);
   };
   const director = new OfficeChatDirector({
     getHome: () => home,
     getCommand: () => 'claude',
     getModel: (tier) => (tier === 'milestone' ? 'MODEL-MILESTONE' : 'MODEL-ROUTINE'),
+    getLanguage: () => opts.language,
     isEnabled: () => enabled,
     rel: book
   });
@@ -161,6 +164,51 @@ test('an owed exchange suppresses a fresh brew for that pair', () => {
   // Once it has actually been spoken, the pair is back in the normal rotation.
   assert.deepStrictEqual(director.request(req('jim', 'pam')).lines, ['one', 'two']);
   assert.strictEqual(calls.length, 1);
+});
+
+// ─── Language ───────────────────────────────────────────────────────────────
+// The prompt is written in English and used to say nothing about which language
+// to ANSWER in, so every brewed exchange came back in English — playing beside
+// the canned break-room pools, which ARE translated. The directive is derived
+// from the UI language the user already picked, never hardcoded.
+
+test('a Spanish UI asks for LATIN-AMERICAN Spanish, not Spain Spanish', () => {
+  const { calls, director } = harness(OK, { language: 'es' });
+  director.request(req('jim', 'pam'));
+  assert.strictEqual(calls.length, 1);
+  const { prompt } = calls[0];
+  assert.ok(/ESPAÑOL LATINOAMERICANO/.test(prompt), 'the prompt must name the variety');
+  for (const banned of ['vosotros', 'vale', 'ordenador', 'móvil']) {
+    assert.ok(prompt.includes(banned),
+      `the peninsular form "${banned}" must be named as something to avoid`);
+  }
+  for (const wanted of ['ustedes', 'computadora', 'celular']) {
+    assert.ok(prompt.includes(wanted), `"${wanted}" is the LatAm form to prefer`);
+  }
+});
+
+test('a regional Spanish tag still lands on the same directive', () => {
+  const { calls, director } = harness(OK, { language: 'es-MX' });
+  director.request(req('jim', 'pam'));
+  assert.ok(/ESPAÑOL LATINOAMERICANO/.test(calls[0].prompt),
+    'a region subtag must not fall through to English');
+});
+
+test('English — and anything unrecognised — leaves the prompt untouched', () => {
+  const en = harness(OK, { language: 'en' });
+  en.director.request(req('jim', 'pam'));
+  assert.ok(!/IDIOMA/.test(en.calls[0].prompt), 'no language directive in English');
+
+  // The overwhelmingly common case: an install that never opened the picker.
+  const unset = harness(OK);
+  unset.director.request(req('jim', 'pam'));
+  assert.strictEqual(unset.calls[0].prompt, en.calls[0].prompt,
+    'an unset language must be byte-for-byte the pre-existing English prompt');
+
+  const other = harness(OK, { language: 'qq-ZZ' });
+  other.director.request(req('jim', 'pam'));
+  assert.strictEqual(other.calls[0].prompt, en.calls[0].prompt,
+    'a locale with no directive behaves exactly like English');
 });
 
 test('everything stays inert while the feature flag is off', () => {

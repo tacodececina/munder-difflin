@@ -211,6 +211,7 @@ test('no Arabic string is left as its English source', () => {
     'addAgent.projectPlaceholder',           // /path/to/your/project — a filesystem path
     'addAgent.pairNamePlaceholder',          // "studio-mac" — an example literal name, not prose
     'onboarding.home.placeholder',           // /path/to/HarnessAgents — same
+    'settings.general.chatterBaseUrlPlaceholder', // two example endpoint URLs — same
     'mcpDefaults.toggleNote',                // "{{id}}: {{state}}" — pure interpolation
     'webhooksSection.summary'                // "{{count}} · {{state}}" — same
   ]);
@@ -250,7 +251,11 @@ test('inline markup and array shapes are preserved', () => {
     assert.equal(tags(a.get(k)), tags(v), `markup changed in ${k}`);
   }
   const count = (o, p) => p.split('.').reduce((n, s) => n?.[s], o);
-  for (const p of ['office.errand.smoke', 'office.suckUp', 'office.gossip', 'office.cheer']) {
+  // `office.gossip` used to be in this list. It was the break room's canned
+  // small talk and was deleted along with the rest of the fabricated café
+  // dialogue (see scene/office/cafeMood.ts) — the floor now says nothing there
+  // unless the dialogue director actually wrote it.
+  for (const p of ['office.errand.smoke', 'office.suckUp', 'office.cheer']) {
     assert.equal(count(ar, p).length, count(en, p).length, `${p} changed length`);
   }
 });

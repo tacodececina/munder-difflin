@@ -16,6 +16,7 @@ import { isCompactionCommand } from '@shared/providerAutomation';
 import { preferredAgentRole } from '@shared/agentRole';
 import { isInboxNudge } from '@shared/hiveNudge';
 import { refocusAfterRemoval, focusOnLoad, restoreFocus } from './focusMode';
+import { openClockOut, type ClockOutRequest } from './clockOut';
 import { chooseRosterSource } from './rosterSource';
 import {
   createDundiesTrackState,
@@ -256,6 +257,12 @@ interface State {
    *  task board → 'tasks'). `seq` makes repeated identical requests distinct. */
   ccTabRequest: { tab: string; seq: number } | null;
   requestCommandCenterTab: (tab: string) => void;
+  /** Pending "end the working day?" confirmation, raised by clicking the office
+   *  wall clock. The clock NEVER closes the app by itself — it only asks (see
+   *  store/clockOut.ts for why). */
+  clockOutRequest: ClockOutRequest | null;
+  requestClockOut: () => void;
+  dismissClockOut: () => void;
   /** The task whose detail overlay is open (rendered app-wide over the office
    *  floor — the card content grows: contracts, deps, the human Q&A trail). */
   taskDetailId: string | null;
@@ -289,6 +296,20 @@ interface State {
    *  window.cth.realtimeHasOpenAiKey(). */
   hasOpenAiKey: boolean;
   setHasOpenAiKey: (has: boolean) => void;
+  /** Mirror of `!!config.chatterApiKey` — boolean PRESENCE only, exactly like
+   *  `hasGroqKey`, except the value cannot leak even by accident: main strips
+   *  `chatterApiKey` from every config payload, so this is fed by
+   *  `window.cth.chatterStatus()` rather than read off the config. Lets Settings
+   *  show whether the OpenAI-compatible chatter route is actually usable. */
+  hasChatterKey: boolean;
+  setHasChatterKey: (has: boolean) => void;
+  /** Mirror of `!!config.minimaxApiKey` — the office-voices (MiniMax TTS)
+   *  credential, under exactly the same rule as `hasChatterKey`: main strips the
+   *  value from every config payload, so presence is ASKED for via
+   *  `window.cth.officeVoicesStatus()` and the key itself never exists in this
+   *  process. Lets Settings show whether the floor can actually speak. */
+  hasMinimaxKey: boolean;
+  setHasMinimaxKey: (has: boolean) => void;
   /** Mirror of the active office theme (set by App on config load + by Settings
    *  on switch). OfficeFloor depends on this and rebuilds the scene on change. */
   officeTheme: ThemeId;
@@ -712,6 +733,9 @@ export const useStore = create<State>((set, get) => ({
   ccTabRequest: null,
   requestCommandCenterTab: (tab) =>
     set((s) => ({ ccTabRequest: { tab, seq: (s.ccTabRequest?.seq ?? 0) + 1 } })),
+  clockOutRequest: null,
+  requestClockOut: () => set((s) => ({ clockOutRequest: openClockOut(s.clockOutRequest) })),
+  dismissClockOut: () => set({ clockOutRequest: null }),
   fullscreenAgentId: focusOnLoad(initialPrefersFocusMode, initialSelectedId),
   prefersFocusMode: initialPrefersFocusMode,
   ideInitialFile: null,
@@ -920,6 +944,10 @@ export const useStore = create<State>((set, get) => ({
   setHasGroqKey: (has) => set({ hasGroqKey: has }),
   hasOpenAiKey: false,
   setHasOpenAiKey: (has) => set({ hasOpenAiKey: has }),
+  hasChatterKey: false,
+  setHasChatterKey: (has) => set({ hasChatterKey: has }),
+  hasMinimaxKey: false,
+  setHasMinimaxKey: (has) => set({ hasMinimaxKey: has }),
   officeTheme: 'office',
   setOfficeTheme: (theme) => set({ officeTheme: theme }),
   // Starts OFF and stays off until App mirrors a config that says otherwise.

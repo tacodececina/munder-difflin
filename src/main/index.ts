@@ -31,10 +31,21 @@ import type { UsageProvider } from './usage';
 import { MemoryManager } from './memory';
 import { KnowledgeManager } from './knowledge';
 import { MemoryReflector, type ReflectSettings } from './reflect';
-import { RelationshipBook, REL_FILE_NAME, type RelEventKind } from './officeRel';
+import {
+  RelationshipBook, REL_FILE_NAME, routeEventKind, routeIsNotable, type RelEventKind
+} from './officeRel';
+import { CHATTER_LOG_FILE_NAME, OfficeChatterLog } from './officeChatLog';
+import { TRAITS_FILE_NAME, TraitBook, traitProse, type TraitEventKind } from './officeTraits';
 import { EMPTY_REL_VIEW, OfficeChatDirector, type OfficeChatRequest } from './officeChat';
+import { projectWorkContext, EMPTY_WORK, type WorkContext } from './officeWork';
 import { BrewSlot } from './brewSlot';
+import { DEFAULT_CHATTER_TOKEN_BUDGET_PER_HOUR } from './chatterOpenAI';
 import { EMPTY_FLAVOR, OfficeVoiceDirector, type VoiceFlavorRequest } from './officeVoice';
+import {
+  VoicePlayLedger, planSpeech,
+  DEFAULT_MINIMAX_MODEL, DEFAULT_VOICE_PLAYS_PER_MINUTE
+} from './officeVoices';
+import { synthesizeSpeech } from './minimaxTts';
 import { PersistStore } from './db';
 import { readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd } from './transcript';
 import { listIssues, listCIRuns } from './github';
@@ -273,6 +284,17 @@ const officeChatterOn = (): boolean => {
   if (officeChatterFlag === null) officeChatterFlag = readConfig().officeChatterEnabled === true;
   return officeChatterFlag;
 };
+/** `officeVoicesEnabled`, cached the same way and for the same reason — the
+ *  speak handler sits behind a per-BEAT call from the floor, so the flag check
+ *  must not be a synchronous config read. Its OWN flag, deliberately: someone
+ *  can want the bubbles and not the noise. (The reverse is not a state at all —
+ *  with the chatter off nothing is ever written, so there is nothing to say.) */
+let officeVoicesFlag: boolean | null = null;
+onConfigWritten((next) => { officeVoicesFlag = next.officeVoicesEnabled === true; });
+const officeVoicesOn = (): boolean => {
+  if (officeVoicesFlag === null) officeVoicesFlag = readConfig().officeVoicesEnabled === true;
+  return officeVoicesFlag;
+};
 const hive = new HiveManager(
   () => readConfig().harnessHome,
   (channel, payload) => {
@@ -285,10 +307,35 @@ const hive = new HiveManager(
         const e = payload as { from?: string; targets?: string[]; act?: string };
         if (e && typeof e.from === 'string' && Array.isArray(e.targets)) {
           for (const t of e.targets) {
-            if (typeof t === 'string') officeRel.noteRoute(e.from, t, String(e.act ?? 'inform'));
+            if (typeof t !== 'string') continue;
+            officeRel.noteRoute(e.from, t, String(e.act ?? 'inform'));
+            // The same message, tallied PER AGENT rather than per edge — which
+            // is what makes "the one who pushes back on everything" a knowable
+            // fact about a person rather than about a pair. Same classifier, so
+            // the two books can never disagree about what just happened.
+            if (routeIsNotable(e.from, t)) {
+              officeTraits.noteEvent(e.from, t, routeEventKind(String(e.act ?? 'inform')));
+            }
           }
         }
       } catch { /* relationship tracking is best-effort */ }
+    }
+    // A hive state file that stopped parsing is the one degradation the user
+    // MUST be told about: the harness keeps running on its last good copy and
+    // refuses to save, so without a toast the floor looks healthy while nothing
+    // is being persisted (exactly the BOM-on-registry.json incident). It goes out
+    // through `alarmToast`, NOT `breakerToast`: the latter is gated on the
+    // `notifications` setting, which is off by default, so this alarm would have
+    // reached only the users who had separately opted into lifecycle pings.
+    //
+    // `proxy-bind` is excluded on purpose: that one is already toasted by its
+    // caller off the spawn result (`inj.degraded`), and two toasts for one event
+    // is how a notification channel gets muted.
+    if (channel === 'hive:degraded') {
+      const e = payload as { reason?: string; message?: string } | null;
+      if (e && e.reason !== 'proxy-bind' && typeof e.message === 'string') {
+        alarmToast('Hive state unreadable', e.message);
+      }
     }
     const wc = liveWebContents();
     if (!wc) return false;
@@ -302,19 +349,111 @@ const hive = new HiveManager(
 // lines go to a Haiku-class model; Fable is reserved for milestone exchanges
 // (first encounter, relationship threshold crossing) — see chatterModelFor.
 const officeRel = new RelationshipBook(() => readConfig().harnessHome);
+// The DURABLE transcript of what the floor actually said. The relationship book
+// above keeps a pair's last six turns and overwrites them in place — that is a
+// prompt window, not a history, so until this existed a conversation vanished
+// the moment the pair spoke again. Retention-bounded by age AND size, erased by
+// the reset and carried by a home move exactly like office-relationships.json,
+// and completely inert while officeChatterEnabled is off. The argument for a
+// file of its own rather than a `task_done`-style row in hive/log.jsonl is at
+// the top of officeChatLog.ts.
+const officeChatterLog = new OfficeChatterLog({
+  getHome: () => readConfig().harnessHome,
+  isEnabled: officeChatterOn,
+  getRetentionDays: () => readConfig().officeChatterLogDays,
+  getMaxKb: () => readConfig().officeChatterLogMaxKb
+});
+// WHO EACH AGENT TURNED OUT TO BE. The transcript above is retention-bounded by
+// design (a week, a megabyte), so it is the wrong place to read a personality
+// off: an agent who has been here two months would have the personality of last
+// Tuesday, and lowering the retention to save disk would quietly erase everyone.
+// This book keeps small per-agent COUNTERS instead — never a word of dialogue —
+// updated at the same instants the log row and the relationship impulse are
+// written, and outliving every line that produced them. Derivation is by RULES
+// (officeTraits.ts); no model is ever asked what someone is like.
+const officeTraits = new TraitBook({
+  getHome: () => readConfig().harnessHome,
+  isEnabled: officeChatterOn
+});
 // THE one background-Claude slot. Both personality features below share it, so
 // "at most one hidden session in flight, ever" holds across the pair instead of
 // per director — two private budgets would have meant two concurrent sessions.
+// WHICH ENGINE cooks the chatter is a config choice (`chatterProvider`), read
+// live on every brew so a Settings change lands on the next one without a
+// restart. Default 'claude-hidden' = the historical hidden-CLI route, which
+// shares the user's WORKING subscription; 'openai-compatible' points the whole
+// decoration at a separate endpoint (DeepSeek / MiniMax / opencode-go / a local
+// Ollama) so a talkative office stops taking quota from the agents fixing real
+// incidents. The API key is read HERE, in main, and travels only into one
+// Authorization header inside chatterOpenAI.ts — it is stripped from `config:get`
+// and never reaches a renderer.
 const officeBrewSlot = new BrewSlot({
   getHome: () => readConfig().harnessHome,
-  getCommand: () => readConfig().defaultCommand ?? 'claude'
+  getCommand: () => readConfig().defaultCommand ?? 'claude',
+  getProvider: () => (readConfig().chatterProvider === 'openai-compatible' ? 'openai-compatible' : 'claude-hidden'),
+  getEndpoint: () => {
+    const cfg = readConfig();
+    return { baseUrl: cfg.chatterBaseUrl, apiKey: cfg.chatterApiKey };
+  },
+  getTokenBudgetPerHour: () => readConfig().chatterTokenBudgetPerHour ?? DEFAULT_CHATTER_TOKEN_BUDGET_PER_HOUR
 });
+// ── Read-only work context for the break-room dialogue (officeWork.ts) ───────
+// Two agents on a coffee break can talk about the work — that is what coworkers
+// do — so the dialogue prompt gets task TITLES and STATUSES. Never descriptions,
+// results, operator answers, paths or ids; same "subject-grade text only" rule
+// officeVoice.ts already applies to work messages, and `scrubTitle` strips
+// path- and token-shaped substrings even out of titles.
+//
+// IT IS READ-ONLY AND THAT IS STRUCTURAL. The director is handed this getter and
+// nothing else — no HiveManager, no writer, no ipc handle. Its only output is a
+// string[] that ends up in a thought cloud. No café line can change a task, an
+// assignment, a status or any other operational state. See the boundary note at
+// the top of officeWork.ts.
+//
+// NO HOT I/O: `hive.tasks()` is a readFileSync + parse. Brews happen at most a
+// handful of times an hour, but the cache below makes even that free in the
+// common case, and guarantees a burst of brews cannot turn into a burst of
+// reads. It is a plain value with a TTL — a stale-by-a-minute board is a
+// perfectly good thing for two avatars to gossip about.
+const WORK_CONTEXT_TTL_MS = 60_000;
+let workLedgerAt = 0;
+let workLedger: unknown = null;
+const officeWorkFor = (aId: string, bId: string): WorkContext => {
+  if (!officeChatterOn()) return EMPTY_WORK;   // flag off ⇒ not even a read
+  const now = Date.now();
+  if (now - workLedgerAt > WORK_CONTEXT_TTL_MS) {
+    workLedgerAt = now;
+    try { workLedger = hive.tasks(); } catch { workLedger = null; }
+  }
+  return projectWorkContext(workLedger, aId, bId);
+};
 const officeChat = new OfficeChatDirector({
   getHome: () => readConfig().harnessHome,
   getCommand: () => readConfig().defaultCommand ?? 'claude',
   getModel: (tier) => chatterModelFor(readConfig(), tier),
+  getWork: officeWorkFor,
+  // The app's own UI language, so brewed lines come back in the language the
+  // canned break-room pools are already translated into. Read here, at brew
+  // time (a handful of times an hour), through the same readConfig() the model
+  // choice above uses — no separate channel, and no default of its own: unset
+  // means English, which is the prompt exactly as it was.
+  getLanguage: () => readConfig().language,
   isEnabled: officeChatterOn,
   rel: officeRel,
+  // Write-only sink: every exchange the director hands to the floor is also
+  // appended to the transcript, from the same call that appends it to the
+  // pair's six-turn prompt window. The director never reads it back.
+  log: (from, to, lines) => {
+    officeChatterLog.record(from, to, lines);
+    // Same instant, same alternation contract, same write-only relationship to
+    // the director: the transcript gets the WORDS, the trait book gets only
+    // their shape (how many, how long, how many were questions).
+    officeTraits.observe(from, to, lines);
+  },
+  // The personality loop closed: traits earned from past conversation are fed
+  // back into the prompt that writes the next one. Empty string until an agent
+  // has earned something, which leaves the prompt exactly as it was.
+  getTraits: (agentId) => traitProse(officeTraits.read(officeRel.snapshot()).find((t) => t.id === agentId)),
   slot: officeBrewSlot
 });
 // The same soul-into-writing trick, pointed at REAL work messages instead of
@@ -326,6 +465,8 @@ const officeVoice = new OfficeVoiceDirector({
   getHome: () => readConfig().harnessHome,
   getCommand: () => readConfig().defaultCommand ?? 'claude',
   getModel: (tier) => chatterModelFor(readConfig(), tier),
+  // Same language source as the café director above.
+  getLanguage: () => readConfig().language,
   isEnabled: officeChatterOn,
   slot: officeBrewSlot
 });
@@ -346,7 +487,22 @@ ipcMain.handle('officeRel:note', (_evt, from: unknown, to: unknown, kind: unknow
   if (!officeChatterOn()) return;
   if (typeof from === 'string' && typeof to === 'string' && typeof kind === 'string') {
     officeRel.note(from, to, kind as RelEventKind);
+    // Per-agent tally of the same scene event. This is the ONLY source for
+    // traits an agent earns by ACTING rather than by talking — the one who
+    // keeps walking over to check on whoever is stuck may barely speak at the
+    // café, and the line counters would never see them.
+    officeTraits.noteEvent(from, to, kind as TraitEventKind);
   }
+});
+// The floor's DERIVED PERSONALITIES — rule-based, zero tokens, read-only.
+// Derivation happens HERE rather than in the renderer so the panel and the
+// dialogue prompt (which reads the same `officeTraits.read`) can never disagree
+// about who someone is. Gated on the flag like every other entry point: with the
+// chatter off, the whole experiment is absent from the UI rather than showing a
+// frozen personality nothing is updating.
+ipcMain.handle('officeTraits:snapshot', () => {
+  if (!officeChatterOn()) return [];
+  return officeTraits.read(officeRel.snapshot());
 });
 ipcMain.handle('officeChat:request', (_evt, req: unknown) => {
   const r = req as OfficeChatRequest;
@@ -366,6 +522,16 @@ ipcMain.handle('officeChat:stash', (_evt, from: unknown, to: unknown, lines: unk
   if (typeof from !== 'string' || typeof to !== 'string' || !Array.isArray(lines)) return;
   officeChat.stash(from, to, lines.filter((l): l is string => typeof l === 'string'));
 });
+// The durable transcript, newest lines last, for a panel that shows past
+// conversations. READ-ONLY and it writes nothing — but it is gated on the flag
+// like every other entry point in this feature, because "the office chatter is
+// off" has to mean the whole experiment is absent from the UI, not that its
+// history keeps showing while nothing new arrives.
+ipcMain.handle('officeChat:history', (_evt, limit: unknown) => {
+  if (!officeChatterOn()) return [];
+  const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.min(5_000, Math.max(1, Math.round(limit))) : 500;
+  return officeChatterLog.read(n);
+});
 // Persona flavour for REAL work messages. Instant + read-only from the caller's
 // side: it hands back the asides already written for these message ids and may
 // start ONE background brew. It receives the SUBJECT line only — never a body —
@@ -375,6 +541,115 @@ ipcMain.handle('officeVoice:request', (_evt, req: unknown) => {
   const r = req as VoiceFlavorRequest;
   if (!r || !Array.isArray(r.items)) return EMPTY_FLAVOR;
   return officeVoice.request(r);
+});
+
+// ─── Office VOICES (MiniMax TTS — the floor said out loud) ───────────────────
+// The floor asks for ONE clip per spoken beat, and gets back raw audio bytes the
+// renderer plays through the <audio> sink the Realtime voice loop already owns.
+// Everything expensive or secret stays on this side: the MiniMax key (stripped
+// from `config:get`, like `chatterApiKey`), the per-minute ceiling, and the
+// abort handle that cuts an in-flight clip on quit.
+//
+// SILENCE IS THE FAILURE MODE. Every refusal below — flag off, no key, budget
+// spent, nothing to say, endpoint down, timeout — returns `{ ok: false }` and
+// the floor simply plays the beat without sound. The text dialogue is never
+// touched by anything in this block.
+const officeVoiceLedger = new VoicePlayLedger(
+  () => readConfig().officeVoiceMaxPerMinute ?? DEFAULT_VOICE_PLAYS_PER_MINUTE
+);
+/** Aborts whatever clip is in flight. One handle, replaced per request: at most
+ *  one synthesis is ever outstanding because the renderer plays one voice at a
+ *  time and does not ask for the next until the current clip settles. */
+let officeVoiceAbort: AbortController | null = null;
+const stopOfficeVoices = (): void => {
+  try { officeVoiceAbort?.abort(); } catch { /* already settled */ }
+  officeVoiceAbort = null;
+  officeVoiceLedger.reset();
+};
+ipcMain.handle('officeVoices:speak', async (_evt, arg: unknown) => {
+  // The cached flag FIRST, so the OFF path is a boolean read and not a
+  // synchronous config parse — this handler fires once per spoken beat.
+  if (!officeVoicesOn()) return { ok: false };
+  const cfg = readConfig();
+  // Everything else — malformed request, nothing to say, no key pasted yet, the
+  // rolling minute spent — is one pure decision (officeVoices.planSpeech), which
+  // also resolves WHICH voice. Read-only: the ledger is charged below, at the
+  // moment the request actually goes out.
+  const plan = planSpeech(cfg, arg as Record<string, unknown>, officeVoiceLedger);
+  if (!plan.ok) return { ok: false };
+  const { text, voiceId } = plan;
+  officeVoiceLedger.note();
+  const controller = new AbortController();
+  officeVoiceAbort = controller;
+  const out = await synthesizeSpeech({
+    // `planSpeech` already refused every config without a key, so this coalesce
+    // is only for the type system. If it ever were empty the adapter refuses
+    // before dispatching, which is the same silence by another door.
+    apiKey: cfg.minimaxApiKey ?? '',
+    endpoint: cfg.minimaxEndpoint,
+    groupId: cfg.minimaxGroupId,
+    model: cfg.minimaxModel || DEFAULT_MINIMAX_MODEL,
+    text,
+    voiceId,
+    signal: controller.signal
+  });
+  if (officeVoiceAbort === controller) officeVoiceAbort = null;
+  // Bytes only. The error string stays here: it is redacted, but a renderer has
+  // no use for it and every string that crosses is a string that can be rendered.
+  if (!out.ok || !out.audio) return { ok: false };
+  return {
+    ok: true,
+    voiceId,
+    mimeType: out.mimeType,
+    // Copy out a clean ArrayBuffer slice for the structured clone.
+    audio: out.audio.buffer.slice(out.audio.byteOffset, out.audio.byteOffset + out.audio.byteLength)
+  };
+});
+/** Everything Settings needs, with PRESENCE in place of the key — same contract
+ *  as `chatter:status`. */
+ipcMain.handle('officeVoices:status', () => {
+  const cfg = readConfig();
+  return {
+    enabled: cfg.officeVoicesEnabled === true,
+    hasApiKey: !!cfg.minimaxApiKey,
+    model: cfg.minimaxModel || DEFAULT_MINIMAX_MODEL,
+    endpoint: cfg.minimaxEndpoint ?? '',
+    groupId: cfg.minimaxGroupId ?? '',
+    maxPerMinute: cfg.officeVoiceMaxPerMinute ?? DEFAULT_VOICE_PLAYS_PER_MINUTE,
+    /** Clips synthesised in the rolling minute, so the ceiling is visible working. */
+    spokenThisMinute: officeVoiceLedger.count()
+  };
+});
+/** WRITE-ONLY for the credential, modelled on `chatter:setConfig`: the key goes
+ *  one way and only the boolean above ever comes back. */
+ipcMain.handle('officeVoices:setConfig', (_evt, patch: unknown) => {
+  const p = (patch ?? {}) as {
+    enabled?: unknown; apiKey?: unknown; model?: unknown; endpoint?: unknown;
+    groupId?: unknown; maxPerMinute?: unknown; overrides?: unknown;
+  };
+  const next: Partial<HarnessConfig> = {};
+  if (typeof p.enabled === 'boolean') next.officeVoicesEnabled = p.enabled;
+  // An empty string is a deliberate "forget my key", not a no-op: it is the only
+  // way to clear a credential the renderer can no longer read.
+  if (typeof p.apiKey === 'string') next.minimaxApiKey = p.apiKey.trim() || undefined;
+  if (typeof p.model === 'string') next.minimaxModel = p.model.trim() || DEFAULT_MINIMAX_MODEL;
+  if (typeof p.endpoint === 'string') next.minimaxEndpoint = p.endpoint.trim() || undefined;
+  if (typeof p.groupId === 'string') next.minimaxGroupId = p.groupId.trim() || undefined;
+  if (typeof p.maxPerMinute === 'number' && Number.isFinite(p.maxPerMinute)) {
+    // 0 = unlimited; negatives are a typo, not an instruction.
+    next.officeVoiceMaxPerMinute = Math.max(0, Math.round(p.maxPerMinute));
+  }
+  if (p.overrides && typeof p.overrides === 'object' && !Array.isArray(p.overrides)) {
+    const clean: Record<string, string> = {};
+    for (const [id, voice] of Object.entries(p.overrides as Record<string, unknown>)) {
+      if (typeof id === 'string' && id && typeof voice === 'string' && voice.trim()) {
+        clean[id] = voice.trim();
+      }
+    }
+    next.officeVoiceOverrides = Object.keys(clean).length ? clean : undefined;
+  }
+  writeConfig(next);
+  return { ok: true };
 });
 // #7C — operator control state (pause/gate/steer/halt), read by the HookServer
 // when deciding hook returns.
@@ -1271,16 +1546,39 @@ function reengageGod(digest: string): void {
   hive.send({ to: 'god', act: 'request', subject: 'Heartbeat', body: digest }, 'heartbeat');
 }
 
-/** A native toast for breaker constrain/stop, gated on the notifications setting
- *  AND on visitor mode: an OS toast paints an agent name and a trip reason over
- *  whatever is on screen, which is the one thing the mode exists to prevent.
- *  Main owns `visitorMode` in HarnessConfig, so it gates here rather than trying
- *  to un-ring the bell in the renderer — the notification is never created. */
-function breakerToast(title: string, body: string): void {
-  const cfg = readConfig();
-  if (!cfg.notifications || cfg.visitorMode === true) return;
+/** Put a native toast on screen, unless VISITOR MODE is on: an OS toast paints
+ *  an agent name and a reason over whatever is being shown to the room, which is
+ *  the one thing that mode exists to prevent. Main owns `visitorMode` in
+ *  HarnessConfig, so it gates here rather than trying to un-ring the bell in the
+ *  renderer — the notification is never created. The two callers below decide
+ *  whether the `notifications` SETTING also applies; this does not. */
+function showNativeToast(title: string, body: string): void {
+  if (readConfig().visitorMode === true) return;
   try { if (Notification.isSupported()) new Notification({ title, body }).show(); }
   catch { /* unsupported platform */ }
+}
+
+/** A native toast for breaker constrain/stop and the other lifecycle pings —
+ *  gated on the `notifications` setting, because these report on work the user
+ *  can already see on the floor and are a courtesy, not an alarm. */
+function breakerToast(title: string, body: string): void {
+  if (!readConfig().notifications) return;
+  showNativeToast(title, body);
+}
+
+/** A native toast for a DATA-LOSS condition, deliberately NOT gated on the
+ *  `notifications` setting.
+ *
+ *  `notifications` defaults to FALSE, so routing the corrupt-state alarm through
+ *  `breakerToast` meant the one degradation the user must be told about — the
+ *  harness running on a last-good copy and refusing to save — was invisible on
+ *  every default install, leaving console.error (which nobody sees in a packaged
+ *  app) and a log.jsonl row nobody is shown. The setting means "tell me when an
+ *  agent finishes"; it was never consent to be kept in the dark about state that
+ *  is no longer being persisted. Visitor mode still applies (see above): that one
+ *  is an explicit, temporary "do not paint anything over this screen". */
+function alarmToast(title: string, body: string): void {
+  showNativeToast(title, body);
 }
 
 /** One circuit-breaker beat: pull a fresh usage sample per active agent, append
@@ -3482,7 +3780,33 @@ ipcMain.handle('remote:remove', (_evt, payload: unknown) => {
 });
 
 // ─── IPC: config ────────────────────────────────────────────────────────────
-ipcMain.handle('config:get', (): HarnessConfig => readConfig());
+/**
+ * The config as the RENDERER is allowed to see it: identical, minus the chatter
+ * API key and the MiniMax voice key.
+ *
+ * `config:get` hands the whole config over, which is how `groqApiKey` ended up
+ * readable from the renderer. A new secret does not get to repeat that: the
+ * chatter key is main-only by construction, so the field is removed on the way
+ * out and Settings learns only whether one is SET (`chatter:status`). A window
+ * that never receives the value cannot leak it through a devtools inspection, a
+ * crash report, a rendered error, or a future `Object.entries(config)` in some
+ * unrelated panel.
+ *
+ * Writing is unaffected: Settings sends the key one way through
+ * `chatter:setConfig`, and `writeConfig` merges patches, so a redacted read can
+ * never blank the stored key.
+ */
+function configForRenderer(cfg: HarnessConfig): HarnessConfig {
+  const view = { ...cfg };
+  delete view.chatterApiKey;
+  // The MiniMax TTS key joins it under the same rule, not `groqApiKey`'s. The
+  // renderer needs to know only whether the office CAN speak; the value is
+  // handed out through `officeVoices:status` as a boolean and written one way
+  // through `officeVoices:setConfig`.
+  delete view.minimaxApiKey;
+  return view;
+}
+ipcMain.handle('config:get', (): HarnessConfig => configForRenderer(readConfig()));
 ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
   // FIRST RUN: every hive-bound service is started by bootstrapHiveServices(),
   // which runs once at app-ready and early-returns on `!hive.enabled()` — i.e.
@@ -3519,7 +3843,9 @@ ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
     console.log('[hive] harnessHome configured — bootstrapping hive services');
     try { bootstrapHiveServices(); } catch (e) { console.error('[hive] bootstrap after onboarding:', e); }
   }
-  return next;
+  // Same redaction as `config:get` — this handler also returns the WHOLE merged
+  // config, so without it the key would come straight back on the next save.
+  return configForRenderer(next);
 });
 ipcMain.handle('config:setAgentTokenCap', (_evt, agentId: unknown, tokenCap: unknown) =>
   setAgentTokenCap(agentId, tokenCap)
@@ -3575,10 +3901,17 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { reflector.stop(); } catch (e) { console.error('[changeHome] reflector.stop:', e); }
   try { officeChat.stop(); } catch (e) { console.error('[changeHome] officeChat.stop:', e); }
   try { officeVoice.stop(); } catch (e) { console.error('[changeHome] officeVoice.stop:', e); }
+  // Cut any in-flight MiniMax clip and forget the per-minute window, so a clip
+  // can never outlive the process (or the home) that asked for it.
+  try { stopOfficeVoices(); } catch (e) { console.error('[changeHome] stopOfficeVoices:', e); }
   // Relationship writes are debounced by 2s, and a move copies the file below —
   // so settle the book against the OLD home before anything is read off disk,
   // or the last couple of seconds of history never make the trip.
   try { officeRel.flush(); } catch (e) { console.error('[changeHome] officeRel.flush:', e); }
+  // Same 2s debounce, same consequence: the trait counters updated by the last
+  // cafe exchange exist only in memory until this runs, and the copy below
+  // reads the file.
+  try { officeTraits.flush(); } catch (e) { console.error('[changeHome] officeTraits.flush:', e); }
 
   if (mode === 'move' && oldHome) {
     try {
@@ -3588,7 +3921,11 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
       // worktree paths stayed at the old one. office-relationships.json is the
       // same deal — it lives in the home ROOT and is keyed by the very agent ids
       // being moved, so leaving it behind abandons the whole floor's history.
-      for (const sub of ['hive', 'palace', 'roster.json', 'roster-backups', REL_FILE_NAME]) {
+      // office-chatter.jsonl rides along for the same reason as the book beside
+      // it: it is keyed by the very agent ids being moved, and a transcript left
+      // at the old home is a week of conversation abandoned by a move the user
+      // experienced as "the office came with me".
+      for (const sub of ['hive', 'palace', 'roster.json', 'roster-backups', REL_FILE_NAME, CHATTER_LOG_FILE_NAME, TRAITS_FILE_NAME]) {
         const src = join(oldHome, sub);
         if (!existsSync(src)) continue;
         // cpSync copies the whole tree incl. .git and is cross-device safe (unlike
@@ -4077,10 +4414,14 @@ function teardownAndQuit(): void {
   try { reflector.stop(); } catch (e) { console.error('[quit] reflector.stop:', e); }
   try { officeChat.stop(); } catch (e) { console.error('[quit] officeChat.stop:', e); }
   try { officeVoice.stop(); } catch (e) { console.error('[quit] officeVoice.stop:', e); }
+  // Cut any in-flight MiniMax clip and forget the per-minute window, so a clip
+  // can never outlive the process (or the home) that asked for it.
+  try { stopOfficeVoices(); } catch (e) { console.error('[quit] stopOfficeVoices:', e); }
   // The relationship book defers every write by 2s, so anything noted in the
   // last couple of seconds (a café break, a routed handoff) only exists in
   // memory at this point — flush it or the quit silently eats it.
   try { officeRel.flush(); } catch (e) { console.error('[quit] officeRel.flush:', e); }
+  try { officeTraits.flush(); } catch (e) { console.error('[quit] officeTraits.flush:', e); }
   try { persist.close(); } catch (e) { console.error('[quit] persist.close:', e); }
   try { hive.stopAllProxyBridges(); } catch (e) { console.error('[quit] stopAllProxyBridges:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[quit] killAll:', e); }
@@ -4144,6 +4485,9 @@ ipcMain.handle('app:resetAll', () => {
   try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
   try { officeChat.stop(); } catch (e) { console.error('[reset] officeChat.stop:', e); }
   try { officeVoice.stop(); } catch (e) { console.error('[reset] officeVoice.stop:', e); }
+  // Cut any in-flight MiniMax clip and forget the per-minute window, so a clip
+  // can never outlive the process (or the home) that asked for it.
+  try { stopOfficeVoices(); } catch (e) { console.error('[reset] stopOfficeVoices:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
   try { remoteManager.killAll(); } catch (e) { console.error("[reset] remote killAll:", e); }
@@ -4169,6 +4513,15 @@ ipcMain.handle('app:resetAll', () => {
   // the pending debounced save, so nothing rewrites the file we just removed.
   try { officeRel.purge(); }
   catch (e) { console.error('[reset] officeRel.purge:', e); }
+  // And the transcript of what those same retired agents said to each other —
+  // erasing the relationship numbers while leaving a week of their conversations
+  // in the home root would be the same leak, only more legible.
+  try { officeChatterLog.purge(); }
+  catch (e) { console.error('[reset] officeChatterLog.purge:', e); }
+  // Traits are keyed by the agent ids the reset just retired, so a personality
+  // that outlived its agent is the same state leak officeRel.purge() prevents.
+  try { officeTraits.purge(); }
+  catch (e) { console.error('[reset] officeTraits.purge:', e); }
   // Back to first-run defaults, then relaunch clean so all in-memory services
   // re-bootstrap from scratch and the renderer lands on onboarding.
   resetConfig();
@@ -4670,6 +5023,50 @@ function upsertLegacyWebhookTrigger(patch: { secret?: string; enabled?: boolean 
     webhookTriggers: prior ? list.map((t) => (t.id === 'legacy' ? row : t)) : [...list, row]
   });
 }
+
+// ─── IPC: office chatter provider (which engine writes the decoration) ───────
+// WRITE-ONLY for the credential, on purpose. `freeflowSetConfig` was modelled on
+// a key the renderer could also READ back (groqApiKey rides `config:get`); this
+// one is modelled on the integrations broker instead — the key goes ONE way, and
+// the only thing that ever comes back is the boolean `hasApiKey` below. Settings
+// can therefore show "key set / not set" without the value existing in a
+// renderer process at all.
+ipcMain.handle('chatter:setConfig', (_evt, patch: unknown) => {
+  const p = (patch ?? {}) as {
+    provider?: unknown; baseUrl?: unknown; apiKey?: unknown;
+    routineModel?: unknown; milestoneModel?: unknown; tokenBudgetPerHour?: unknown;
+  };
+  const next: Partial<HarnessConfig> = {};
+  if (p.provider === 'openai-compatible' || p.provider === 'claude-hidden') next.chatterProvider = p.provider;
+  if (typeof p.baseUrl === 'string') next.chatterBaseUrl = p.baseUrl.trim() || undefined;
+  // An empty string is a deliberate "forget my key", not a no-op: it is the only
+  // way to clear a credential the renderer can no longer read.
+  if (typeof p.apiKey === 'string') next.chatterApiKey = p.apiKey.trim() || undefined;
+  if (typeof p.routineModel === 'string') next.officeChatterModel = p.routineModel.trim() || undefined;
+  if (typeof p.milestoneModel === 'string') next.officeChatterMilestoneModel = p.milestoneModel.trim() || undefined;
+  if (typeof p.tokenBudgetPerHour === 'number' && Number.isFinite(p.tokenBudgetPerHour)) {
+    // 0 = unlimited; negatives are a typo, not an instruction.
+    next.chatterTokenBudgetPerHour = Math.max(0, Math.round(p.tokenBudgetPerHour));
+  }
+  writeConfig(next);
+  return { ok: true };
+});
+
+/** Everything Settings needs to render the chatter section, with PRESENCE in
+ *  place of the key. Mirrors `realtimeHasOpenAiKey`'s contract. */
+ipcMain.handle('chatter:status', () => {
+  const cfg = readConfig();
+  return {
+    provider: cfg.chatterProvider === 'openai-compatible' ? 'openai-compatible' : 'claude-hidden',
+    baseUrl: cfg.chatterBaseUrl ?? '',
+    hasApiKey: !!cfg.chatterApiKey,
+    routineModel: cfg.officeChatterModel ?? '',
+    milestoneModel: cfg.officeChatterMilestoneModel ?? '',
+    tokenBudgetPerHour: cfg.chatterTokenBudgetPerHour ?? DEFAULT_CHATTER_TOKEN_BUDGET_PER_HOUR,
+    /** Tokens charged in the rolling hour, so the user can see the budget work. */
+    tokensSpentThisHour: officeBrewSlot.tokensSpentThisHour
+  };
+});
 
 // ─── IPC: Free Flow (voice dictation → message queue) ────────────────────────
 // Entry point B is hold-Option-to-talk, handled entirely in the renderer
@@ -5682,9 +6079,12 @@ app.on('before-quit', (e) => {
 // Every window loads the config once at start-up, so tell them all when a
 // setting is saved — a floor left out would keep showing what it opened with.
 onConfigWritten((config) => {
+  // Redacted exactly like `config:get`: the broadcast is the OTHER way a whole
+  // config reaches a window, and the chatter key must not ride either.
+  const view = configForRenderer(config);
   for (const w of allWindows) {
     if (w.isDestroyed() || w.webContents.isDestroyed()) continue;
-    w.webContents.send('config:changed', config);
+    w.webContents.send('config:changed', view);
   }
 });
 

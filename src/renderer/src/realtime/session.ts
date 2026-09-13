@@ -282,8 +282,13 @@ async function setMicGate(on: boolean): Promise<void> {
  * `setSinkId` is Chromium/Electron-only and not in every lib.dom, so we feature-detect +
  * cast narrowly. Best-effort: if the device is gone or unsupported we stay on the default
  * sink (passing '' selects the system default).
+ *
+ * EXPORTED because it is the renderer's ONE answer to "where does audio come out".
+ * The office voices (scene/office/voicePlayback.ts) play through the same helper
+ * and the same stored choice, so an agent muttering in the break room lands on the
+ * speaker the user picked for Michael's voice — one device picker, not two.
  */
-async function applyOutputSink(el: HTMLAudioElement, deviceId: string | null): Promise<void> {
+export async function applyOutputSink(el: HTMLAudioElement, deviceId: string | null): Promise<void> {
   const sink = el as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
   if (typeof sink.setSinkId !== 'function') return;
   try {
@@ -511,6 +516,12 @@ export function setDeviceId(deviceId: string | null): void {
 export function setOutputDeviceId(deviceId: string | null): void {
   setState({ outputDeviceId: deviceId });
   if (audioEl) void applyOutputSink(audioEl, deviceId);
+}
+
+/** The speaker the user picked, for any other renderer audio that should come
+ *  out of the same place (the office voices). Null = the system default. */
+export function currentOutputDeviceId(): string | null {
+  return state.outputDeviceId;
 }
 
 function subscribe(cb: () => void): () => void {

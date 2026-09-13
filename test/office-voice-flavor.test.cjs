@@ -28,7 +28,7 @@ const loadTs = require('./load-ts.cjs');
 
 const hidden = loadTs('src/main/hiddenClaude.ts');
 const { BrewSlot } = loadTs('src/main/brewSlot.ts');
-const { OfficeVoiceDirector, parseAside } = loadTs('src/main/officeVoice.ts');
+const { OfficeVoiceDirector, parseAside, buildAsidePrompt } = loadTs('src/main/officeVoice.ts');
 const { OfficeChatDirector } = loadTs('src/main/officeChat.ts');
 const { RelationshipBook } = loadTs('src/main/officeRel.ts');
 
@@ -60,6 +60,9 @@ function harness(reply, opts = {}) {
     getHome: () => home,
     getCommand: () => 'claude',
     getModel: (tier) => (tier === 'milestone' ? 'MODEL-MILESTONE' : 'MODEL-ROUTINE'),
+    // The app's UI language (harness config `language`); `opts.language`
+    // omitted = unset, i.e. the English default every untouched install has.
+    getLanguage: () => opts.language,
     isEnabled: () => enabled,
     slot
   });
@@ -195,6 +198,73 @@ test('the café and the work-message flavour share ONE hidden session slot', asy
 
   release();
   await waitFor(() => !chat.slot.busy, 'the café brew to settle');
+});
+
+// ─── Language ───────────────────────────────────────────────────────────────
+// An aside is muttered BESIDE a message in the user's own app. It has to be in
+// the language that app is speaking — which the prompt never used to say, so it
+// was always English. Derived from the UI language, never hardcoded.
+
+test('a Spanish UI gets its aside in LATIN-AMERICAN Spanish', () => {
+  const { calls, director } = harness(OK('ahi te va.'), { language: 'es' });
+  director.request({ items: [item('m1', 'dwight', 'subject')] });
+  assert.strictEqual(calls.length, 1);
+  const { prompt } = calls[0];
+  assert.ok(/ESPAÑOL LATINOAMERICANO/.test(prompt), 'the prompt must name the variety');
+  assert.ok(prompt.includes('vosotros') && prompt.includes('ordenador'),
+    'the peninsular forms must be named as things to avoid');
+  assert.ok(prompt.includes('computadora') && prompt.includes('celular'),
+    'and the LatAm forms as the ones to prefer');
+});
+
+test('every language the app ships gets a directive, not just Spanish', () => {
+  // Arabic and Chinese used to fall through to English. That was survivable
+  // while a TRANSLATED canned pool alternated with the brewed lines; with the
+  // pools deleted it means the whole break room speaks English at a user who
+  // picked another language — a net regression, so the table covers all of them.
+  const ar = harness(OK('تمام.'), { language: 'ar' });
+  ar.director.request({ items: [item('m1', 'dwight', 'subject')] });
+  assert.ok(/العربية الفصحى/.test(ar.calls[0].prompt), 'Arabic must name the variety wanted');
+
+  const zh = harness(OK('好。'), { language: 'zh-CN' });
+  zh.director.request({ items: [item('m1', 'dwight', 'subject')] });
+  assert.ok(/简体中文/.test(zh.calls[0].prompt), 'Chinese must name the script wanted');
+
+  // Three different languages, three different prompts — no accidental sharing.
+  const es = harness(OK('va.'), { language: 'es' });
+  es.director.request({ items: [item('m1', 'dwight', 'subject')] });
+  const prompts = [ar.calls[0].prompt, zh.calls[0].prompt, es.calls[0].prompt];
+  assert.strictEqual(new Set(prompts).size, 3);
+});
+
+test('a region tag still resolves to its language (zh-CN, es-MX, ar-EG)', () => {
+  // The UI persists a full tag; the directive table is keyed on the base subtag.
+  for (const [language, marker] of [['zh-CN', /简体中文/], ['es-MX', /ESPAÑOL LATINOAMERICANO/], ['ar-EG', /العربية الفصحى/]]) {
+    const h = harness(OK('ok.'), { language });
+    h.director.request({ items: [item('m1', 'dwight', 'subject')] });
+    assert.ok(marker.test(h.calls[0].prompt), `${language} must resolve to its directive`);
+  }
+});
+
+test('English — and an unset language — leave the aside prompt untouched', () => {
+  const en = harness(OK('fine.'), { language: 'en' });
+  en.director.request({ items: [item('m1', 'dwight', 'subject')] });
+  assert.ok(!/IDIOMA/.test(en.calls[0].prompt), 'no language directive in English');
+
+  const unset = harness(OK('fine.'));
+  unset.director.request({ items: [item('m1', 'dwight', 'subject')] });
+  assert.strictEqual(unset.calls[0].prompt, en.calls[0].prompt,
+    'an unset language must be byte-for-byte the pre-existing English prompt');
+});
+
+test('buildAsidePrompt is the same function the director uses', () => {
+  // The exported builder and the director must not drift on the language rule:
+  // a prompt built by hand for 'es' is the prompt the director would have sent.
+  const { calls, director } = harness(OK('va.'), { language: 'es' });
+  const it = item('m1', 'dwight', 'subject');
+  director.request({ items: [it] });
+  assert.strictEqual(calls[0].prompt, buildAsidePrompt(it, 'es'));
+  assert.notStrictEqual(buildAsidePrompt(it, 'es'), buildAsidePrompt(it, 'en'));
 });
 
 test('everything stays inert while the feature flag is off', () => {

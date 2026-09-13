@@ -55,6 +55,7 @@
  * before it reads or writes anything.
  */
 import { BrewSlot, type LaneLimits } from './brewSlot';
+import { chatterLanguageDirective } from './chatterLanguage';
 import type { ChatPersona, ChatTier } from './officeChat';
 
 const VOICE_LANE = 'voice';
@@ -115,6 +116,11 @@ interface Deps {
   /** Same tiering contract as the café director. */
   getModel: (tier: ChatTier) => string;
   isEnabled: () => boolean;
+  /** Same language contract as the café director (officeChat.ts's `getLanguage`):
+   *  the UI language off the harness config, so an aside is muttered in the
+   *  language the rest of the app is speaking. Optional — absent or English
+   *  leaves the prompt exactly as it was. */
+  getLanguage?: () => string | null | undefined;
   /** The process-wide brew slot. Optional only so tests can stand one up alone. */
   slot?: BrewSlot;
 }
@@ -213,7 +219,7 @@ export class OfficeVoiceDirector {
     // attempt can be holding the same claim.)
     const claimedVoice = !this.voiced.has(key);
     const model = this.deps.getModel(this.tierFor(key));
-    const prompt = buildAsidePrompt(target);
+    const prompt = buildAsidePrompt(target, this.deps.getLanguage?.());
     const writeOff = (): void => {
       this.spent.add(target.id);
       if (claimedVoice) this.voiced.delete(key);
@@ -295,7 +301,11 @@ function statusProse(status: string): string {
   }
 }
 
-export function buildAsidePrompt(item: VoiceFlavorItem): string {
+/** `locale` is the UI language the user picked (harness config `language`).
+ *  Omitted / English / unrecognised ⇒ the prompt is exactly what it was before
+ *  the language directive existed. See chatterLanguage.ts. */
+export function buildAsidePrompt(item: VoiceFlavorItem, locale?: string | null): string {
+  const lang = chatterLanguageDirective(locale);
   return [
     'A pixel-art office sim shows AI coding agents as characters from The Office (US).',
     'One of them just sent a real work message to a colleague. The message itself is',
@@ -313,8 +323,11 @@ export function buildAsidePrompt(item: VoiceFlavorItem): string {
     '  file path or instruction. If you have nothing in character to add, write a plain',
     '  in-character shrug.',
     '- No fourth-wall breaks about being an AI model. No quotes around the line.',
+    // Last content rule, right before the output-shape line — same placement and
+    // same reason as the café prompt's.
+    lang,
     '- Output ONLY a JSON array containing that single string. No prose, no code fence.'
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 /** Pull one clean aside out of the model's reply. Defensive on purpose: any

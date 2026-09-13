@@ -212,6 +212,47 @@ export interface OfficeChatResult {
   relBack: OfficeChatRelView;
 }
 
+/** One recorded SPOKEN LINE from the break room (mirrors ChatterLogRow in
+ *  src/main/officeChatLog.ts). Lines sharing a `conv` were one exchange. */
+export interface OfficeChatterLine {
+  ts: number;
+  /** Exchange id — group by this to rebuild a conversation. */
+  conv: string;
+  /** The pair, in the order it was played: `from` opened. */
+  from: string;
+  to: string;
+  /** Whose line this is — always `from` or `to`. */
+  by: string;
+  text: string;
+  /** Whether a model wrote it. True for everything the floor speaks today. */
+  gen: boolean;
+}
+
+/** One derived personality trait, with the arithmetic behind it (mirrors
+ *  TraitReading in src/main/officeTraits.ts). `evidence` is "a of b" — the two
+ *  counts the claim was computed from, so a trait on screen can be audited
+ *  rather than believed. */
+export interface OfficeTraitReading {
+  id: string;
+  /** 0..1, ranks the list. Not a probability; nothing branches on it. */
+  strength: number;
+  evidence: { a: number; b: number };
+}
+
+/** One agent's personality as the floor understands it (mirrors AgentTraits in
+ *  src/main/officeTraits.ts). Derived BY RULES from accumulated interaction —
+ *  no model is asked, so reading this costs nothing. */
+export interface OfficeAgentTraits {
+  id: string;
+  /** Earned traits, strongest first. Empty is the normal state for a quiet
+   *  agent and means exactly that — not "no personality detected". */
+  traits: OfficeTraitReading[];
+  /** Lifetime spoken lines — the sample size behind the list above. */
+  lines: number;
+  exchanges: number;
+  partners: number;
+}
+
 /** One real hive message submitted for persona flavour, plus the soul of whoever
  *  SENT it (mirrors VoiceFlavorItem in src/main/officeVoice.ts). Only the SUBJECT
  *  crosses — bodies are never sent for flavouring. */
@@ -328,6 +369,15 @@ export interface HarnessConfig {
   harnessHome: string | null;
   /** Recently-opened hive home folders (most-recent first). Mirrors src/main/config.ts. */
   recentHives?: string[];
+  /** Skip the launch-time hive picker and open the last hive directly (default
+   *  OFF). Mirrors main + renderer HarnessConfig so
+   *  updateConfig({ alwaysOpenLastHive }) is typed across the bridge. */
+  alwaysOpenLastHive?: boolean;
+  /** UI language code ('en' | 'zh-CN' | 'ar' | 'es'), mirrored out of the
+   *  renderer's i18n so main-process prompt builders know what language the app
+   *  is speaking. Mirrors src/main/config.ts; typed here so
+   *  updateConfig({ language }) crosses the bridge. */
+  language?: string;
   registeredRepos: string[];
   autoMode: boolean;
   defaultCommand: string;
@@ -402,6 +452,39 @@ export interface HarnessConfig {
   /** Model for MILESTONE exchanges — first encounter / relationship threshold
    *  crossing (default 'claude-fable-5'). */
   officeChatterMilestoneModel?: string;
+  /** Which engine writes the chatter: the hidden `claude` CLI (default, shares
+   *  the user's WORK subscription) or any OpenAI-compatible HTTP endpoint.
+   *  Mirrors main's HarnessConfig — see src/main/chatterOpenAI.ts. */
+  chatterProvider?: 'claude-hidden' | 'openai-compatible';
+  /** Endpoint root or full completions URL for the openai-compatible route. */
+  chatterBaseUrl?: string;
+  /** Rolling-hour token ceiling for the chatter; 0 = unlimited. */
+  chatterTokenBudgetPerHour?: number;
+  /** Retention for the break-room transcript: days kept (default 7) and the
+   *  size ceiling in KB (default 1024). Both are clamped main-side — see
+   *  src/main/officeChatLog.ts — so neither can be edited into "unbounded". */
+  officeChatterLogDays?: number;
+  officeChatterLogMaxKb?: number;
+  // NOTE: `chatterApiKey` is deliberately ABSENT from this mirror. Main strips it
+  // from `config:get` and from the `config:changed` broadcast, so the value never
+  // exists in a renderer; presence only, via `chatterStatus()`.
+  /** EXPERIMENT: the café dialogue spoken aloud via MiniMax TTS (default OFF).
+   *  Its OWN flag, separate from `officeChatterEnabled` — text without sound is a
+   *  state people want. The floor reads this to decide whether to ask for a clip
+   *  at all; with it off no IPC leaves the renderer. See src/main/officeVoices.ts. */
+  officeVoicesEnabled?: boolean;
+  /** MiniMax TTS model (default 'speech-2.6-turbo'). */
+  minimaxModel?: string;
+  /** T2A endpoint override; empty = the global MiniMax host. */
+  minimaxEndpoint?: string;
+  /** MiniMax GroupId, when the deployment wants one. Not a secret. */
+  minimaxGroupId?: string;
+  /** Rolling one-minute ceiling on synthesised clips; 0 = unlimited. */
+  officeVoiceMaxPerMinute?: number;
+  /** Per-agent voice pin: agent id → MiniMax voice_id. */
+  officeVoiceOverrides?: Record<string, string>;
+  // NOTE: `minimaxApiKey` is ABSENT for the same reason `chatterApiKey` is —
+  // stripped in main, presence only via `officeVoicesStatus()`.
   /** Per-CLI-provider local/self-hosted base URL (Ollama/LM Studio/vLLM, …) for the
    *  OpenCode/Crush/pi/qwen engines; applied at spawn. API KEYS are NOT stored here —
    *  they live write-only in the secret broker. */
@@ -867,6 +950,20 @@ const api = {
    *  starting with `from` — instead of being thrown away. */
   officeChatStash: (from: string, to: string, lines: string[]): Promise<void> =>
     ipcRenderer.invoke('officeChat:stash', from, to, lines),
+  /** The DURABLE break-room transcript, oldest line first (officeChatLog.ts).
+   *  The relationship book only keeps a pair's last six turns as prompt input
+   *  and overwrites them in place; this is the history behind it — who said what
+   *  to whom, when, whether a model wrote it, and an exchange id (`conv`) to
+   *  group lines back into the conversation they were spoken in. Bounded by age
+   *  and size on disk, and empty while `officeChatterEnabled` is off. */
+  officeChatHistory: (limit?: number): Promise<OfficeChatterLine[]> =>
+    ipcRenderer.invoke('officeChat:history', limit ?? 500),
+  /** Each agent's DERIVED PERSONALITY — rule-based, costs nothing, read-only
+   *  (src/main/officeTraits.ts). Every trait carries the two numbers it was
+   *  computed from, so the panel can show the arithmetic rather than an
+   *  assertion. Empty while `officeChatterEnabled` is off. */
+  officeTraitsSnapshot: (): Promise<OfficeAgentTraits[]> =>
+    ipcRenderer.invoke('officeTraits:snapshot'),
   /** Ask the voice director for persona ASIDES on real work messages (instant;
    *  a missing id just means "no flavour yet"). Order items most-interesting
    *  first — at most one background brew is started, for the first bare item.
@@ -1364,6 +1461,57 @@ const api = {
     ipcRenderer.on('triggerHistory:updated', listener);
     return () => ipcRenderer.removeListener('triggerHistory:updated', listener);
   },
+
+  // ─── Office chatter provider (which engine writes the decoration) ───────────
+  /** Persist the chatter engine choice. The API key travels ONE WAY: there is no
+   *  method on this bridge that returns it, and main strips it from every config
+   *  payload. Pass `apiKey: ''` to clear the stored one. */
+  chatterSetConfig: (patch: {
+    provider?: 'claude-hidden' | 'openai-compatible';
+    baseUrl?: string; apiKey?: string;
+    routineModel?: string; milestoneModel?: string; tokenBudgetPerHour?: number;
+  }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('chatter:setConfig', patch),
+  /** The chatter settings as the renderer may see them — key PRESENCE only. */
+  chatterStatus: (): Promise<{
+    provider: 'claude-hidden' | 'openai-compatible';
+    baseUrl: string; hasApiKey: boolean;
+    routineModel: string; milestoneModel: string;
+    tokenBudgetPerHour: number; tokensSpentThisHour: number;
+  }> => ipcRenderer.invoke('chatter:status'),
+
+  // ─── Office VOICES (MiniMax TTS — the floor said out loud) ──────────────────
+  /** Synthesise ONE spoken café beat. Returns raw audio bytes the caller plays
+   *  through the renderer's existing <audio> sink, or `{ ok: false }` — which is
+   *  the answer for every refusal there is: the flag off, no key, the per-minute
+   *  ceiling spent, an endpoint that is down, a timeout. A falsy `ok` always
+   *  means "no sound", never "something broke": the text dialogue on the floor is
+   *  untouched either way, and no error string crosses this bridge.
+   *
+   *  `character` is the RAW cast key off the agent (`dwight`, `custom:<uuid>`),
+   *  not a display name — it is what the deterministic voice assignment in
+   *  src/main/officeVoices.ts keys on. */
+  officeVoicesSpeak: (req: { agentId: string; character?: string; text: string }): Promise<{
+    ok: boolean; voiceId?: string; mimeType?: string; audio?: ArrayBuffer;
+  }> => ipcRenderer.invoke('officeVoices:speak', req),
+  /** Voice settings as the renderer may see them — key PRESENCE only, exactly
+   *  like `chatterStatus`. */
+  officeVoicesStatus: (): Promise<{
+    enabled: boolean; hasApiKey: boolean; model: string;
+    endpoint: string; groupId: string;
+    maxPerMinute: number; spokenThisMinute: number;
+  }> => ipcRenderer.invoke('officeVoices:status'),
+  /** Persist voice settings. The MiniMax key travels ONE WAY: nothing on this
+   *  bridge returns it, and main strips it from every config payload. Pass
+   *  `apiKey: ''` to clear the stored one. */
+  officeVoicesSetConfig: (patch: {
+    enabled?: boolean; apiKey?: string; model?: string;
+    endpoint?: string; groupId?: string; maxPerMinute?: number;
+    /** hive agent id → MiniMax voice_id; the per-agent pin over the automatic
+     *  character-derived assignment. */
+    overrides?: Record<string, string>;
+  }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('officeVoices:setConfig', patch),
 
   // ─── Free Flow (voice dictation → message queue) ─────────────────────────────
   /** Persist Free Flow settings (flag / Groq key / model). The Groq key is stored

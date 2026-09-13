@@ -46,8 +46,10 @@ export interface RosterSnapshot {
 
 export interface RosterWriteResult {
   ok: boolean;
-  /** Set when the write was deliberately declined; the file is unchanged. */
-  skipped?: 'empty-first-write';
+  /** Set when the write was deliberately declined; the file is unchanged.
+   *  `unreadable-not-overwritten`: the file on disk does not parse, so an empty
+   *  snapshot is not allowed to replace it (a non-empty one still may). */
+  skipped?: 'empty-first-write' | 'unreadable-not-overwritten';
   error?: string;
 }
 
@@ -95,20 +97,37 @@ export class RosterStore {
     try { return this.getHome(); } catch { return null; }
   }
 
+  /**
+   * Read + classify the roster file. The distinction that matters is ABSENT (no
+   * roster yet — the normal first-run shape) versus UNREADABLE (there are bytes
+   * we cannot parse, which is an incident and must not be treated as "empty").
+   *
+   * A leading UTF-8 BOM is stripped before parsing: `JSON.parse` rejects one
+   * outright, and any Windows tool that round-trips the file (PowerShell's
+   * `Set-Content`, Notepad, "UTF-8 with BOM" editors) adds one on save.
+   */
+  private classify(): { status: 'ok'; snapshot: RosterSnapshot } | { status: 'absent' } | { status: 'unreadable'; error: string } {
+    const home = this.home();
+    if (!home) return { status: 'absent' };
+    const p = rosterPath(home);
+    if (!existsSync(p)) return { status: 'absent' };
+    try {
+      const raw = readFileSync(p, 'utf8');
+      const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+      const parsed = JSON.parse(text);
+      if (!isSnapshot(parsed)) return { status: 'unreadable', error: 'not a roster snapshot' };
+      return { status: 'ok', snapshot: parsed };
+    } catch (e) {
+      return { status: 'unreadable', error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
   /** The stored roster, or null when there isn't one (or it can't be parsed).
    *  Null means "no opinion" — the renderer then keeps using localStorage, so a
    *  corrupt file degrades to the old behaviour instead of to an empty floor. */
   read(): RosterSnapshot | null {
-    const home = this.home();
-    if (!home) return null;
-    try {
-      const p = rosterPath(home);
-      if (!existsSync(p)) return null;
-      const parsed = JSON.parse(readFileSync(p, 'utf8'));
-      return isSnapshot(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
+    const res = this.classify();
+    return res.status === 'ok' ? res.snapshot : null;
   }
 
   /**
@@ -133,7 +152,22 @@ export class RosterStore {
     const p = rosterPath(home);
     try {
       mkdirSync(home, { recursive: true });
-      const existing = this.read();
+      const disk = this.classify();
+      const existing = disk.status === 'ok' ? disk.snapshot : null;
+
+      // An UNREADABLE roster used to read as `null`, which DISARMED the
+      // empty-guard below: the guard only fires when it can see a non-empty file,
+      // so a first empty write flattened a file whose real contents we simply
+      // could not parse — the worst case, because that is when we know the least
+      // about what we are destroying. Treat unreadable as "assume it was full":
+      // an empty write is refused, and only a real, non-empty roster is allowed
+      // to replace it (backed up first, like every other write), so the file
+      // still self-heals the moment the renderer has something to say.
+      if (disk.status === 'unreadable' && entryCount(snap) === 0) {
+        console.error(`[roster] ${p} did not parse (${disk.error}) — refusing to replace it with an empty roster`);
+        this.backup(home, p, 'unreadable');
+        return { ok: false, skipped: 'unreadable-not-overwritten' };
+      }
 
       if (!this.wrote && existing && entryCount(existing) > 0 && entryCount(snap) === 0) {
         // Back it up anyway: what is on disk right now is exactly what we are

@@ -15,6 +15,8 @@ import { OnboardingWizard } from '@/components/OnboardingWizard';
 import { HivePicker } from '@/components/HivePicker';
 import { QuitWarningModal, type ClosingTimeState } from '@/components/QuitWarningModal';
 import { DundiesModal } from '@/components/DundiesModal';
+import { ClockOutConfirmModal } from '@/components/ClockOutConfirmModal';
+import { cancelClockOut, confirmClockOut, liveAgentCount } from '@/store/clockOut';
 import { useAppTheme, toggleAppTheme } from '@/design/theme';
 import { SettingsModal, type Section as SettingsSection } from '@/components/SettingsModal';
 import { acquireTerminal, notifyThemeChangeAll } from '@/components/terminalPool';
@@ -65,21 +67,33 @@ function AppInner() {
   const ideOpen = useStore(s => s.ideOpen);
   const setIdeOpen = useStore(s => s.setIdeOpen);
   const visitorMode = useStore(s => s.visitorMode);
+  // The office wall clock asks before it ends the day (store/clockOut.ts).
+  const clockOutRequest = useStore(s => s.clockOutRequest);
+  const dismissClockOut = useStore(s => s.dismissClockOut);
 
   const [config, setConfig] = useState<HarnessConfig | null>(null);
-  // Whether the user has passed the launch-time hive picker this session. Starts
-  // true (skip the picker) right after a hive SWITCH — changeHome relaunches and
-  // leaves a one-shot localStorage flag so we don't bounce back onto the picker for
-  // the hive we just chose. Also set true on onboarding completion (below).
-  const [hiveOpened, setHiveOpened] = useState<boolean>(() => {
+  // Where this session stands with the launch-time hive picker.
+  //
+  //   'deciding' — we do not know yet, because the answer depends on the config
+  //                (and, when `alwaysOpenLastHive` is on, on a disk check). Renders
+  //                the same blank as the pre-config load, so the picker never
+  //                flashes up for a launch that was about to skip it.
+  //   'picker'   — show HivePicker and wait for a human.
+  //   'open'     — the hive is open; useHive boots against it.
+  //
+  // Starts 'open' right after a hive SWITCH — changeHome relaunches and leaves a
+  // one-shot localStorage flag so we don't bounce back onto the picker for the
+  // hive we just chose. Also set 'open' on onboarding completion (below).
+  const [hiveGate, setHiveGate] = useState<'deciding' | 'picker' | 'open'>(() => {
     try {
       if (window.localStorage.getItem('cth.skipHivePickerOnce')) {
         window.localStorage.removeItem('cth.skipHivePickerOnce');
-        return true;
+        return 'open';
       }
-    } catch { /* localStorage unavailable — show the picker */ }
-    return false;
+    } catch { /* localStorage unavailable — decide from the config below */ }
+    return 'deciding';
   });
+  const hiveOpened = hiveGate === 'open';
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** Which tab Settings opens on. Set by a `cth:open-settings` deep link, reset
    *  to undefined (→ General) whenever the modal is opened the normal way. */
@@ -140,6 +154,17 @@ function AppInner() {
       // show the voice button disabled-with-tooltip when Free Flow is on but no
       // Groq key is set (Settings keeps this in sync on save).
       useStore.getState().setHasGroqKey(!!c.groqApiKey);
+      // Same idea for the office-chatter endpoint key, one step stricter: that
+      // key is stripped from `config:get` in main, so presence has to be ASKED
+      // for rather than derived. The value never exists in this process.
+      window.cth.chatterStatus?.()
+        .then((s) => { if (!cancelled) useStore.getState().setHasChatterKey(!!s?.hasApiKey); })
+        .catch(() => { /* older main build — leave the mirror false */ });
+      // And the MiniMax TTS key that lets the office be HEARD — same rule, same
+      // reason: stripped in main, so presence is asked for, never derived.
+      window.cth.officeVoicesStatus?.()
+        .then((s) => { if (!cancelled) useStore.getState().setHasMinimaxKey(!!s?.hasApiKey); })
+        .catch(() => { /* older main build — leave the mirror false */ });
       // Mirror the active office theme so OfficeFloor renders it (gated on the
       // tvShowOffices flag; off = always the office). Settings keeps this synced.
       useStore.getState().setOfficeTheme(c.tvShowOffices ? (c.officeTheme ?? 'office') : 'office');
@@ -165,6 +190,69 @@ function AppInner() {
       if (!cancelled) useStore.getState().setHasOpenAiKey(has);
     });
     return () => { cancelled = true; };
+  }, []);
+
+  // UNATTENDED LAUNCH — resolve the hive gate once the config is in.
+  //
+  // The picker is a human gate, and on a machine you reach over the network that
+  // gate is a hang: a restart leaves the app waiting for a click nobody is there
+  // to give. `alwaysOpenLastHive` (Settings → General, OFF by default) opts out
+  // of it, and nothing changes for an install that never turns it on — the flag
+  // absent or false lands on 'picker', exactly like today.
+  //
+  // ON still does not boot blind. The last hive is verified to exist on disk
+  // first; a home that was unmounted, renamed or wiped falls back to the picker,
+  // because an unattended launch against a dead path is worse than asking for
+  // the click. `recentHives` is consulted only when the config somehow carries
+  // no `harnessHome` at all — and even then only to confirm there IS a hive to
+  // go back to, since opening a DIFFERENT folder means changeHome + a relaunch,
+  // which is a decision for the picker, not for a boot path.
+  //
+  // Runs once per gate transition into 'deciding': the config subscription
+  // re-fires this effect on every save, and a user who walked back to the picker
+  // (or flipped the toggle on) must not be yanked into a hive mid-session.
+  useEffect(() => {
+    if (hiveGate !== 'deciding' || !config) return;
+    // Onboarding owns the screen and finishes by opening the hive it just set up.
+    if (!config.onboardingComplete) return;
+    if ((config as HarnessConfig).alwaysOpenLastHive !== true) { setHiveGate('picker'); return; }
+    const home = typeof config.harnessHome === 'string' ? config.harnessHome.trim() : '';
+    // No current home: `recentHives` may still hold hives this install has
+    // opened, but every one of them is a DIFFERENT folder, and switching to one
+    // means changeHome + a process relaunch. That is a decision, not a boot
+    // step, so hand those recents to the picker and let a human pick.
+    if (!home) {
+      const recents = (config.recentHives ?? []).filter((h) => typeof h === 'string' && h.trim());
+      if (recents.length > 0) console.info('[hive] no home set; %d recent hive(s) — asking', recents.length);
+      setHiveGate('picker');
+      return;
+    }
+    let cancelled = false;
+    void window.cth.statAbs(home)
+      .then((st) => {
+        if (cancelled) return;
+        // A file where a hive folder should be is as dead as a missing one.
+        const alive = st.exists && !st.isFile;
+        if (!alive) console.warn('[hive] last hive is gone — showing the picker:', home);
+        setHiveGate(alive ? 'open' : 'picker');
+      })
+      .catch(() => { if (!cancelled) setHiveGate('picker'); });
+    return () => { cancelled = true; };
+  }, [hiveGate, config]);
+
+  // The way BACK to the picker, from anywhere (today: Settings → General, beside
+  // the toggle above — the only other route to another hive is Settings' "change
+  // home folder", which browses to a folder instead of listing the ones you
+  // already have). Without this, turning the toggle on would make the picker
+  // unreachable without first turning it back off.
+  useEffect(() => {
+    const onShowPicker = (): void => {
+      setSettingsOpen(false);
+      setSettingsSection(undefined);
+      setHiveGate('picker');
+    };
+    window.addEventListener('cth:show-hive-picker', onShowPicker);
+    return () => window.removeEventListener('cth:show-hive-picker', onShowPicker);
   }, []);
 
   // Free Flow entry point B — hold-Option (⌥) to talk. In-renderer push-to-talk
@@ -303,14 +391,22 @@ function AppInner() {
 
   if (!config.onboardingComplete) {
     // Just-onboarded users go straight into the hive they set up — skip the picker.
-    return <OnboardingWizard onComplete={(next) => { setConfig(next); setHiveOpened(true); }} />;
+    return <OnboardingWizard onComplete={(next) => { setConfig(next); setHiveGate('open'); }} />;
+  }
+
+  // Still working out whether this launch opens a hive by itself (see the gate
+  // effect above). Same blank as the pre-config load — a picker that appears for
+  // one frame and vanishes reads as a glitch.
+  if (hiveGate === 'deciding') {
+    return <div style={{ width: '100vw', height: '100vh', background: 'var(--cth-cream-100)' }} />;
   }
 
   // Launch-time hive picker: on reopen, let the user open their current hive,
-  // switch to a recent one, or open/create another. Skipped right after onboarding
-  // and right after a switch-relaunch (see hiveOpened init).
+  // switch to a recent one, or open/create another. Skipped right after onboarding,
+  // right after a switch-relaunch (see the gate init), and on an unattended launch
+  // with `alwaysOpenLastHive` on and the folder still there.
   if (!hiveOpened) {
-    return <HivePicker config={config} onOpenCurrent={() => setHiveOpened(true)} />;
+    return <HivePicker config={config} onOpenCurrent={() => setHiveGate('open')} />;
   }
 
   // Theme toggle handler — flips the app theme, tells every pooled terminal
@@ -376,6 +472,19 @@ function AppInner() {
             config={config}
             initialSection={settingsSection}
             onClose={() => { setSettingsOpen(false); setSettingsSection(undefined); }}
+          />
+        </ErrorBoundary>
+      )}
+
+      {/* The wall clock was clicked. Nothing has happened yet — this asks, and
+          only its confirm button reaches window.close(). Cancelling clears the
+          request and leaves no trace (no IPC, no main-process state). */}
+      {clockOutRequest && (
+        <ErrorBoundary onReset={dismissClockOut}>
+          <ClockOutConfirmModal
+            agentCount={liveAgentCount(agents)}
+            onCancel={() => cancelClockOut({ dismiss: dismissClockOut, close: () => window.close() })}
+            onConfirm={() => confirmClockOut({ dismiss: dismissClockOut, close: () => window.close() })}
           />
         </ErrorBoundary>
       )}

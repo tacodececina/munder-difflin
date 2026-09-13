@@ -9,6 +9,7 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { MessageQueueComposer } from './MessageQueueComposer';
 import { TasksKanban } from './TasksKanban';
 import { LegendPanel } from './LegendPanel';
+import { ConversationPanel } from './ConversationPanel';
 import { AskMeTab } from './AskMeTab';
 import { TriggersTab } from './triggers/TriggersTab';
 import { TriggerHistoryTab } from './triggers/TriggerHistoryTab';
@@ -49,8 +50,8 @@ import { useRtl } from '@/i18n/useDirection';
 // Both the AskMe (#human) tab and the Triggers tab live here. Triggers replaced
 // the old Schedules tab: schedules are now one of four trigger types, and the
 // whole surface lives in ./triggers (see src/shared/triggers.ts for the contract).
-type CCTab = 'terminal' | 'floor' | 'tasks' | 'legend' | 'human' | 'triggers' | 'trigger-history'
-  | 'memory' | 'graph' | 'activity' | 'skills' | 'workers';
+type CCTab = 'terminal' | 'floor' | 'tasks' | 'legend' | 'conversation' | 'human' | 'triggers'
+  | 'trigger-history' | 'memory' | 'graph' | 'activity' | 'skills' | 'workers';
 
 /** Fallback denominator for the per-agent token meter when no floor token budget
  *  is configured — so the bar reads as a budget estimate (filled + remaining)
@@ -74,6 +75,11 @@ const TABS: { key: CCTab; labelKey: string; icon: Parameters<typeof Icon>[0]['na
   { key: 'tasks', labelKey: 'commandCenter.tabs.tasks', icon: 'check' },
   // Sits beside the kanban on purpose: it is the same ledger, read backwards.
   { key: 'legend', labelKey: 'commandCenter.tabs.legend', icon: 'sparkle' },
+  // Sits beside the legend for the same reason the legend sits beside the
+  // kanban: both are the floor read backwards. The legend is what it FINISHED;
+  // this is what it SAID, who that made everyone, and what they asked to wear.
+  // GATED on `officeChatterEnabled` — see `showConversation`.
+  { key: 'conversation', labelKey: 'commandCenter.tabs.conversation', icon: 'mic' },
   { key: 'human', labelKey: 'commandCenter.tabs.human', icon: 'bell' },
   { key: 'triggers', labelKey: 'commandCenter.tabs.triggers', icon: 'clock' },
   { key: 'trigger-history', labelKey: 'commandCenter.tabs.history', icon: 'ledger' },
@@ -92,17 +98,51 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
   const { t } = useTranslation();
   const [tab, setTab] = useState<CCTab>('terminal');
   // The trigger-history ledger has nothing to say until an outside party can
-  // reach us, so its tab appears only once an org key or a webhook exists. This
-  // is the first config-gated tab in the panel: TABS stays the canonical order
-  // and the gate is applied at render, so nothing else has to know about it.
+  // reach us, so its tab appears only once an org key or a webhook exists. It is
+  // one of two config-gated tabs here (the other is `conversation`, below), and
+  // both use the same shape: TABS stays the canonical order and the gate is
+  // applied at render by `tabVisible`, so nothing else has to know about it.
   // The rule itself lives in the store (`triggerHistoryVisible`) beside the two
   // mirrors it reads — a second copy here would drift from Settings.
   const showHistory = useStore(triggerHistoryVisible);
+  // The conversation tab is the office-chatter experiment's only surface in this
+  // panel, and that experiment is OFF by default. With the flag off its three
+  // read-only channels (officeChat:history, officeRel:snapshot,
+  // officeTraits:snapshot) all answer empty by design, so the tab could only
+  // ever be a permanently blank page that polls three IPC channels every five
+  // seconds for nothing. index.ts states the intent plainly — with the flag off
+  // the whole experiment is ABSENT from the UI — so the tab is gated the same
+  // way trigger-history is. Read from config rather than the store because the
+  // flag lives in the main process's config, not in the renderer's state (same
+  // subscription shape ThreadsPanel uses for the same flag).
+  const [showConversation, setShowConversation] = useState(false);
+  // Mirror of the same flag for the one place that must read it LIVE rather than
+  // as a dependency — see the ccTabRequest effect below.
+  const conversationOnRef = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    const apply = (on: boolean): void => {
+      if (!alive) return;
+      conversationOnRef.current = on;
+      setShowConversation(on);
+    };
+    window.cth.getConfig()
+      .then((c) => apply(c.officeChatterEnabled === true))
+      .catch(() => { /* flag stays off — the default, and the safe side */ });
+    const unsub = window.cth.onConfigChanged((c) => apply(c.officeChatterEnabled === true));
+    return () => { alive = false; unsub(); };
+  }, []);
   // Never leave the panel parked on a tab that has just been hidden.
   useEffect(() => {
     if (!showHistory && tab === 'trigger-history') setTab('terminal');
-  }, [showHistory, tab]);
-  const visibleTabs = TABS.filter((t) => t.key !== 'trigger-history' || showHistory);
+    if (!showConversation && tab === 'conversation') setTab('terminal');
+  }, [showHistory, showConversation, tab]);
+  const tabVisible = (key: CCTab): boolean => {
+    if (key === 'trigger-history') return showHistory;
+    if (key === 'conversation') return showConversation;
+    return true;
+  };
+  const visibleTabs = TABS.filter((t) => tabVisible(t.key));
 
   // External tab requests (the office task board → 'tasks', the boss-room
   // calendar → 'triggers'). seq-keyed so clicking again re-opens the tab even
@@ -115,6 +155,7 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
     // Read the gate live rather than depending on it — as a dependency it would
     // re-fire a stale request the moment the tab appeared.
     if (key === 'trigger-history' && !triggerHistoryVisible(useStore.getState())) return;
+    if (key === 'conversation' && !conversationOnRef.current) return;
     setTab(key);
   }, [ccTabRequest]);
   // A task-detail "assign" pre-fills the Floor dispatch box and jumps to it.
@@ -339,6 +380,11 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
         {tab === 'floor' && <FloorTab seed={dispatchSeed} />}
         {tab === 'tasks' && <TasksKanban />}
         {tab === 'legend' && <LegendPanel />}
+        {/* `showConversation` as well as the tab: the reset effect above runs
+            AFTER a render, so a flag flipped off while the tab is open would
+            otherwise mount the panel — and start its three polls — for one more
+            frame. The gate here is what makes "absent from the UI" exact. */}
+        {tab === 'conversation' && showConversation && <ConversationPanel />}
         {tab === 'human' && <AskMeTab />}
         {tab === 'triggers' && <TriggersTab />}
         {tab === 'trigger-history' && <TriggerHistoryTab />}

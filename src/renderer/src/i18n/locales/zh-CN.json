@@ -16,7 +16,8 @@
     "search": "搜索",
     "tokens": "令牌",
     "restarting": "重启中…",
-    "add": "添加"
+    "add": "添加",
+    "clear": "清除"
   },
   "commandBar": {
     "free": "自由",
@@ -241,6 +242,11 @@
       "simpleModeDesc": "智能体用日常语言而不是工程术语向你汇报。",
       "visitorMode": "访客模式",
       "visitorModeDesc": "用于团队以外的人能看到这块屏幕的场合。会遮蔽终端、蜂巢内部消息、工具追踪、git、IDE、记忆和指挥中心，并从办公室气泡中去掉文件名。办公室本身照常运转。默认关闭，不会自行开启。",
+      "alwaysOpenLastHive": "启动时直接打开上次的配置",
+      "alwaysOpenLastHiveDesc": "跳过选择界面，直接进入上次使用的配置，这样重启后不需要有人点击也能恢复办公室。如果该文件夹已不存在，仍会显示选择界面。默认关闭。",
+      "hivePicker": "配置选择器",
+      "hivePickerDesc": "回到启动界面，打开另一个配置或新建一个。选择其他文件夹会重新加载应用；重新打开当前这个则直接回到办公室。",
+      "showHivePicker": "显示选择器",
       "notifications": "通知",
       "desktopNotifications": "桌面通知",
       "desktopNotificationsDesc": "智能体完成或需要你输入时弹出系统通知。",
@@ -253,6 +259,28 @@
       "telemetryDesc": "少量匿名事件（打开应用、生成智能体、使用功能）——绝不包含提示词、代码、路径或智能体输出。完整清单见 TELEMETRY.md。",
       "officeChatter": "办公室闲聊（实验性）",
       "officeChatterDesc": "休息室对话由模型根据每个智能体的性格、关系历史和当前状态实时撰写，取代固定台词。使用简短的隐藏 Claude 会话（限速为每小时数次）。楼层上的金色星标表示生成的对话。",
+      "chatterProvider": "闲聊引擎",
+      "chatterProviderClaude": "隐藏的 Claude 会话（默认）",
+      "chatterProviderOpenAi": "兼容 OpenAI 的端点",
+      "chatterProviderClaudeDesc": "通过隐藏的 Claude CLI 会话生成——与你的工作智能体用的是同一份订阅，所以办公室越健谈，真正在处理问题的智能体可用的额度就越少。",
+      "chatterProviderOpenAiDesc": "通过 HTTP 访问任何支持 POST /chat/completions 且使用 Bearer 密钥的端点——DeepSeek、MiniMax、opencode-go，或本地的 Ollama / LM Studio。让闲聊完全独立于你的 Claude 额度。端点失败时不会生成任何台词，办公室会回退到固定对话。",
+      "chatterBaseUrl": "基础 URL",
+      "chatterBaseUrlPlaceholder": "https://api.deepseek.com  ·  http://localhost:11434/v1",
+      "chatterApiKey": "API 密钥",
+      "chatterApiKeyPlaceholder": "sk-…（保存在应用配置中，绝不发送到界面）",
+      "chatterApiKeyStored": "已保存密钥——输入新的即可替换",
+      "chatterRoutineModel": "常规模型",
+      "chatterMilestoneModel": "里程碑模型",
+      "chatterBudget": "每小时 token 预算（0 = 不限）",
+      "chatterBudgetHint": "当最近一小时的闲聊消耗达到该 token 数后，将停止生成，直到时间窗口重新打开；期间办公室使用固定台词。会报告用量的端点按实际计数，其余按约每 4 个字符 1 个 token 估算。本小时已用：{{spent}}。",
+      "officeVoices": "智能体语音（MiniMax）",
+      "officeVoicesDesc": "把休息室对话朗读出来。每个智能体会根据其所扮演的角色获得一个固定的声音，因此同一个智能体听起来始终一致。需要 MiniMax API 密钥。",
+      "officeVoicesPerMinute": "每分钟片段数",
+      "officeVoicesHint": "只有你能在楼层上看到的对话才会发声，一次只播放一个声音；迟到的片段会被丢弃而不是排队。没有密钥、端点不可达或出现任何错误时都只是保持静音——书面对话不受影响。",
+      "minimaxApiKey": "MiniMax API 密钥",
+      "minimaxModel": "语音模型",
+      "minimaxEndpoint": "端点（可选）",
+      "minimaxGroupId": "GroupId（可选）",
       "language": "语言",
       "languageDesc": "选择应用界面的语言。默认英文。",
       "dangerZone": "危险区",
@@ -404,6 +432,7 @@
       "floor": "监控",
       "tasks": "任务",
       "legend": "传奇",
+      "conversation": "对话",
       "human": "问我",
       "triggers": "触发器",
       "history": "历史",
@@ -868,6 +897,17 @@
     "errEngineNotInstalled": "{{label}} 尚未安装。请先安装它并点击“重新检查”，或选择其他引擎。"
   },
   "office": {
+    "clockOut": {
+      "title": "结束今天的工作？",
+      "agentsNone": "现在没有正在运行的智能体",
+      "agentsOne": "将停止 1 个智能体",
+      "agentsMany": "将停止 {{count}} 个智能体",
+      "body": "这只钟会结束今天的工作：楼层上的每个智能体都会被通知收尾并保存记忆，确认不会丢东西之后，程序才会自己关闭。现在还什么都没发生。",
+      "tip": "只想看时间？那是这面墙上的另一只钟 — 深色的 CN/MX 面板只是装饰。这一只会关掉整间办公室。",
+      "cancel": "还不要 — 继续干活",
+      "confirm": "结束今天",
+      "hint": "下班打卡 — 停止智能体并关闭程序"
+    },
     "gpuError": "办公楼层丢失了 GPU 上下文。\n\n同时使用 GPU 的终端太多了。\n关闭几个智能体终端，或重启应用，即可恢复。",
     "errand": {
       "water": [
@@ -915,15 +955,6 @@
       "今天领带不错，{{godName}}",
       "努力工作，老板！💪",
       "史上最好的老板。真心话。"
-    ],
-    "gossip": [
-      "他到底写过代码没有？",
-      "又一个拖了一小时的「快速同步」…",
-      "「世界上最好的老板」——那个杯子是他自己买的",
-      "他把我的任务据为己有，说是他的主意",
-      "说真的，那股雪茄味…",
-      "他浇了那盆植物。就一盆。他自己的。",
-      "你听见了吗？「我宣布……休息一下」"
     ],
     "cheer": [
       "完成！✔",
@@ -1470,6 +1501,107 @@
     "firstTitle": "这层楼完成的第一项任务",
     "streak": "×{{count}} 连击",
     "streakTitle": "{{name}} 连续完成 {{count}} 项"
+  },
+  "conversation": {
+    "count": "{{count}} 段对话",
+    "hint": "取自办公室真正说过的话 —— 由规则汇总，绝不经过模型",
+    "empty": "休息室一直很安静",
+    "emptyHint": "等两个智能体同桌坐下，他们说的话就会出现在这里 —— 附带摘要、彼此各自怎么看对方，以及他们正慢慢变成什么样的人。",
+    "sections": {
+      "recent": "最近的对话",
+      "relations": "关系 —— 每个方向一行",
+      "personality": "性格与外观"
+    },
+    "noConversations": "还没有记录。",
+    "volume": "{{a}}·{{b}} {{count}} 句",
+    "lineCount": "{{count}} 句",
+    "dominant": "{{name}} 说了大部分话",
+    "questions": "{{count}} 个问句",
+    "resumed": "接着上次继续聊",
+    "shape": {
+      "nod": "打个招呼",
+      "interrogation": "几乎全是问句",
+      "oneSided": "一头热",
+      "backAndForth": "你来我往",
+      "exchange": "一次交谈"
+    },
+    "directionalNote": "每段关系在两个方向上分别记录。一方可以对另一方有好感而不被回应，这种不对称正是有意思的地方 —— 所以绝不取平均把它抹掉。最不对等的一对排在最前面。",
+    "noRelations": "还没有记录任何关系。",
+    "noDirection": "这个方向没有记录",
+    "recip": {
+      "mutual": "双向一致",
+      "lopsided": "没有被同等回应",
+      "oneSidedFriction": "只有一方有摩擦",
+      "unanswered": "只记录了一个方向"
+    },
+    "tone": {
+      "none": "没有记录",
+      "warm": "正在热络起来",
+      "fond": "是真的喜欢对方",
+      "prickly": "带刺",
+      "cold": "冷淡疏远",
+      "neutral": "客气，交情不深"
+    },
+    "axes": {
+      "warmth": "好感",
+      "tension": "张力",
+      "familiarity": "熟悉"
+    },
+    "interactions": "{{count}} 次往来",
+    "personalityNote": "性格特征来自累积的互动，由规则推导 —— 从不问模型某个人是什么样。每条特征都附上它的两个计算数字，你可以核对，而不必相信。",
+    "sample": "{{lines}} 句 · {{exchanges}} 次交谈 · {{partners}} 位同事",
+    "noTraits": "还没攒下什么 —— 发生的事还不够多。",
+    "trait": {
+      "curious": "老爱发问的那个",
+      "terse": "四个字就说完",
+      "expansive": "从不只说一句",
+      "opener": "永远是他先开口",
+      "listener": "等别人来搭话",
+      "social": "跟谁都聊得来",
+      "loyal": "只认准一个人",
+      "caretaker": "会问你还好吗",
+      "contrarian": "总要顶一句",
+      "beloved": "大家都喜欢他",
+      "abrasive": "容易惹人不快",
+      "veteran": "跟每个人都很熟"
+    },
+    "evidence": {
+      "curious": "{{b}} 句里有 {{a}} 句是问句",
+      "terse": "每句约 {{a}} 个字符，共 {{b}} 句",
+      "expansive": "每句约 {{a}} 个字符，共 {{b}} 句",
+      "opener": "{{b}} 次对话里开了 {{a}} 次头",
+      "listener": "{{b}} 次对话里只开了 {{a}} 次头",
+      "social": "和 {{a}} 位不同同事说过话",
+      "loyal": "说话量的 {{a}}/{{b}} 都给了同一个人",
+      "caretaker": "他主动发起的 {{b}} 件事里有 {{a}} 件是去关心别人",
+      "contrarian": "他主动发起的 {{b}} 件事里有 {{a}} 件是拒绝",
+      "beloved": "{{b}} 位同事对他的平均好感 {{a}}/100",
+      "abrasive": "{{b}} 位同事对他的平均张力 {{a}}/100",
+      "veteran": "与 {{b}} 位同事的平均熟悉度 {{a}}/100"
+    },
+    "look": {
+      "asks": "{{name}} 想要{{change}} —— 因为他是{{trait}}。",
+      "change": {
+        "curious": "一副眼镜",
+        "terse": "更平淡的表情",
+        "expansive": "一个笑容",
+        "opener": "一顶帽子",
+        "listener": "一副耳机",
+        "social": "一张工牌",
+        "loyal": "一对耳环",
+        "caretaker": "一条围巾",
+        "contrarian": "更锋利的眉毛",
+        "abrasive": "更锋利的眉毛",
+        "beloved": "脸颉上一点红晕",
+        "veteran": "一块手表"
+      },
+      "approve": "同意",
+      "reject": "不用",
+      "neverAuto": "你不点同意就什么都不会变，拒绝也不会留下任何痕迹。",
+      "applied": "正穿着你批准过的改动（{{trait}}）",
+      "undo": "换回原来的样子",
+      "none": "没有提出任何请求。"
+    }
   },
   "queueComposer": {
     "recording": "● 录音中——点击停止转写",

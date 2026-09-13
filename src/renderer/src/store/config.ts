@@ -58,10 +58,22 @@ export interface HarnessConfig {
    *  'non-technical') — drives the copy register across onboarding. Mirrors
    *  src/main/config.ts. */
   audience?: 'technical' | 'non-technical';
+  /** UI language code ('en' | 'zh-CN' | 'ar' | 'es'). The renderer's i18n owns
+   *  the choice (localStorage); this is the copy `setLanguage` mirrors into the
+   *  harness config so the MAIN process knows what language the app speaks —
+   *  brewed office dialogue is written from it. Never read back to set the UI
+   *  language. Mirrors src/main/config.ts. */
+  language?: string;
   harnessHome: string | null;
   /** Recently-opened hive home folders (most-recent first) for the launch picker.
    *  Mirrors src/main/config.ts. */
   recentHives?: string[];
+  /** UNATTENDED LAUNCH — open `harnessHome` straight away instead of showing the
+   *  launch-time hive picker. Default OFF (an absent value reads as off), so a
+   *  config that predates the field keeps today's click-to-open behaviour.
+   *  Honored in App.tsx, and only after the folder is confirmed to still exist.
+   *  Mirrors src/main/config.ts. */
+  alwaysOpenLastHive?: boolean;
   registeredRepos: string[];
   autoMode: boolean;
   /** May the orchestrator ("Michael") spin up agents on its own? Default FALSE,
@@ -139,6 +151,37 @@ export interface HarnessConfig {
   /** Model for MILESTONE exchanges — a pair's first encounter or a relationship
    *  threshold crossing (default 'claude-fable-5'). */
   officeChatterMilestoneModel?: string;
+  /** Which engine writes the chatter — the hidden `claude` CLI (default, and the
+   *  user's WORK subscription) or an OpenAI-compatible HTTP endpoint. Mirrors
+   *  src/main/config.ts; the matching API key is main-only and never arrives
+   *  here (presence comes from `window.cth.chatterStatus()`). */
+  chatterProvider?: 'claude-hidden' | 'openai-compatible';
+  /** Endpoint root or full completions URL for the openai-compatible route. */
+  chatterBaseUrl?: string;
+  /** Rolling-hour token ceiling for the chatter; 0 = unlimited. */
+  chatterTokenBudgetPerHour?: number;
+  /** Retention for the durable break-room transcript: days kept (default 7) and
+   *  the size ceiling in KB (default 1024). Clamped main-side — see
+   *  src/main/officeChatLog.ts. */
+  officeChatterLogDays?: number;
+  officeChatterLogMaxKb?: number;
+  /** EXPERIMENT: the café dialogue spoken aloud via MiniMax TTS (default OFF).
+   *  Its OWN flag, separate from `officeChatterEnabled`: someone can want the
+   *  bubbles without the noise. The floor gates every clip request on it, so
+   *  with it off nothing leaves the renderer. `minimaxApiKey` is deliberately
+   *  absent from this mirror — main strips it, and presence comes from
+   *  `officeVoicesStatus()`. See src/main/officeVoices.ts. */
+  officeVoicesEnabled?: boolean;
+  /** MiniMax TTS model (default 'speech-2.6-turbo'; 'speech-2.6-hd' for quality). */
+  minimaxModel?: string;
+  /** T2A endpoint override; empty = the global MiniMax host. */
+  minimaxEndpoint?: string;
+  /** MiniMax GroupId, when the deployment wants one. Not a secret. */
+  minimaxGroupId?: string;
+  /** Rolling one-minute ceiling on synthesised clips; 0 = unlimited. */
+  officeVoiceMaxPerMinute?: number;
+  /** Per-agent voice pin: agent id → MiniMax voice_id. */
+  officeVoiceOverrides?: Record<string, string>;
   /** Per-CLI-provider local/self-hosted base URL (Ollama/LM Studio/vLLM, …) for the
    *  OpenCode/Crush/pi/qwen engines; applied at spawn. API KEYS are NOT stored here —
    *  they live write-only in the secret broker. */

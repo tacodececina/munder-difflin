@@ -16,7 +16,8 @@
     "search": "buscar",
     "tokens": "tokens",
     "restarting": "reiniciando…",
-    "add": "agregar"
+    "add": "agregar",
+    "clear": "borrar"
   },
   "commandBar": {
     "free": "libre",
@@ -241,6 +242,11 @@
       "simpleModeDesc": "Los agentes te informan en lenguaje claro en vez de jerga de ingeniería.",
       "visitorMode": "Modo visita",
       "visitorModeDesc": "Para cuando alguien ajeno al equipo puede ver esta pantalla. Oculta el terminal, los mensajes internos del hive, las trazas de herramientas, git, el IDE, la memoria y el Centro de Mando tras un aviso, y quita los nombres de archivo de los bocadillos de la oficina. La oficina sigue funcionando. Desactivado por defecto: nada lo activa solo.",
+      "alwaysOpenLastHive": "Abrir la última config al iniciar",
+      "alwaysOpenLastHiveDesc": "Omite el selector y entra directo a la última config que usaste, para que un reinicio levante la oficina sin que nadie tenga que hacer clic. Si esa carpeta ya no existe, se muestra el selector igual. Desactivado por defecto.",
+      "hivePicker": "Selector de configs",
+      "hivePickerDesc": "Vuelve a la pantalla de inicio para abrir otra config o crear una. Elegir otra carpeta recarga la app; volver a abrir esta te deja de nuevo en la oficina.",
+      "showHivePicker": "Ver selector",
       "notifications": "Notificaciones",
       "desktopNotifications": "Notificaciones de escritorio",
       "desktopNotificationsDesc": "Avisos nativos cuando un agente termina o necesita algo de ti.",
@@ -253,6 +259,28 @@
       "telemetryDesc": "Un puñado de eventos anónimos (app abierta, agente lanzado, función usada) — nunca prompts, código, rutas ni salida de los agentes. La lista completa está en TELEMETRY.md.",
       "officeChatter": "Charla de oficina (experimental)",
       "officeChatterDesc": "Conversaciones de la sala de descanso escritas en vivo por el modelo a partir de la personalidad de cada agente, su historial de relación y su estado actual — en lugar de frases enlatadas. Usa sesiones ocultas y breves de Claude (limitadas a unas pocas por hora). Una estrella dorada marca los intercambios generados en el piso.",
+      "chatterProvider": "Motor de la charla",
+      "chatterProviderClaude": "Sesión oculta de Claude (predeterminado)",
+      "chatterProviderOpenAi": "Endpoint compatible con OpenAI",
+      "chatterProviderClaudeDesc": "Genera mediante una sesión oculta del CLI de Claude — la misma suscripción que usan tus agentes de trabajo, así que una oficina habladora le quita cuota a los agentes que resuelven cosas reales.",
+      "chatterProviderOpenAiDesc": "Genera por HTTP contra cualquier endpoint que hable POST /chat/completions con una clave Bearer — DeepSeek, MiniMax, opencode-go o un Ollama / LM Studio local. Mantiene la charla totalmente independiente de tu cuota de Claude. Si el endpoint falla simplemente no hay línea generada; la oficina vuelve al diálogo enlatado.",
+      "chatterBaseUrl": "URL base",
+      "chatterBaseUrlPlaceholder": "https://api.deepseek.com  ·  http://localhost:11434/v1",
+      "chatterApiKey": "Clave de API",
+      "chatterApiKeyPlaceholder": "sk-… (se guarda en la configuración de la app, nunca se envía a la interfaz)",
+      "chatterApiKeyStored": "hay una clave guardada — escribe una nueva para reemplazarla",
+      "chatterRoutineModel": "Modelo rutinario",
+      "chatterMilestoneModel": "Modelo de hitos",
+      "chatterBudget": "Presupuesto de tokens por hora (0 = sin límite)",
+      "chatterBudgetHint": "Cuando la charla de la última hora alcanza esta cantidad de tokens no se genera nada más hasta que la ventana se reabre; mientras tanto la oficina usa frases enlatadas. Los endpoints que informan su uso se cuentan exacto y el resto se estima a ~4 caracteres por token. Gastado esta hora: {{spent}}.",
+      "officeVoices": "Voces de los agentes (MiniMax)",
+      "officeVoicesDesc": "Reproduce en voz alta el diálogo de la sala de descanso. Cada agente recibe una voz estable derivada del personaje que representa, así que el mismo agente siempre suena igual. Requiere una clave de API de MiniMax.",
+      "officeVoicesPerMinute": "Clips por minuto",
+      "officeVoicesHint": "Solo se habla el diálogo que puedes ver ocurriendo en el piso, una voz a la vez, y un clip que llega tarde se descarta en vez de acumularse. Sin clave, con el endpoint caído o ante cualquier error simplemente no suena nada — el diálogo escrito no se ve afectado.",
+      "minimaxApiKey": "Clave de API de MiniMax",
+      "minimaxModel": "Modelo de voz",
+      "minimaxEndpoint": "Endpoint (opcional)",
+      "minimaxGroupId": "GroupId (opcional)",
       "language": "Idioma",
       "languageDesc": "Elige el idioma de la interfaz. El inglés es el predeterminado.",
       "dangerZone": "ZONA DE PELIGRO",
@@ -404,6 +432,7 @@
       "floor": "monitor",
       "tasks": "tareas",
       "legend": "leyenda",
+      "conversation": "conversación",
       "human": "pregúntame",
       "triggers": "disparadores",
       "history": "historial",
@@ -868,6 +897,17 @@
     "errEngineNotInstalled": "{{label}} no está instalado. Instálalo y presiona \"revisar de nuevo\", o elige otro motor."
   },
   "office": {
+    "clockOut": {
+      "title": "¿TERMINAR LA JORNADA?",
+      "agentsNone": "AHORA MISMO NO HAY AGENTES CORRIENDO",
+      "agentsOne": "SE VA A DETENER 1 AGENTE",
+      "agentsMany": "SE VAN A DETENER {{count}} AGENTES",
+      "body": "Este reloj cierra la jornada: se le avisa a cada agente del piso que vaya terminando y guarde su memoria, y la app se cierra sola cuando ya no hay nada en riesgo. Todavía no pasó nada.",
+      "tip": "¿Solo querías ver la hora? Esa es el otro reloj de esta pared — el panel oscuro CN/MX es pura decoración. Este cierra la oficina.",
+      "cancel": "todavía no — volver al trabajo",
+      "confirm": "terminar la jornada",
+      "hint": "MARCAR SALIDA — detiene a los agentes y cierra la app"
+    },
     "gpuError": "La oficina perdió su contexto de GPU.\n\nHay demasiadas terminales usando la GPU al mismo tiempo.\nCierra algunas terminales de agentes, o reinicia la app, para recuperarla.",
     "errand": {
       "water": [
@@ -915,15 +955,6 @@
       "me encanta tu corbata de hoy, {{godName}}",
       "¡dándole con todo, jefe! 💪",
       "el mejor jefe del mundo. en serio."
-    ],
-    "gossip": [
-      "¿alguna vez habrá escrito código de verdad?",
-      "otra 'reunión rápida' que duró una hora…",
-      "'el mejor jefe del mundo' — esa taza se la compró él solito",
-      "se colgó MI tarea como si fuera idea suya",
-      "el olor a puro, la verdad…",
-      "regó la planta. UNA planta. la suya.",
-      "¿lo escuchaste? 'YO DECLARO… un descanso'"
     ],
     "cheer": [
       "¡listo! ✔",
@@ -1470,6 +1501,107 @@
     "firstTitle": "la primera tarea que esta oficina cerró",
     "streak": "×{{count}} SEGUIDAS",
     "streakTitle": "{{name}} cerró {{count}} seguidas"
+  },
+  "conversation": {
+    "count": "{{count}} conversaciones",
+    "hint": "salido de lo que el piso realmente dijo — resumido por reglas, nunca por un modelo",
+    "empty": "LA SALA DE DESCANSO ESTUVO CALLADA",
+    "emptyHint": "Cuando dos agentes compartan una mesa, lo que se dijeron aparece acá — con un resumen, cómo lee cada uno al otro, y en quién se están convirtiendo de a poco.",
+    "sections": {
+      "recent": "CONVERSACIONES RECIENTES",
+      "relations": "RELACIONES — UNA FILA POR DIRECCIÓN",
+      "personality": "PERSONALIDAD Y ASPECTO"
+    },
+    "noConversations": "Todavía no hay nada registrado.",
+    "volume": "{{a}}·{{b}} {{count}} líneas",
+    "lineCount": "{{count}} líneas",
+    "dominant": "{{name}} habló casi todo el tiempo",
+    "questions": "{{count}} preguntas",
+    "resumed": "RETOMARON EL HILO",
+    "shape": {
+      "nod": "UN SALUDO",
+      "interrogation": "CASI PURAS PREGUNTAS",
+      "oneSided": "HABLÓ UNO SOLO",
+      "backAndForth": "IDA Y VUELTA",
+      "exchange": "UN INTERCAMBIO"
+    },
+    "directionalNote": "Cada relación se registra por separado en cada dirección. Uno puede apreciar al otro sin que se lo devuelvan, y esa asimetría es justo lo interesante — así que nunca se promedia. Primero van los pares más desparejos.",
+    "noRelations": "Todavía no se registró ninguna relación.",
+    "noDirection": "nada registrado en esta dirección",
+    "recip": {
+      "mutual": "MUTUA",
+      "lopsided": "NO SE DEVUELVE IGUAL",
+      "oneSidedFriction": "ROCE DE UN SOLO LADO",
+      "unanswered": "SOLO HAY UN LADO REGISTRADO"
+    },
+    "tone": {
+      "none": "nada registrado",
+      "warm": "agarrando confianza",
+      "fond": "de verdad le tiene cariño",
+      "prickly": "espinoso",
+      "cold": "frío y distante",
+      "neutral": "cordial, con poca historia"
+    },
+    "axes": {
+      "warmth": "CARIÑO",
+      "tension": "TENSIÓN",
+      "familiarity": "TRATO"
+    },
+    "interactions": "{{count}} interacciones",
+    "personalityNote": "Los rasgos se ganan con la interacción acumulada y se derivan por reglas — nunca se le pregunta a un modelo cómo es alguien. Cada rasgo muestra los dos números con los que se calculó, así lo podés revisar en vez de creerlo.",
+    "sample": "{{lines}} líneas · {{exchanges}} intercambios · {{partners}} compañeros",
+    "noTraits": "Todavía no se ganó nada — no pasó lo suficiente.",
+    "trait": {
+      "curious": "el que pregunta",
+      "terse": "contesta en cuatro palabras",
+      "expansive": "nunca usa una sola frase",
+      "opener": "siempre arranca él",
+      "listener": "espera a que le hablen",
+      "social": "habla con todos",
+      "loyal": "tiene a una sola persona",
+      "caretaker": "pregunta si estás bien",
+      "contrarian": "pone peros",
+      "beloved": "le cae bien a todos",
+      "abrasive": "le saca canas verdes a la gente",
+      "veteran": "conoce bien a todo el mundo"
+    },
+    "evidence": {
+      "curious": "{{a}} de sus {{b}} líneas fueron preguntas",
+      "terse": "unos {{a}} caracteres por línea, sobre {{b}} líneas",
+      "expansive": "unos {{a}} caracteres por línea, sobre {{b}} líneas",
+      "opener": "arrancó {{a}} de {{b}} conversaciones",
+      "listener": "arrancó apenas {{a}} de {{b}} conversaciones",
+      "social": "habla con {{a}} compañeros distintos",
+      "loyal": "{{a}} de {{b}} de lo que habla es con una sola persona",
+      "caretaker": "{{a}} de las {{b}} cosas que inició fueron para ver cómo estaba el otro",
+      "contrarian": "{{a}} de las {{b}} cosas que inició fueron negativas",
+      "beloved": "cariño promedio {{a}}/100 de {{b}} compañeros",
+      "abrasive": "tensión promedio {{a}}/100 de {{b}} compañeros",
+      "veteran": "trato promedio {{a}}/100 con {{b}} compañeros"
+    },
+    "look": {
+      "asks": "{{name}} quisiera {{change}} — porque es {{trait}}.",
+      "change": {
+        "curious": "lentes",
+        "terse": "una expresión más seca",
+        "expansive": "una sonrisa",
+        "opener": "una gorra",
+        "listener": "audífonos",
+        "social": "un gafete",
+        "loyal": "aretes",
+        "caretaker": "una bufanda",
+        "contrarian": "una ceja más filosa",
+        "abrasive": "una ceja más filosa",
+        "beloved": "algo de color en los cachetes",
+        "veteran": "un reloj"
+      },
+      "approve": "aprobar",
+      "reject": "no",
+      "neverAuto": "No cambia nada hasta que vos lo apruebes, y decir que no no deja rastro.",
+      "applied": "trae puesto un cambio que aprobaste ({{trait}})",
+      "undo": "devolver el aspecto de antes",
+      "none": "no pidió nada."
+    }
   },
   "queueComposer": {
     "recording": "● grabando — haz clic en detener para transcribir",

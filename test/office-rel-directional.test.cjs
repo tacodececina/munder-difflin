@@ -103,7 +103,9 @@ test('saved edges round-trip through the new format', () => {
   book.flush();
 
   const raw = JSON.parse(fs.readFileSync(path.join(home, SAVE_FILE), 'utf8'));
-  assert.strictEqual(raw.version, 2);
+  // 3 since the conversation thread (`lastTurns`) became attributed; version 2
+  // files still load, which the migration tests above cover.
+  assert.strictEqual(raw.version, 3);
   assert.strictEqual(raw.edges.length, 2);
   assert.ok(raw.edges.every((e) => typeof e.from === 'string' && typeof e.to === 'string'));
 

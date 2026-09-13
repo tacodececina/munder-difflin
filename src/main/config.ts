@@ -12,6 +12,9 @@ import {
 import { defaultMcpDefaults } from '../shared/mcpCatalog';
 import { MAX_AGENT_TOKEN_CAP } from '../shared/tokenCaps';
 import { expandTilde, normalizeHiveHome } from './fs';
+import { DEFAULT_CHATTER_TOKEN_BUDGET_PER_HOUR } from './chatterOpenAI';
+import { DEFAULT_MINIMAX_MODEL, DEFAULT_VOICE_PLAYS_PER_MINUTE } from './officeVoices';
+import { DEFAULT_CHATTER_LOG_DAYS, DEFAULT_CHATTER_LOG_MAX_KB } from './officeChatLog';
 import type { IntegrationRecord } from '../shared/integrations';
 import type { RemoteEnvironment } from '../shared/remoteEnvironment';
 import {
@@ -181,12 +184,45 @@ export interface HarnessConfig {
    *  flag lingo, 'non-technical' explains each concept in plain language. Unset =
    *  not yet chosen (treated as technical for any incidental copy). */
   audience?: 'technical' | 'non-technical';
+  /** The UI language the user picked in Settings → General, as an i18next code
+   *  ('en' | 'zh-CN' | 'ar' | 'es' — see renderer i18n's LANGUAGES).
+   *
+   *  The RENDERER owns this choice and keeps it in localStorage, which is where
+   *  it has always lived and still lives; this field is a MIRROR written by
+   *  `setLanguage`, for the main process's benefit. Main-process features that
+   *  put words on screen have no other way to know what language the app is
+   *  speaking — the first of them being the brewed office dialogue, which used
+   *  to answer in English beside translated canned lines (officeChat.ts,
+   *  officeVoice.ts, chatterLanguage.ts).
+   *
+   *  Unset = never changed from the default, i.e. English. Nothing here changes
+   *  the UI: the renderer does not read this back to decide its language, so a
+   *  hand-edited value cannot put the app and this field out of step for longer
+   *  than the next language change. */
+  language?: string;
   /** Folder where the harness keeps its own state (agent metadata, logs). */
   harnessHome: string | null;
   /** Recently-opened hive home folders (most-recent first), surfaced by the
    *  launch-time hive picker. Maintained by writeConfig whenever harnessHome is
    *  set (onboarding finish, changeHome). Capped to a handful. */
   recentHives?: string[];
+  /** UNATTENDED LAUNCH — skip the launch-time hive picker and open `harnessHome`
+   *  directly.
+   *
+   *  The picker is a human gate: nothing restores the floor until somebody
+   *  clicks "open". That is the right default for a laptop, and the wrong one
+   *  for a machine you reach over the network, where a service restart leaves
+   *  the app sitting on a screen nobody is in front of.
+   *
+   *  DEFAULT FALSE, so an install that never touches this keeps the exact
+   *  behaviour it has today. Turned on ONLY from Settings → General.
+   *
+   *  On is not a promise to boot blind: the renderer still verifies the folder
+   *  exists on disk before it opens it, and falls back to the picker when it
+   *  does not (App.tsx). An unattended launch against a dead path is worse than
+   *  asking for the click. The one-shot `cth.skipHivePickerOnce` flag the hive
+   *  SWITCH relaunch leaves behind is unrelated and unchanged. */
+  alwaysOpenLastHive?: boolean;
   /** Folders the user registered during onboarding (used as quick-picks). */
   registeredRepos: string[];
   /** When true, new agents are spawned with --permission-mode bypassPermissions. */
@@ -342,10 +378,18 @@ export interface HarnessConfig {
    *  (main cannot import renderer code, so the union is duplicated here). */
   officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts' | `custom:${string}`;
   /** EXPERIMENT: live LLM-generated café dialogue between agents (officeChat.ts).
-   *  When on, pair chats on the floor are written by a hidden Claude session from
-   *  each agent's persona + persistent relationship state instead of the canned
-   *  pools in cafeteriaLines.ts. Default OFF — flag guards both the model spend
-   *  and the experiment itself (easy A/B against canned lines). */
+   *  When on, pair chats on the floor are written by the configured chatter
+   *  engine from each agent's persona, persistent relationship state, live
+   *  status, the pair's own running conversation and a read-only view of the
+   *  task board.
+   *
+   *  THERE IS NO LONGER A FALLBACK. The canned pools this used to A/B against
+   *  (the renderer's cafeteriaLines.ts, ~200 hand-written English quips) are
+   *  deleted: they were the one fabricated thing on a floor where everything
+   *  else shown corresponds to something real. So OFF now means the break room
+   *  is SILENT, not "canned lines instead" — agents still walk there, sit
+   *  together, fetch and wash mugs and show their real status and tool bubbles;
+   *  they just do not speak. Default OFF, so the flag still guards the spend. */
   officeChatterEnabled?: boolean;
   /** Model the dialogue director brews ROUTINE chatter with. Default is a
    *  Haiku-class model: most break-room exchanges are wallpaper and must cost
@@ -356,6 +400,107 @@ export interface HarnessConfig {
    *  Default 'claude-fable-5': the experiment wants Fable writing the moments
    *  that actually change how two agents read each other, not every coffee. */
   officeChatterMilestoneModel?: string;
+  /** WHICH ENGINE writes the chatter (v0.4.7).
+   *
+   *  'claude-hidden' (DEFAULT, and what every install had before this field
+   *  existed) brews through a hidden `claude` CLI session — i.e. out of the SAME
+   *  subscription the agents doing real work draw on, so a talkative office
+   *  competes with the agents resolving real incidents.
+   *
+   *  'openai-compatible' brews over plain HTTP against any endpoint that speaks
+   *  `POST /chat/completions` with `Authorization: Bearer …` — DeepSeek, MiniMax,
+   *  opencode-go, Together, or a local Ollama / LM Studio. That makes the
+   *  decoration genuinely independent of the work, for free or for cents, and it
+   *  is a configuration change only: see src/main/chatterOpenAI.ts.
+   *
+   *  Left as the default, this whole route is inert. */
+  chatterProvider?: 'claude-hidden' | 'openai-compatible';
+  /** Endpoint for the 'openai-compatible' route: either a root
+   *  ('https://api.deepseek.com', 'http://localhost:11434/v1') or the full
+   *  completions URL. http(s) only. Ignored by the 'claude-hidden' route. */
+  chatterBaseUrl?: string;
+  /** Bearer credential for that endpoint. Treated exactly like `slackBotToken`
+   *  and `groqApiKey`: read ONLY in the main process, used only in one
+   *  Authorization header, never logged, never written into an error string
+   *  (chatterOpenAI redacts), and — unlike groqApiKey — never sent to the
+   *  renderer at all. `config:get` strips it and the renderer mirrors only the
+   *  boolean presence (`chatter:status`). Local endpoints that need no auth can
+   *  be given any placeholder; the value is only ever forwarded upstream. */
+  chatterApiKey?: string;
+  /** Rolling-hour TOKEN ceiling for the chatter, across both routes and both
+   *  lanes (café dialogue + work-message asides). When the hour's spend reaches
+   *  it, the brew slot refuses every brew until enough of that spend ages out of
+   *  the window — nothing queues, the office just plays canned lines for a while.
+   *  0 = unlimited (sensible for a local model, where tokens are free).
+   *  Default DEFAULT_CHATTER_TOKEN_BUDGET_PER_HOUR (60k), roughly 4× the most the
+   *  per-lane brew limits can spend in an hour. Endpoints that report `usage` are
+   *  charged their real numbers; everything else is charged ceil(chars/4) — see
+   *  chatterOpenAI.estimateTokens. */
+  chatterTokenBudgetPerHour?: number;
+  /** How many DAYS of break-room conversation the office keeps
+   *  (src/main/officeChatLog.ts → `office-chatter.jsonl`). Default 7.
+   *
+   *  The relationship book only ever holds a pair's last six turns, overwritten
+   *  in place, so before this file existed there was no history to show — only a
+   *  prompt window. This is the retention on the history, and it is deliberately
+   *  short: a decoration's transcript is worth a week, not forever. Clamped to
+   *  1–90 days inside the module, so a hand-edited 0 cannot turn the bound off.
+   *  Paired with `officeChatterLogMaxKb` — the tighter bound wins. */
+  officeChatterLogDays?: number;
+  /** Size ceiling for that same log, in KB. Default 1024 (1 MB).
+   *
+   *  The AGE bound alone is not a size bound: it limits how far back the record
+   *  goes, not how large it gets, and this app is expected to run for weeks at a
+   *  time. When the file exceeds this, the OLDEST lines are dropped until it
+   *  fits. Clamped to 64 KB–16 MB in the module. */
+  officeChatterLogMaxKb?: number;
+
+  // ─── Office VOICES (MiniMax TTS — the floor said out loud) ─────────────────
+  /** Master toggle for spoken café dialogue (src/main/officeVoices.ts +
+   *  minimaxTts.ts). SEPARATE from `officeChatterEnabled` on purpose: the text
+   *  and the sound are two different appetites, and plenty of people want an
+   *  office that talks in bubbles and stays silent in the room. Voices need
+   *  chatter (there is nothing to say without it), but chatter never needs
+   *  voices.
+   *
+   *  Default OFF, and off means INERT in the strongest sense the other
+   *  experiments already hold themselves to: no MiniMax request, no audio
+   *  element, no clip in memory, no IPC from the floor — the renderer's player
+   *  short-circuits before it builds a payload, and the main handler returns
+   *  before it reads a key. */
+  officeVoicesEnabled?: boolean;
+  /** User-pasted MiniMax API key. Treated like `chatterApiKey`, which is one
+   *  step stricter than `groqApiKey`: read ONLY in main, used only in one
+   *  Authorization header, never logged, scrubbed out of every error string
+   *  (minimaxTts redacts), and STRIPPED from `config:get` so it never exists in
+   *  a renderer process at all. Settings learns presence only, through
+   *  `officeVoices:status`, and writes it one way through
+   *  `officeVoices:setConfig`. */
+  minimaxApiKey?: string;
+  /** MiniMax TTS model. Default `speech-2.6-turbo` (fast/cheap — the right trade
+   *  for a one-line background mutter); `speech-2.6-hd` is the quality option. */
+  minimaxModel?: string;
+  /** T2A endpoint. Default is the global host
+   *  (`https://api.minimax.io/v1/t2a_v2`); override for the mainland host or a
+   *  proxy. http(s) only. */
+  minimaxEndpoint?: string;
+  /** MiniMax GroupId, appended as a query parameter when the deployment wants
+   *  one. Not a secret, and optional — most accounts on the global host need
+   *  nothing here. */
+  minimaxGroupId?: string;
+  /** Rolling ONE-MINUTE ceiling on synthesised clips, checked in MAIN before a
+   *  request goes out so no renderer bug can spend the user's quota in a loop.
+   *  Default DEFAULT_VOICE_PLAYS_PER_MINUTE (8) — wide enough that a six-line
+   *  exchange is never cut off half-spoken, tight enough that a runaway caller
+   *  is stopped within seconds. 0 = unlimited. */
+  officeVoiceMaxPerMinute?: number;
+  /** Per-agent voice PIN: hive agent id → MiniMax `voice_id`. The escape hatch
+   *  over the deterministic assignment in officeVoices.ts (character → voice,
+   *  then a stable hash), and the only thing that can beat the cast map. Also
+   *  the repair path if MiniMax ever retires one of the shipped voice ids: pin a
+   *  working one per agent, no new build needed. */
+  officeVoiceOverrides?: Record<string, string>;
+
   /** Per-CLI-provider local/self-hosted base URL (Ollama/LM Studio/vLLM, …) for the
    *  OpenCode/Crush/pi/qwen engines; applied at spawn (config-injection or proxy
    *  upstream). API KEYS are NOT stored here — they live write-only in the secret
@@ -471,19 +616,38 @@ export const MILESTONE_CHATTER_MODEL = 'claude-fable-5';
  *  Fable alias, and the milestone tier is Fable regardless. */
 const LEGACY_CHATTER_MODEL = 'claude-fable-5';
 
-/** The model the dialogue director should brew with at a given spend tier. */
+/** What the OpenAI-compatible route asks for when the user switched provider but
+ *  never renamed the models. It cannot be a Claude id: `claude-haiku-4-5-…` means
+ *  nothing to DeepSeek or Ollama and would 400 on every brew, which degrades to
+ *  "the office went quiet" with no clue why. This slug is the one most
+ *  OpenAI-compatible gateways accept, and users on anything else set
+ *  `officeChatterModel` to their own endpoint's spelling in Settings. */
+export const DEFAULT_OPENAI_CHATTER_MODEL = 'gpt-4o-mini';
+
+/** The model the dialogue director should brew with at a given spend tier.
+ *
+ *  The two model fields are shared by both routes — what changes with the
+ *  provider is how a Claude-shaped value is read. On the hidden-Claude route it
+ *  is the answer; on the HTTP route it can only be a leftover default (the
+ *  fields ship pre-filled with Claude ids and have never been exposed in a
+ *  picker), so it is treated as unset rather than posted to an endpoint that
+ *  cannot honour it. Any non-Claude slug is taken at face value on both. */
 export function chatterModelFor(cfg: HarnessConfig, tier: 'routine' | 'milestone'): string {
-  if (tier === 'milestone') {
-    return cfg.officeChatterMilestoneModel?.trim() || MILESTONE_CHATTER_MODEL;
+  const named = (tier === 'milestone' ? cfg.officeChatterMilestoneModel : cfg.officeChatterModel)?.trim();
+  if (cfg.chatterProvider === 'openai-compatible') {
+    return named && !/^claude-/i.test(named) ? named : DEFAULT_OPENAI_CHATTER_MODEL;
   }
-  const routine = cfg.officeChatterModel?.trim();
-  return !routine || routine === LEGACY_CHATTER_MODEL ? ROUTINE_CHATTER_MODEL : routine;
+  if (tier === 'milestone') return named || MILESTONE_CHATTER_MODEL;
+  return !named || named === LEGACY_CHATTER_MODEL ? ROUTINE_CHATTER_MODEL : named;
 }
 
 const DEFAULTS: HarnessConfig = {
   onboardingComplete: false,
   harnessHome: null,
   recentHives: [],
+  // Off: the launch picker stays a human gate unless the operator asks for an
+  // unattended boot. See the field's doc comment.
+  alwaysOpenLastHive: false,
   registeredRepos: [],
   autoMode: true,
   orchestratorMaySpawn: false,
@@ -517,6 +681,31 @@ const DEFAULTS: HarnessConfig = {
   officeChatterEnabled: false,
   officeChatterModel: ROUTINE_CHATTER_MODEL,
   officeChatterMilestoneModel: MILESTONE_CHATTER_MODEL,
+  // The chatter keeps brewing through the hidden Claude CLI unless the user
+  // says otherwise: a default that silently started posting to a third party
+  // (or changed where an install's text comes from) would be a behaviour change
+  // nobody asked for. The endpoint + key stay empty, which keeps the HTTP route
+  // fully inert — the slot refuses to brew on it at all until both are set.
+  chatterProvider: 'claude-hidden',
+  chatterBaseUrl: undefined,
+  chatterApiKey: undefined,
+  chatterTokenBudgetPerHour: DEFAULT_CHATTER_TOKEN_BUDGET_PER_HOUR,
+  // Retention for the break-room transcript. Inert unless the chatter flag is
+  // on — with it off nothing is ever written, so these two only ever describe a
+  // file that exists because the user asked for dialogue.
+  officeChatterLogDays: DEFAULT_CHATTER_LOG_DAYS,
+  officeChatterLogMaxKb: DEFAULT_CHATTER_LOG_MAX_KB,
+  // Voices are their own appetite and their own spend, so they get their own
+  // flag and their own default: OFF. An install that upgrades into this build
+  // stays exactly as silent as it was, and the key/endpoint stay empty, which
+  // keeps the whole MiniMax route inert — the handler refuses before it dispatches.
+  officeVoicesEnabled: false,
+  minimaxApiKey: undefined,
+  minimaxModel: DEFAULT_MINIMAX_MODEL,
+  minimaxEndpoint: undefined,
+  minimaxGroupId: undefined,
+  officeVoiceMaxPerMinute: DEFAULT_VOICE_PLAYS_PER_MINUTE,
+  officeVoiceOverrides: undefined,
   slackEnabled: false,
   slackSigningSecret: undefined,
   slackBotToken: undefined,
