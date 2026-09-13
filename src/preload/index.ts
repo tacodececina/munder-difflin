@@ -443,7 +443,7 @@ export interface HarnessConfig {
   /** Active office map/cast theme (honored only when tvShowOffices is on).
    *  `custom:<uuid>` (Phase 4) identifies a user-imported theme bundle —
    *  mirrors main + renderer HarnessConfig's officeTheme (see themeRegistry.ts's ThemeId). */
-  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts' | `custom:${string}`;
+  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts' | 'isometric' | `custom:${string}`;
   /** EXPERIMENT: live LLM-generated café dialogue (default OFF). Mirrors main +
    *  renderer HarnessConfig — see src/main/officeChat.ts. */
   officeChatterEnabled?: boolean;

@@ -15,6 +15,7 @@ import {
   type ZoneRect,
   type Point,
 } from './tiledCollision';
+import { createIsometricProjection, createOrthogonalProjection, type Projection, type WorldSize } from './projection';
 
 // Trimmed port of shahar061/the-office (office/engine/TiledMapRenderer.ts):
 // renders floor/walls/furniture tile layers and parses collision, spawn-points
@@ -28,6 +29,10 @@ import {
 // (themeLoader.ts, DeskScreen.ts, Character.ts, OfficeFloor.tsx).
 
 export type { TiledMap, TiledLayer, TiledObject, TiledTilesetRef, ZoneRect, Point };
+// Tile→world geometry lives in ./projection (also pixi-free). The renderer owns
+// the instance so every consumer reaches the SAME projection through it; see
+// that file for why the conversion stopped being a hand-written multiplication.
+export type { Projection, WorldSize };
 
 const FLIPPED_H_FLAG = 0x80000000;
 const FLIPPED_V_FLAG = 0x40000000;
@@ -39,6 +44,10 @@ export class TiledMapRenderer {
   readonly width: number;
   readonly height: number;
   readonly tileSize: number;
+  /** How this map's tiles become world pixels — and how props on them sort.
+   *  Orthogonal today; swapping in another projection is a one-line change
+   *  here rather than an edit across the whole scene. */
+  readonly projection: Projection;
 
   private walkabilityGrid: boolean[][] = [];
   private spawnPoints: Map<string, Point> = new Map();
@@ -50,6 +59,23 @@ export class TiledMapRenderer {
     this.width = mapData.width;
     this.height = mapData.height;
     this.tileSize = mapData.tilewidth;
+    // The map itself says which grid it is on — Tiled's own `orientation`
+    // field, so a theme declares its projection by authoring an isometric map
+    // rather than by carrying a second, separate flag that could disagree with
+    // the geometry it ships. The test compares against 'isometric' rather than
+    // switching on the field, so the orthogonal branch is the default for every
+    // other value AND for a missing field: all four shipped maps write
+    // "orientation":"orthogonal" explicitly (Tiled always emits it), and a
+    // hand-written or generated map may omit it. Both land on the exact same
+    // `createOrthogonalProjection(this.tileSize)` the scene always used.
+    this.projection = mapData.orientation === 'isometric'
+      ? createIsometricProjection({
+        tileWidth: this.tileSize,
+        tileHeight: mapData.tileheight,
+        mapWidthInTiles: this.width,
+        mapHeightInTiles: this.height,
+      })
+      : createOrthogonalProjection(this.tileSize);
     this.rootContainer = new Container();
     this.characterContainer = new Container();
     this.characterContainer.sortableChildren = true;
@@ -71,12 +97,17 @@ export class TiledMapRenderer {
     return this.walkabilityGrid[ty][tx];
   }
 
-  tileToPixel(tx: number, ty: number): Point {
-    return { x: tx * this.tileSize, y: ty * this.tileSize };
-  }
+  // NOTE: the old `tileToPixel` / `pixelToTile` helpers are gone. They were the
+  // orthogonal formula spelled out on this class, and leaving them as aliases
+  // would leave two doors onto the same geometry — exactly the drift that let
+  // six files grow their own copy. Go through `projection` instead:
+  // `tileToWorld` / `tileCenterToWorld` / `tileFootToWorld` / `worldToTile` /
+  // `footToTile`.
 
-  pixelToTile(px: number, py: number): Point {
-    return { x: Math.floor(px / this.tileSize), y: Math.floor(py / this.tileSize) };
+  /** The whole map's size in world pixels — what the camera clamps to and what
+   *  bounds the thought clouds. */
+  worldSize(): WorldSize {
+    return this.projection.mapSizeToWorld(this.width, this.height);
   }
 
   getSpawnPoint(name: string): Point | undefined { return this.spawnPoints.get(name); }
@@ -121,10 +152,27 @@ export class TiledMapRenderer {
   private buildTileLayers(): void {
     if (this.mapData.tilesets.length === 0) return;
 
+    // Y-SORTING THE MAP ITSELF.
+    //
+    // A top-down floor can paint every tile under every avatar and be right:
+    // the art is flat, nothing is ever "in front of" a person. A diamond grid
+    // cannot — a wall block or a desk one tile closer to the camera has to hide
+    // the legs of whoever is standing behind it, and that is a comparison
+    // between a TILE and a CHARACTER, so they have to live in the same sorted
+    // container. `projection.sortsTilesWithCharacters` is the projection saying
+    // which world it is.
+    //
+    // The floor layer always stays in its own unsorted container underneath:
+    // it is what everything else stands on, it can never occlude anyone, and
+    // leaving ~hundreds of floor sprites out of the sort keeps the per-frame
+    // zIndex pass cheap.
+    const sortTiles = this.projection.sortsTilesWithCharacters;
+
     for (const layerName of TILE_LAYERS) {
       const layer = this.findLayer(layerName, 'tilelayer');
-      const container = new Container();
-      container.label = layerName;
+      const sorted = sortTiles && layerName !== 'floor';
+      const container = sorted ? this.characterContainer : new Container();
+      if (!sorted) container.label = layerName;
 
       if (layer?.data) {
         for (let y = 0; y < this.height; y++) {
@@ -152,9 +200,11 @@ export class TiledMapRenderer {
             const sprite = new Sprite(new Texture({ source: texture.source, frame }));
 
             if (flippedH || flippedV || flippedD) {
+              // Mirrored/rotated tiles pivot about the cell's centre.
+              const c = this.projection.tileCenterToWorld(x, y);
               sprite.anchor.set(0.5, 0.5);
-              sprite.x = x * this.tileSize + this.tileSize / 2;
-              sprite.y = y * this.tileSize + this.tileSize / 2;
+              sprite.x = c.x;
+              sprite.y = c.y;
               if (flippedD) {
                 if (flippedH && !flippedV) {
                   sprite.rotation = Math.PI / 2;
@@ -172,19 +222,31 @@ export class TiledMapRenderer {
                 if (flippedV) sprite.scale.y = -1;
               }
             } else {
-              sprite.x = x * this.tileSize;
-              sprite.y = y * this.tileSize;
+              const p = this.projection.tileToWorld(x, y);
+              sprite.x = p.x;
+              // Where art taller than the cell hangs is the PROJECTION's call,
+              // not this loop's — see Projection.tileArtOffsetY. Orthogonal
+              // returns 0 for every texture height, so this line is literally
+              // the `sprite.y = y * tileSize` it replaced, for the four shipped
+              // maps AND for any user-authored bundle with a taller atlas. The
+              // isometric projection bottom-aligns (Tiled's rule), which is how
+              // a 32x32 wall cube and a 32x16 floor diamond share one square
+              // atlas cell.
+              sprite.y = p.y + this.projection.tileArtOffsetY(th);
             }
 
+            if (sorted) sprite.zIndex = this.projection.tileDepth(x, y);
             container.addChild(sprite);
           }
         }
       }
 
-      this.rootContainer.addChild(container);
+      if (container !== this.characterContainer) this.rootContainer.addChild(container);
     }
 
-    // Characters render above every tile layer.
+    // Characters render above every tile layer — and, under a projection that
+    // sorts tiles with them, the wall/furniture sprites are already inside this
+    // container, interleaved by zIndex rather than stacked under it.
     this.rootContainer.addChild(this.characterContainer);
   }
 

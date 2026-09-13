@@ -41,8 +41,9 @@ export function resolveThemeMap(theme: ThemeConfig): TiledMap {
     ...m,
     tilesets: theme.tilesets.map((t, i) => {
       if (t.embedded) return m.tilesets[i];
-      // Strip the renderer-only fields (url/embedded); the rest is Tiled metadata.
-      const { url: _url, embedded: _embedded, ...meta } = t;
+      // Strip the renderer-only fields (url/embedded/procedural); the rest is
+      // Tiled metadata.
+      const { url: _url, embedded: _embedded, procedural: _procedural, ...meta } = t;
       return meta as TiledMap['tilesets'][number];
     }),
   };

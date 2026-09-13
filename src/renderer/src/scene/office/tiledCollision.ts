@@ -21,6 +21,12 @@ export interface TiledMap {
   tileheight: number;
   layers: TiledLayer[];
   tilesets: TiledTilesetRef[];
+  /** Tiled's own grid-shape field. Absent or 'orthogonal' on every map this app
+   *  shipped before the isometric prototype; 'isometric' is what makes
+   *  TiledMapRenderer build the diamond projection instead of the square one.
+   *  Nothing in THIS module reads it — collision, spawn points and zones are
+   *  all indexed in tile space, which is projection-independent. */
+  orientation?: string;
 }
 
 export interface TiledLayer {

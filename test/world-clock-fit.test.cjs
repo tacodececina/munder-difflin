@@ -67,11 +67,17 @@ require.cache[pixiPath] = {
 
 const loadTs = require('./load-ts.cjs');
 const { WorldClock } = loadTs('src/renderer/src/scene/office/WorldClock.ts');
+// The prop no longer multiplies by a raw tile size: placement and depth come
+// from the scene's projection (scene/office/projection.ts). The orthogonal one
+// is the projection the app ships, so `tileSize` still means exactly what it
+// meant here before the extraction.
+const { createOrthogonalProjection } = loadTs('src/renderer/src/scene/office/projection.ts');
 
 /** The pieces the constructor built, named. */
 function build(opts = {}) {
   advance = opts.advance ?? 6;
-  const clock = new WorldClock(opts.topLeft ?? { x: 1, y: 2 }, opts.tileSize ?? 16);
+  const projection = createOrthogonalProjection(opts.tileSize ?? 16);
+  const clock = new WorldClock(opts.topLeft ?? { x: 1, y: 2 }, projection);
   const frame = clock.container.children.find((c) => c instanceof FakeGraphics);
   const label = clock.container.children.find((c) => c instanceof FakeText);
   return { clock, label, outer: frame.rects[0], rows: frame.rects.slice(1) };

@@ -1,4 +1,5 @@
 import { Container, Graphics, Text } from 'pixi.js';
+import type { Projection } from './projection';
 
 // A small always-on wall prop showing two live timezones (China + Mexico
 // City) — a scene-level fixture, not per-agent, so it mirrors the calendar/
@@ -33,7 +34,7 @@ export class WorldClock {
   private label: Text;
   private acc = 0;
 
-  constructor(topLeft: { x: number; y: number }, tileSize: number) {
+  constructor(topLeft: { x: number; y: number }, projection: Projection) {
     this.label = new Text({
       text: '',
       style: { fontSize: 10, fontFamily: 'monospace', fill: '#fffdf5', align: 'left' },
@@ -56,8 +57,9 @@ export class WorldClock {
     this.label.position.set(PAD_X, PAD_Y);
     this.container.addChild(this.label);
 
-    this.container.position.set(topLeft.x * tileSize, topLeft.y * tileSize);
-    this.container.zIndex = 3 * tileSize;
+    const at = projection.tileToWorld(topLeft.x, topLeft.y);
+    this.container.position.set(at.x, at.y);
+    this.container.zIndex = projection.rowDepth(3);
     this.container.eventMode = 'none';
     this.render();
   }

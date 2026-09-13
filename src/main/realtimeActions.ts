@@ -137,7 +137,10 @@ const SETTING_POLICY: Record<string, {
   // soft: cosmetic / low-blast, instantly reversible
   notifications: { tier: 'soft', type: 'boolean' },
   tvShowOffices: { tier: 'soft', type: 'boolean' },
-  officeTheme: { tier: 'soft', type: 'string', values: ['office', 'friends', 'brooklyn99', 'siliconvalley', 'got', 'hogwarts'] },
+  // Mirrors HarnessConfig.officeTheme's union (src/main/config.ts) minus
+  // `custom:<uuid>`, which voice cannot name out loud anyway. Keep the two in
+  // step: a theme missing here is silently refused when asked for by voice.
+  officeTheme: { tier: 'soft', type: 'string', values: ['office', 'friends', 'brooklyn99', 'siliconvalley', 'got', 'hogwarts', 'isometric'] },
   terminalTheme: { tier: 'soft', type: 'string', values: ['light', 'dark'] },
   freeflowEnabled: { tier: 'soft', type: 'boolean' },
   strongKeepalive: { tier: 'soft', type: 'boolean' },

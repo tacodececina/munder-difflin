@@ -29,6 +29,13 @@ const THEME_META: ThemeMeta[] = [
   { id: 'siliconvalley', label: 'Silicon Valley',     blurb: 'The Hacker Hostel',                   built: true,  swatch: '#4a6a4a' },
   { id: 'got',           label: 'Game of Thrones',    blurb: 'The Red Keep throne room',            built: false, swatch: '#6a2630' },
   { id: 'hogwarts',      label: 'Harry Potter',       blurb: 'Hogwarts great hall',                 built: false, swatch: '#39305a' },
+  // Not a show — a PROJECTION, offered here so it can be compared against the
+  // four above with one click. `built: true` is honest: it renders its own real
+  // map and seats the real cast. It is a small prototype room with most of the
+  // office's systems switched off (see themeRegistry's ISOMETRIC_THEME), which
+  // the blurb says out loud rather than hiding behind the "soon" tag that means
+  // "renders the office instead".
+  { id: 'isometric',     label: 'Isometric (proto)',  blurb: '2:1 diamond grid — a look test',      built: true,  swatch: '#b0946e' },
 ];
 
 /** Settings "Office Theme" section: an experimental flag toggle + a 6-card

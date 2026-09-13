@@ -376,7 +376,7 @@ export interface HarnessConfig {
    *  identifies a user-imported theme bundle — see the renderer's
    *  customThemes.ts / themeRegistry.ts ThemeId, which this type mirrors
    *  (main cannot import renderer code, so the union is duplicated here). */
-  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts' | `custom:${string}`;
+  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts' | 'isometric' | `custom:${string}`;
   /** EXPERIMENT: live LLM-generated café dialogue between agents (officeChat.ts).
    *  When on, pair chats on the floor are written by the configured chatter
    *  engine from each agent's persona, persistent relationship state, live

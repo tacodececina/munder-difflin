@@ -38,6 +38,17 @@ const SPEED = 48; // pixels/sec (tileSize=16)
 // (down, for up/side seats; the desk is behind them) so the head settles at the
 // monitor and the torso rests on the chair. Down-facing agents (desk in front)
 // are pushed into the desk instead.
+//
+// KNOWN ORTHO-ISM (isometric prototype): every number below was eyeballed
+// against the top-down 16x16 cell, and applySitPose applies them unchanged
+// under any projection. On the diamond grid the rationale only half holds — an
+// 'up'-facing sitter is nudged straight DOWN in screen space while its desk
+// block lies up-and-RIGHT — so seated poses there are an approximation, not a
+// tuned fit. Purely cosmetic (nothing reads these back; the avatar's logical
+// tile, depth and pathing all use the un-nudged foot anchor), and deliberately
+// NOT made projection-aware: any change here would move all four shipped
+// orthogonal themes, which is the one thing the prototype must not do. Tuning
+// them per projection is prototype-exit work.
 const SIT_OFFSET = 5;
 const SIT_OFFSET_DOWN = 12;
 const SIT_OFFSET_UP = 5;   // up-facing: drop the body down onto the chair
@@ -142,18 +153,16 @@ export class Character {
 
     // Appear at the spawn tile (the door) and walk in from there.
     const start = options.spawnTile ?? this.deskTile;
-    const pos = this.mapRenderer.tileToPixel(start.x, start.y);
-    this.px = pos.x + this.mapRenderer.tileSize / 2;
-    this.py = pos.y + this.mapRenderer.tileSize;
+    const pos = this.mapRenderer.projection.tileFootToWorld(start.x, start.y);
+    this.px = pos.x;
+    this.py = pos.y;
     this.sprite.setPosition(this.px, this.py);
 
     this.thoughtBubble = new ThoughtBubble();
     // Keep the cloud inside the world — Michael's corner office would
     // otherwise push his bubble off the top/left map edge.
-    this.thoughtBubble.setBounds(
-      this.mapRenderer.width * this.mapRenderer.tileSize,
-      this.mapRenderer.height * this.mapRenderer.tileSize
-    );
+    const world = this.mapRenderer.worldSize();
+    this.thoughtBubble.setBounds(world.width, world.height);
 
     this.workGlow = new Graphics();
     this.workGlow.circle(0, 0, 14);
@@ -177,7 +186,7 @@ export class Character {
   getPixelPosition(): { x: number; y: number } { return { x: this.px, y: this.py }; }
 
   getTilePosition(): { x: number; y: number } {
-    return this.mapRenderer.pixelToTile(this.px, this.py - 1);
+    return this.mapRenderer.projection.footToTile(this.px, this.py);
   }
 
   moveTo(tile: { x: number; y: number }): void {
@@ -351,9 +360,9 @@ export class Character {
 
   repositionTo(tx: number, ty: number): void {
     this.deskTile = { x: tx, y: ty };
-    const pos = this.mapRenderer.tileToPixel(tx, ty);
-    this.px = pos.x + this.mapRenderer.tileSize / 2;
-    this.py = pos.y + this.mapRenderer.tileSize;
+    const pos = this.mapRenderer.projection.tileFootToWorld(tx, ty);
+    this.px = pos.x;
+    this.py = pos.y;
     this.sprite.setPosition(this.px, this.py);
   }
 
@@ -432,7 +441,7 @@ export class Character {
     this.cupSpot = spot;
     if (spot) {
       this.deskCup.position.set(spot.x, spot.y);
-      this.deskCup.zIndex = spot.y;
+      this.deskCup.zIndex = this.mapRenderer.projection.depthAtWorldY(spot.y);
     }
   }
 
@@ -577,14 +586,19 @@ export class Character {
     else if (this.wandering && !heldByFx) this.updateWander(dt);
     if (this.idleLoop && !heldByFx) this.updateIdleLoop(dt);
 
-    this.sprite.container.zIndex = this.py;
+    const depth = this.mapRenderer.projection.depthAtWorldY(this.py);
+    this.sprite.container.zIndex = depth;
     this.thoughtBubble.setPosition(this.px, this.py);
 
-    // work glow
-    const ts = this.mapRenderer.tileSize;
+    // work glow — half a cell-HEIGHT above the feet, one step behind the
+    // avatar. Height, not width: it is a puddle of light on the ground, and on
+    // a 2:1 grid the ground's vertical module is the projection's tileHeight.
+    // Identical to the old `mapRenderer.tileSize` under the orthogonal
+    // projection, where the two are the same number by construction.
+    const ts = this.mapRenderer.projection.tileHeight;
     this.workGlow.x = this.px;
     this.workGlow.y = this.py - ts / 2;
-    this.workGlow.zIndex = this.py - 1;
+    this.workGlow.zIndex = depth - 1;
     if (this.glowOn) {
       this.workGlowElapsed += dt;
       const phase = (Math.sin((this.workGlowElapsed * Math.PI) / 0.6) + 1) / 2;
@@ -815,9 +829,7 @@ export class Character {
     }
 
     const target = this.path[0];
-    const ts = this.mapRenderer.tileSize;
-    const targetPx = target.x * ts + ts / 2;
-    const targetPy = target.y * ts + ts;
+    const { x: targetPx, y: targetPy } = this.mapRenderer.projection.tileFootToWorld(target.x, target.y);
     const dx = targetPx - this.px;
     const dy = targetPy - this.py;
     const dist = Math.sqrt(dx * dx + dy * dy);
@@ -832,7 +844,11 @@ export class Character {
     const step = Math.min(SPEED * dt, dist);
     this.px += (dx / dist) * step;
     this.py += (dy / dist) * step;
-    this.direction = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
+    // Which way this step READS on screen is a property of the grid, not of
+    // this class — on a 2:1 diamond every cardinal step has |dx| = 2|dy|, so
+    // the old inline `Math.abs(dx) > Math.abs(dy)` answered "sideways" for all
+    // four of them. See projection.ts.
+    this.direction = this.mapRenderer.projection.facingForWorldStep(dx, dy);
     this.sprite.setAnimation('walk', this.direction);
     this.sprite.setPosition(this.px, this.py);
   }

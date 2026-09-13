@@ -27,7 +27,8 @@ import {
   installContextLossRecovery, planInitFailure, DEFAULT_MAX_INIT_RETRIES
 } from './glRecovery';
 import type { Tile, Facing, ErrandKind, ErrandSpot, TilesetEntry } from './themeRegistry';
-import { patchTilesetCanvas } from './tileArt';
+import { patchTilesetCanvas, TILE_PALETTES } from './tileArt';
+import { buildIsoAtlas } from './isoTileArt';
 
 // The map, tileset atlases, desk-claim order, errand spots, coffee-economy
 // tiles, prop anchors, monitor gids and palette all come from the active
@@ -182,6 +183,26 @@ const CHEER_KEYS = [
  *  every theme except office's own copy of a5-office-floors-walls.png) takes
  *  the plain `Texture.from(img)` path below, byte-identical to before. */
 function loadTilesetTexture(entry: TilesetEntry): Promise<Texture> {
+  // A PROCEDURAL atlas has no image to decode: isoTileArt.ts draws every cell
+  // into one RGBA buffer and this paints that straight onto a canvas. Same
+  // destination as the <img> path below (a canvas handed to Texture.from with
+  // nearest filtering), just without the network/data-URL round trip — which
+  // is also why it can resolve synchronously.
+  if (entry.procedural?.kind === 'iso') {
+    const pal = TILE_PALETTES[entry.tilePaletteKey ?? 'office'] ?? TILE_PALETTES.office;
+    const atlas = buildIsoAtlas(pal);
+    const canvas = document.createElement('canvas');
+    canvas.width = atlas.width;
+    canvas.height = atlas.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return Promise.reject(new Error('no 2d context for the isometric atlas'));
+    const img = ctx.createImageData(atlas.width, atlas.height);
+    img.data.set(atlas.data);
+    ctx.putImageData(img, 0, 0);
+    const tex = Texture.from(canvas);
+    tex.source.scaleMode = 'nearest';
+    return Promise.resolve(tex);
+  }
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
@@ -361,8 +382,24 @@ export function OfficeFloor() {
         (n, c) => n + ((c as Container).children?.length ?? 0), 0);
       console.log(`[OfficeFloor] map ${mapRenderer.width}x${mapRenderer.height}, ${tileCount} tile sprites rendered`);
 
+      // Every tile→world conversion in this scene goes through ONE projection
+      // (scene/office/projection.ts, owned by the map renderer). Nothing below
+      // multiplies by `tileSize` to place or sort a prop any more.
+      const proj = mapRenderer.projection;
+
+      // Which parts of the floor this theme actually carries (themeRegistry's
+      // ThemeFeatures). Read as `!== false` so an absent object — every shipped
+      // theme — means "all of it", exactly as before the flag existed. Only the
+      // isometric prototype sets any of these, and it sets them because the
+      // systems below are hand-drawn against a 16x16 square cell and would
+      // render wrong on a diamond grid, not because they are unwanted.
+      const hasCoffeeFixtures = theme.features?.coffee !== false;
+      const hasWallProps = theme.features?.wallProps !== false;
+      const hasWeather = theme.features?.weather !== false;
+
       const camera = new Camera(world);
-      camera.setMapSize(mapRenderer.width * mapRenderer.tileSize, mapRenderer.height * mapRenderer.tileSize);
+      const mapWorld = mapRenderer.worldSize();
+      camera.setMapSize(mapWorld.width, mapWorld.height);
       camera.setViewSize(app.screen.width, app.screen.height);
       camera.fitToScreen();
 
@@ -379,6 +416,12 @@ export function OfficeFloor() {
       // of as the light in the room. Added after `world`, so it draws on top.
       const floorWeather = new FloorWeather();
       const weatherOverlay = new WeatherOverlay(app.screen.width, app.screen.height);
+      // A theme without weather keeps the overlay object (so every resize /
+      // teardown path below stays one code path) but never shows or ticks it —
+      // see updateWeather. The rain streaks are screen-space diagonal lines
+      // tuned against the orthogonal room and read as scratches over a diamond
+      // grid; this is a "not ported yet", not a "not wanted".
+      weatherOverlay.container.visible = hasWeather;
       app.stage.addChild(weatherOverlay.container);
       // Cold start: the next push is up to one beat (30 s) away, and a floor that
       // was already raining when the scene rebuilt (theme switch, GPU recovery)
@@ -401,12 +444,17 @@ export function OfficeFloor() {
       // A little tear-off month page hangs on the CEO office wall. Clicking it
       // selects Michael (the god) and opens the Command Center's TRIGGERS tab —
       // everything that wakes the hive without you, schedules first among them.
-      const calTs = mapRenderer.tileSize;
       const calG = new Graphics();
+      // `visible = false` also removes a Graphics from hit testing in Pixi, so
+      // one line switches off both the drawing and the click for every wall
+      // prop a theme doesn't carry. (They are still BUILT — the alternative is
+      // wrapping four long blocks in `if`s whose consts the tick loop reads.)
+      calG.visible = hasWallProps;
       calG.eventMode = 'static';
       calG.cursor = 'pointer';
-      calG.position.set(theme.anchors.calendar.x * calTs + 8, theme.anchors.calendar.y * calTs + 5);
-      calG.zIndex = 3 * calTs;
+      const calAt = proj.tileToWorld(theme.anchors.calendar.x, theme.anchors.calendar.y);
+      calG.position.set(calAt.x + 8, calAt.y + 5);
+      calG.zIndex = proj.rowDepth(3);
       calG.on('pointertap', (ev) => {
         ev.stopPropagation();
         const st = useStore.getState();
@@ -433,7 +481,8 @@ export function OfficeFloor() {
       // Fall back to the `clock` anchor if a theme bundle predates worldClock
       // (themeBundle.ts's validator defaults it too, but this is cheap defense
       // in depth against an anchor that's still missing some other way).
-      const worldClock = new WorldClock(theme.anchors.worldClock ?? theme.anchors.clock, mapRenderer.tileSize);
+      const worldClock = new WorldClock(theme.anchors.worldClock ?? theme.anchors.clock, proj);
+      worldClock.container.visible = hasWallProps;
       charLayer.addChild(worldClock.container);
 
       // Build the ordered seat list once: PC desks + named desks first, then
@@ -498,12 +547,18 @@ export function OfficeFloor() {
       // the south, so the agent faces 'up' and we see their back — like a real
       // worker. Only a desk directly to the SOUTH (face 'down') puts furniture in
       // front of them, which is the one case the leg-crop tucks legs under.
-      const facingForSeat = (t: Tile): 'up' | 'down' | 'left' | 'right' => {
-        if (!mapRenderer.isWalkable(t.x, t.y - 1)) return 'up';
-        if (!mapRenderer.isWalkable(t.x, t.y + 1)) return 'down';
-        if (!mapRenderer.isWalkable(t.x - 1, t.y)) return 'left';
-        if (!mapRenderer.isWalkable(t.x + 1, t.y)) return 'right';
-        return 'up'; // open-floor overflow seat — no desk, just face away
+      // "North of the chair" is a fact about the MAP; "shows you the sitter's
+      // back" is a fact about the PROJECTION — on a diamond grid the tile to
+      // the north is up-and-right on screen, not straight up. So the neighbour
+      // probe stays here, in the same order it always ran, and the tile step it
+      // finds is handed to the projection to name. Orthogonally this is
+      // byte-for-byte the old four-line chain.
+      const facingForSeat = (t: Tile): Facing => {
+        if (!mapRenderer.isWalkable(t.x, t.y - 1)) return proj.facingForTileStep(0, -1);
+        if (!mapRenderer.isWalkable(t.x, t.y + 1)) return proj.facingForTileStep(0, 1);
+        if (!mapRenderer.isWalkable(t.x - 1, t.y)) return proj.facingForTileStep(-1, 0);
+        if (!mapRenderer.isWalkable(t.x + 1, t.y)) return proj.facingForTileStep(1, 0);
+        return proj.facingForTileStep(0, -1); // open-floor overflow seat — face away
       };
 
       // ─── Cafeteria: purposeful coffee breaks ───────────────────────────────
@@ -520,10 +575,10 @@ export function OfficeFloor() {
 
       // Stand spots face the first adjacent non-walkable tile (the appliance).
       const faceFurniture = (t: Tile): Facing => {
-        if (!mapRenderer.isWalkable(t.x + 1, t.y)) return 'right';
-        if (!mapRenderer.isWalkable(t.x - 1, t.y)) return 'left';
-        if (!mapRenderer.isWalkable(t.x, t.y - 1)) return 'up';
-        return 'down';
+        if (!mapRenderer.isWalkable(t.x + 1, t.y)) return proj.facingForTileStep(1, 0);
+        if (!mapRenderer.isWalkable(t.x - 1, t.y)) return proj.facingForTileStep(-1, 0);
+        if (!mapRenderer.isWalkable(t.x, t.y - 1)) return proj.facingForTileStep(0, -1);
+        return proj.facingForTileStep(0, 1);
       };
 
       // Seats first (so partner indices are stable), then the standing spots.
@@ -757,11 +812,12 @@ export function OfficeFloor() {
       const MAX_CUPS = theme.coffee.maxCups;
       let cleanCups = MAX_CUPS;
 
-      const ts0 = mapRenderer.tileSize;
       const trayG = new Graphics();
       trayG.eventMode = 'none';
-      trayG.position.set(TRAY_TILE.x * ts0, TRAY_TILE.y * ts0);
-      trayG.zIndex = (TRAY_TILE.y + 1) * ts0;
+      trayG.visible = hasCoffeeFixtures;
+      const trayAt = proj.tileToWorld(TRAY_TILE.x, TRAY_TILE.y);
+      trayG.position.set(trayAt.x, trayAt.y);
+      trayG.zIndex = proj.rowDepth(TRAY_TILE.y + 1);
       charLayer.addChild(trayG);
       const drawTray = (): void => {
         trayG.clear();
@@ -774,8 +830,10 @@ export function OfficeFloor() {
 
       const sinkG = new Graphics();
       sinkG.eventMode = 'none';
-      sinkG.position.set(SINK_TILE.x * ts0, SINK_TILE.y * ts0);
-      sinkG.zIndex = (SINK_TILE.y + 1) * ts0;
+      sinkG.visible = hasCoffeeFixtures;
+      const sinkAt = proj.tileToWorld(SINK_TILE.x, SINK_TILE.y);
+      sinkG.position.set(sinkAt.x, sinkAt.y);
+      sinkG.zIndex = proj.rowDepth(SINK_TILE.y + 1);
       charLayer.addChild(sinkG);
       let sinkBusy = 0; // seconds of wash animation left
       const drawSink = (t: number): void => {
@@ -799,8 +857,10 @@ export function OfficeFloor() {
 
       const machineG = new Graphics(); // steam over the counter machine while brewing
       machineG.eventMode = 'none';
-      machineG.position.set(26 * ts0, 17 * ts0);
-      machineG.zIndex = 19 * ts0;
+      machineG.visible = hasCoffeeFixtures;
+      const machineAt = proj.tileToWorld(26, 17);
+      machineG.position.set(machineAt.x, machineAt.y);
+      machineG.zIndex = proj.rowDepth(19);
       charLayer.addChild(machineG);
       let machineBusy = 0;
       const drawMachine = (t: number): void => {
@@ -1382,8 +1442,9 @@ export function OfficeFloor() {
           const spot = ERRAND_SPOTS[idx];
           g = new Graphics();
           g.eventMode = 'none';
-          g.position.set(spot.fx.x * ts0, spot.fx.y * ts0);
-          g.zIndex = (spot.fx.y + 1) * ts0;
+          const fxAt = proj.tileToWorld(spot.fx.x, spot.fx.y);
+          g.position.set(fxAt.x, fxAt.y);
+          g.zIndex = proj.rowDepth(spot.fx.y + 1);
           charLayer.addChild(g);
           errandFx.set(idx, g);
         }
@@ -1603,12 +1664,13 @@ export function OfficeFloor() {
       const BOARD_CENTER_PAD = 15;
       const NOTE_COLORS: Record<string, number> = theme.palette.noteColors;
       interface BoardTask { status: string; assignee?: string }
-      const tsB = mapRenderer.tileSize;
       const boardG = new Graphics();
+      boardG.visible = hasWallProps;
       boardG.eventMode = 'static';
       boardG.cursor = 'pointer';
-      boardG.position.set(BOARD_TILE.x * tsB + BOARD_CENTER_PAD, BOARD_TILE.y * tsB);
-      boardG.zIndex = (BOARD_TILE.y + 1) * tsB;
+      const boardAt = proj.tileToWorld(BOARD_TILE.x, BOARD_TILE.y);
+      boardG.position.set(boardAt.x + BOARD_CENTER_PAD, boardAt.y);
+      boardG.zIndex = proj.rowDepth(BOARD_TILE.y + 1);
       boardG.on('pointertap', (ev) => {
         ev.stopPropagation();
         const st = useStore.getState();
@@ -1646,6 +1708,10 @@ export function OfficeFloor() {
       const drawTaskBoard = (tasks: BoardTask[]): void => {
         boardG.clear();
         clearDeskNotes();
+        // The desk notes are separate Graphics parented to the character layer,
+        // so hiding boardG alone would leave sticky notes floating over a floor
+        // with no board to have come from.
+        if (!hasWallProps) return;
         const blocked = tasks.filter((t) => t.status === 'blocked').map(() => 'blocked');
         const todoNotes: string[] = tasks.filter((t) => t.status === 'todo').map(() => 'todo');
         let done = 0;
@@ -1662,8 +1728,9 @@ export function OfficeFloor() {
           if (!g) {
             g = new Graphics();
             g.eventMode = 'none';
-            g.position.set((desk.x - 1) * tsB + 3, (desk.y - 1) * tsB + 8);
-            g.zIndex = desk.y * tsB - 1;
+            const noteAt = proj.tileToWorld(desk.x - 1, desk.y - 1);
+            g.position.set(noteAt.x + 3, noteAt.y + 8);
+            g.zIndex = proj.rowDepth(desk.y) - 1;
             charLayer.addChild(g);
             deskNoteG.set(t.assignee!, g);
           }
@@ -1714,13 +1781,15 @@ export function OfficeFloor() {
       const CLOCK_BODY = 0xc94f4f;   // coral — the app's destructive/attention hue
       const CLOCK_FACE = 0xf2ead8;   // cream, same page white as the calendar
       const clockG = new Graphics();
+      clockG.visible = hasWallProps;
       clockG.eventMode = 'static';
       clockG.cursor = 'pointer';
-      clockG.position.set(theme.anchors.clock.x * ts0, theme.anchors.clock.y * ts0);
+      const clockAt = proj.tileToWorld(theme.anchors.clock.x, theme.anchors.clock.y);
+      clockG.position.set(clockAt.x, clockAt.y);
       // Matches the drawn art (bells stick 3px above, feet 2px below), with a
       // 2px grab margin. The old box was 16x32 of nothing in particular.
       clockG.hitArea = { contains: (x: number, y: number) => x >= -2 && x <= 18 && y >= -6 && y <= 24 };
-      clockG.zIndex = 3 * ts0;
+      clockG.zIndex = proj.rowDepth(3);
       let clockPulse = 0;
       let clockHover = false;
       // The ring breathes slowly, so a full per-frame rebuild of the prop is
@@ -1771,11 +1840,11 @@ export function OfficeFloor() {
       const clockHint = new ToolBubble();
       clockHint.hide();
       charLayer.addChild(clockHint.container);
-      const clockHintX = theme.anchors.clock.x * ts0 + 8;
+      const clockHintX = clockAt.x + 8;
       // ToolBubble anchors ABOVE the point it is given (OFFSET_Y = -36). The
       // clock hangs at the very top of the map, so aim well below it and let
       // the bubble rise back into the gap under the clock instead of off-world.
-      const clockHintY = theme.anchors.clock.y * ts0 + 78;
+      const clockHintY = clockAt.y + 78;
       clockG.on('pointerover', () => {
         clockHover = true;
         clockHint.showText(t('office.clockOut.hint'));
@@ -1799,10 +1868,12 @@ export function OfficeFloor() {
       // ASK ME tab, where the human reads the questions, answers, and the
       // answers flow back to the god (documented on the card itself).
       const askG = new Graphics();
+      askG.visible = hasWallProps;
       askG.eventMode = 'static';
       askG.cursor = 'pointer';
-      askG.position.set(14 * tsB + 25, 10 * tsB);
-      askG.zIndex = 11 * tsB;
+      const askAt = proj.tileToWorld(14, 10);
+      askG.position.set(askAt.x + 25, askAt.y);
+      askG.zIndex = proj.rowDepth(11);
       askG.on('pointertap', (ev) => {
         ev.stopPropagation();
         const st = useStore.getState();
@@ -1934,7 +2005,7 @@ export function OfficeFloor() {
           if (!rt) continue;
           const p = rt.character.getPixelPosition();
           g.position.set(p.x + 5, p.y - 10);
-          g.zIndex = p.y + 1;
+          g.zIndex = proj.depthAtWorldY(p.y) + 1;
         }
         // start queued moves whose actor is free
         for (let i = moveQueue.length - 1; i >= 0; i--) {
@@ -2035,7 +2106,10 @@ export function OfficeFloor() {
               const actor = actorFor(old?.assignee ?? t.assignee, false);
               if (actor) mv = { kind: 'pin', taskId: t.id, actorId: actor, after, carryColor: NOTE_COLORS.blocked, stand: PIN_STAND, thought: 'this one is stuck 😤' };
             }
-            if (mv && !busyActors.has(mv.actorId) && !moveQueue.some((q) => q.actorId === mv!.actorId)) {
+            // No boards on the wall ⇒ no walking a note to one. The `else`
+            // below is exactly the existing "un-choreographable diff" path:
+            // the card updates instantly and drawTaskBoard swallows the redraw.
+            if (mv && hasWallProps && !busyActors.has(mv.actorId) && !moveQueue.some((q) => q.actorId === mv!.actorId)) {
               if (!visualTasks.has(t.id) && mv.kind !== 'pin') visualTasks.set(t.id, { status: oldS ?? 'todo', assignee: old?.assignee });
               moveQueue.push(mv);
             } else {
@@ -2104,8 +2178,8 @@ export function OfficeFloor() {
           const top = { x: seatTile.x, y: seatTile.y - 2 };
           rt.screen = new DeskScreen(mapRenderer, top, theme.monitor);
           charLayer.addChild(rt.screen.container);
-          const ts2 = mapRenderer.tileSize;
-          character.setCupSpot({ x: top.x * ts2 + 18, y: top.y * ts2 + 23 });
+          const topAt = proj.tileToWorld(top.x, top.y);
+          character.setCupSpot({ x: topAt.x + 18, y: topAt.y + 23 });
           // The desk stamp that carries this monitor block also has one free
           // tile of surface to its LEFT — verified true for every seat in all
           // four shipped maps — and that tile is where an agent's earned
@@ -2115,7 +2189,7 @@ export function OfficeFloor() {
           // whatever furniture it put there.
           const shelfTile = { x: seatTile.x - 1, y: seatTile.y - 1 };
           if (mapRenderer.gidAt('furniture-above', shelfTile.x, shelfTile.y) === 0) {
-            rt.shelf = new DeskShelf(shelfTile, ts2);
+            rt.shelf = new DeskShelf(shelfTile, proj);
             charLayer.addChild(rt.shelf.container);
             // Seed from the last poll so a late-joining agent (or a theme
             // switch, which rebuilds the whole scene) shows its history
@@ -2360,8 +2434,7 @@ export function OfficeFloor() {
       // routes a message. Endpoints are snapshotted at spawn, so the paper flies
       // a clean arc even if the avatars wander mid-flight. 'human' recipients
       // (escalations) fly to the office door.
-      const ts = mapRenderer.tileSize;
-      const humanPos = { x: entrance.x * ts + ts / 2, y: entrance.y * ts + ts };
+      const humanPos = proj.tileFootToWorld(entrance.x, entrance.y);
       const posFor = (id: string): { x: number; y: number } | null => {
         if (id === 'human') return humanPos;
         const rt = runtimes.get(id);
@@ -2440,6 +2513,7 @@ export function OfficeFloor() {
       // beat) and let the overlay animate toward it every frame.
       let weatherAcc = 0;
       const updateWeather = (dt: number) => {
+        if (!hasWeather) return;
         weatherAcc += dt;
         if (weatherAcc >= 1) {
           weatherAcc = 0;

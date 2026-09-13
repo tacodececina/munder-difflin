@@ -31,24 +31,29 @@ export class DeskScreen {
   private t = 0;
 
   constructor(mapRenderer: TiledMapRenderer, topLeft: { x: number; y: number }, monitor?: MonitorConfig) {
-    const ts = mapRenderer.tileSize;
+    const proj = mapRenderer.projection;
     const onGids = monitor?.onGids ?? DEFAULT_ON_GIDS;
     for (const [gid, dx, dy] of onGids) {
       const tex = mapRenderer.textureForGid(gid);
       if (!tex) continue;
       const s = new Sprite(tex);
-      s.x = dx * ts;
-      s.y = dy * ts;
+      // (dx,dy) is a tile OFFSET inside the block; the projection is linear and
+      // pins tile (0,0) at the origin, so converting the offset is the same
+      // operation as converting a tile.
+      const off = proj.tileToWorld(dx, dy);
+      s.x = off.x;
+      s.y = off.y;
       this.container.addChild(s);
     }
     this.anim.eventMode = 'none';
     this.container.addChild(this.anim);
-    this.container.x = topLeft.x * ts;
-    this.container.y = topLeft.y * ts;
+    const at = proj.tileToWorld(topLeft.x, topLeft.y);
+    this.container.x = at.x;
+    this.container.y = at.y;
     // Sort with the characters: the block's bottom edge sits above the seated
     // agent's anchor row, so the avatar's head draws over the keyboard, not
     // under it — same painter's order the map art implies.
-    this.container.zIndex = (topLeft.y + 2) * ts - 1;
+    this.container.zIndex = proj.rowDepth(topLeft.y + 2) - 1;
     this.container.visible = false;
     this.container.eventMode = 'none';
   }

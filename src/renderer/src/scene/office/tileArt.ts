@@ -20,14 +20,21 @@
 export type RGB = [number, number, number];
 type Buf = Uint8ClampedArray;
 
-const clamp = (v: number): number => (v < 0 ? 0 : v > 255 ? 255 : Math.round(v));
+// The four primitives below (clamp/shades/mix/setPx) and the two FLOOR_VARIANT_*
+// tables are exported, not module-private, because ./isoTileArt draws the
+// ISOMETRIC floor/wall tiles out of exactly this vocabulary, exactly these
+// shading constants and exactly these palettes. Two procedural tile modules
+// shading through two different `shades()` would drift apart the first time
+// anyone tuned one of them; sharing the primitives is what keeps the iso art
+// recognisably the same room as the orthogonal art.
+export const clamp = (v: number): number => (v < 0 ? 0 : v > 255 ? 255 : Math.round(v));
 
 /** Derive a light/base/dark trio from one base color — the same shading
  *  trick portraitArt.ts's shades() uses for skin/hair/clothing, duplicated
  *  here (rather than imported) so tileArt.ts stays a standalone module with
  *  its own tile-sized buffers instead of portraitArt's fixed character
  *  canvas and its module-level CUR_W/CUR_H state. */
-function shades(rgb: RGB, dl = 1.18, dd = 0.72): [RGB, RGB, RGB] {
+export function shades(rgb: RGB, dl = 1.18, dd = 0.72): [RGB, RGB, RGB] {
   return [
     [clamp(rgb[0] * dl), clamp(rgb[1] * dl), clamp(rgb[2] * dl)],
     [rgb[0], rgb[1], rgb[2]],
@@ -35,11 +42,11 @@ function shades(rgb: RGB, dl = 1.18, dd = 0.72): [RGB, RGB, RGB] {
   ];
 }
 
-function mix(a: RGB, b: RGB, t: number): RGB {
+export function mix(a: RGB, b: RGB, t: number): RGB {
   return [clamp(a[0] + (b[0] - a[0]) * t), clamp(a[1] + (b[1] - a[1]) * t), clamp(a[2] + (b[2] - a[2]) * t)];
 }
 
-function setPx(buf: Buf, w: number, x: number, y: number, c: RGB, a = 255): void {
+export function setPx(buf: Buf, w: number, x: number, y: number, c: RGB, a = 255): void {
   const i = (y * w + x) * 4;
   buf[i] = c[0]; buf[i + 1] = c[1]; buf[i + 2] = c[2]; buf[i + 3] = a;
 }
@@ -123,8 +130,8 @@ export const TILE_PALETTES: Record<string, TilePalette> = {
 // top-left/top-right/bottom-left/bottom-right order) gets its own tone
 // multiplier + fleck placement so the four stamps read as a natural, subtly
 // uneven tile/plank floor instead of four identical color swatches.
-const FLOOR_VARIANT_TONE = [1.0, 0.93, 1.07, 0.98];
-const FLOOR_VARIANT_FLECKS: ReadonlyArray<ReadonlyArray<readonly [number, number]>> = [
+export const FLOOR_VARIANT_TONE = [1.0, 0.93, 1.07, 0.98];
+export const FLOOR_VARIANT_FLECKS: ReadonlyArray<ReadonlyArray<readonly [number, number]>> = [
   [[3, 4], [11, 9]],
   [[7, 2], [12, 12]],
   [[2, 11], [9, 6]],

@@ -1,5 +1,6 @@
 import { Container, Graphics } from 'pixi.js';
 import { deskHistoryFor, sameDesk, EMPTY_DESK, type DeskHistory, type DeskPropKind } from './deskHistory';
+import type { Projection } from './projection';
 
 /**
  * The trinket row on one agent's desk — the drawn half of `deskHistory.ts`.
@@ -77,15 +78,16 @@ export class DeskShelf {
 
   /** `deskTile` is the FREE desk-surface tile (the seat tile shifted one left
    *  and one up) — the caller resolves it, since only it knows the map stamp. */
-  constructor(deskTile: { x: number; y: number }, tileSize: number) {
+  constructor(deskTile: { x: number; y: number }, projection: Projection) {
     this.g.eventMode = 'none';
     this.container.addChild(this.g);
     this.container.eventMode = 'none';
     this.container.interactiveChildren = false;
-    this.container.position.set(deskTile.x * tileSize, deskTile.y * tileSize);
+    const at = projection.tileToWorld(deskTile.x, deskTile.y);
+    this.container.position.set(at.x, at.y);
     // Behind the taken-note (seat row −1) and behind the monitor overlay, so a
     // note laid on the desk and the PC itself both draw over the trinkets.
-    this.container.zIndex = (deskTile.y + 1) * tileSize - 2;
+    this.container.zIndex = projection.rowDepth(deskTile.y + 1) - 2;
     this.container.visible = false;
   }
 
