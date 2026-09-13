@@ -20,8 +20,13 @@ const MX_FMT = new Intl.DateTimeFormat('en-GB', {
   hourCycle: 'h23',
 });
 
-const FRAME_W = 34;
-const FRAME_H = 20;
+// Padding between the text and the frame edge. The frame itself is MEASURED
+// from the rendered text rather than hard-coded: the first version fixed it at
+// 34x20px, which fits "CN 09" and nothing more — the ":16" of every reading
+// spilled past the dark panel onto the light wall behind it (pale text on pale
+// tiles, effectively invisible) and the MX row was clipped outright.
+const PAD_X = 3;
+const PAD_Y = 2;
 
 export class WorldClock {
   readonly container = new Container();
@@ -29,17 +34,26 @@ export class WorldClock {
   private acc = 0;
 
   constructor(topLeft: { x: number; y: number }, tileSize: number) {
-    const frame = new Graphics();
-    frame.rect(0, 0, FRAME_W, FRAME_H).fill(0x2a2334).stroke({ color: 0x1a1320, width: 1 });
-    frame.rect(1, 1, FRAME_W - 2, 7).fill(0x1a1320);  // CN row background
-    frame.rect(1, 11, FRAME_W - 2, 7).fill(0x1a1320); // MX row background
-    this.container.addChild(frame);
-
     this.label = new Text({
       text: '',
       style: { fontSize: 10, fontFamily: 'monospace', fill: '#fffdf5', align: 'left' },
     });
-    this.label.position.set(3, 2);
+    // Fill in the real text BEFORE measuring — both lines are fixed-width
+    // ("CN HH:MM"), so one measurement at construction holds for every tick.
+    this.render();
+    const textW = Math.ceil(this.label.width);
+    const textH = Math.ceil(this.label.height);
+    const frameW = textW + PAD_X * 2;
+    const frameH = textH + PAD_Y * 2;
+    const rowH = Math.max(1, Math.round(textH / 2));
+
+    const frame = new Graphics();
+    frame.rect(0, 0, frameW, frameH).fill(0x2a2334).stroke({ color: 0x1a1320, width: 1 });
+    frame.rect(1, PAD_Y, frameW - 2, rowH).fill(0x1a1320);          // CN row background
+    frame.rect(1, PAD_Y + rowH, frameW - 2, rowH).fill(0x1a1320);   // MX row background
+    this.container.addChild(frame);
+
+    this.label.position.set(PAD_X, PAD_Y);
     this.container.addChild(this.label);
 
     this.container.position.set(topLeft.x * tileSize, topLeft.y * tileSize);

@@ -813,6 +813,12 @@ export const useStore = create<State>((set, get) => ({
     set((s) => {
       const target = s.agents.find((a) => a.id === id);
       if (!target) return s;
+      // God is never archived — the same invariant main enforces in teardownPty
+      // and archiveOrphanedAgents. God's PTY dying (crash, or the boot spawn
+      // losing a race with itself) used to push him into the archived list, and
+      // since that list is persisted he stayed hidden across restarts with the
+      // floor left leaderless. He auto-respawns; there is nothing to archive.
+      if (target.isGod) return s;
       const agents = s.agents.filter((a) => a.id !== id);
       // Retain a flagged copy; the PTY is gone, so clear all live run-state.
       const archivedEntry: Agent = {

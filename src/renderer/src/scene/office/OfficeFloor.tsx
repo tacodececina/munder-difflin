@@ -280,6 +280,13 @@ export function OfficeFloor() {
 
     const runtimes = new Map<string, Runtime>();
     const seatClaims = new Set<number>();
+    // Agents whose addCharacter() is mid-flight. It claims a seat synchronously
+    // but only lands in `runtimes` after awaiting its sprite frames, so a
+    // syncAgents() inside that window saw no runtime and started a SECOND build
+    // for the same agent — burning another desk each time. With nine agents
+    // booting at once that exhausted the named desks and pushed whoever came
+    // last into the boardroom overflow seats.
+    const spawning = new Set<string>();
     // In-flight message envelopes (sender desk → recipient desk). Capped so a
     // broadcast doesn't bury the floor in paper.
     const envelopes: MessageEnvelope[] = [];
@@ -1857,6 +1864,8 @@ export function OfficeFloor() {
       (app as any).__taskBoardPoll = taskBoardPoll;
 
       const addCharacter = async (agent: Agent) => {
+        spawning.add(agent.id);
+        try {
         // A custom character (id `custom:<uuid>`) is never a key of
         // theme.cast.byName — its recipe lives in the customCast registry, not
         // the fixed roster. Resolve it explicitly so getFrames() below receives
@@ -1908,6 +1917,7 @@ export function OfficeFloor() {
         }
         runtimes.set(agent.id, rt);
         applyState(agent, rt, true);
+        } finally { spawning.delete(agent.id); }
       };
 
       const removeCharacter = (id: string) => {
@@ -2078,7 +2088,7 @@ export function OfficeFloor() {
         }
         for (const agent of agents) {
           const rt = runtimes.get(agent.id);
-          if (!rt) void addCharacter(agent);
+          if (!rt) { if (!spawning.has(agent.id)) void addCharacter(agent); }
           else applyState(agent, rt);
         }
       };

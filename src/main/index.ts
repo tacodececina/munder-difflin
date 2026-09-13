@@ -102,6 +102,14 @@ import {
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 
+// Opt-in software rendering. On a headless/remote host (a server floor viewed
+// over VNC/RDP) Chromium's GPU process can crash on loop, which takes the
+// office canvas's WebGL context with it and leaves the floor showing the
+// "lost its GPU context" error no matter how many times it retries. Set
+// MUNDER_DISABLE_GPU=1 there to render through SwiftShader instead. Must run
+// before `app.whenReady()`, hence its position at the top of the module.
+if (process.env.MUNDER_DISABLE_GPU === '1') app.disableHardwareAcceleration();
+
 // Keep the main process alive on an unexpected throw/rejection. The harness is a
 // multi-agent supervisor — a single stray throw (e.g. node-pty's ConPTY console
 // helper choking when a fast-exiting agent CLI's console is already gone) must
@@ -585,7 +593,11 @@ function teardownPty(id: string): void {
     // PTY never leaves an orphan loopback listener. No-op for non-proxy agents.
     try { hive.stopProxyBridge(agentId); } catch (e) { console.error('[hive] stopProxyBridge failed:', e); }
     if (hive.enabled()) {
-      try { hive.setArchived(agentId, true); } catch (e) { console.error('[hive] setArchived failed:', e); }
+      // God is never archived (same invariant archiveOrphanedAgents enforces below) —
+      // a PTY death still tears down its watchdog/breaker/telemetry state above, but
+      // must not flip the flag that hides god from the roster and blocks respawn.
+      try { if (agentId !== hive.registry().godId) hive.setArchived(agentId, true); }
+      catch (e) { console.error('[hive] setArchived failed:', e); }
     }
   }
   // 2) Remove the isolated worktree, if any. Non-blocking; errors are logged.

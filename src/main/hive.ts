@@ -42,7 +42,7 @@ import { selectBroadcastTargets } from '../shared/broadcast';
 import { preferredAgentRole } from '../shared/agentRole';
 import { mergeTaskLedger } from '../shared/taskLedger';
 import { expandTilde } from './fs';
-import { resolveGodName } from '../shared/godIdentity';
+import { resolveGodName, DEFAULT_GOD_NAME } from '../shared/godIdentity';
 
 /** The subset of HarnessConfig the hive consumes for the default-MCP merge.
  *  Kept as a local shape so hive.ts never imports the foundation-owned config
@@ -652,6 +652,18 @@ export class HiveManager {
     if (meta.cwd) meta = { ...meta, cwd: expandTilde(meta.cwd) };
     const role = preferredAgentRole(meta.role, prev?.role, !!meta.isGod);
     meta = { ...meta, role };
+
+    // Same protection `role` gets one line up, for god's NAME. The renderer
+    // resolves it from this registry before spawning, but that read is wrapped
+    // in `.catch(() => null)` — so any hiccup silently degrades to the built-in
+    // default and the spawn then WRITES that default back here, permanently
+    // losing a custom name (seen live: "lex one" → "Michael" after a restart).
+    // A spawn carrying the bare default is therefore never allowed to overwrite
+    // a name already on record; an explicit rename is a different call entirely
+    // (renameAgent), so this cannot block a real one.
+    if (meta.isGod && prev?.name && meta.name === DEFAULT_GOD_NAME && prev.name !== DEFAULT_GOD_NAME) {
+      meta = { ...meta, name: prev.name };
+    }
 
     const identity = join(dir, 'identity.md');
     writeFileSync(identity, this.identityText(meta), 'utf8'); // refresh on each spawn
