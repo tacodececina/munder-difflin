@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import type { AccentColorName } from '@/design/tokens';
-import type { OfficeCharacterName } from '@/scene/office/cast';
 import type { ThemeId } from '@/scene/office/themeRegistry';
 import type { StatusKind } from '@/components/PixelBadge';
 import type { AgentProvider } from '@shared/agentProvider';
@@ -18,6 +17,12 @@ import { preferredAgentRole } from '@shared/agentRole';
 import { isInboxNudge } from '@shared/hiveNudge';
 import { refocusAfterRemoval, focusOnLoad, restoreFocus } from './focusMode';
 import { chooseRosterSource } from './rosterSource';
+import {
+  createDundiesTrackState,
+  noteDundiesAgent,
+  dundiesStatsSnapshot,
+  type DundiesAgentStat
+} from './dundiesStats';
 
 export type ToolKind =
   | 'Read' | 'Edit' | 'Write' | 'Bash' | 'WebFetch' | 'WebSearch'
@@ -41,8 +46,11 @@ export interface BlockReason {
 export interface Agent {
   id: string;
   name: string;
-  /** which Office character represents this agent on the floor */
-  character: OfficeCharacterName;
+  /** Which Office character represents this agent on the floor: either a fixed
+   *  `OfficeCharacterName`, or a custom character id (`custom:<uuid>`) from the
+   *  custom-character registry (scene/office/customCast.ts) — kept as a plain
+   *  string since a custom id is never a member of the fixed union. */
+  character: string;
   accent: AccentColorName;
   /** persistent job / hire one-liner — same string as hive registry `role`.
    *  Live status belongs on `status` / `action`, never here. */
@@ -94,6 +102,11 @@ export interface Agent {
   /** When git isolation is enabled, the dedicated worktree path the agent runs
    *  in (its own `agent/<id>` branch); undefined for shared-cwd agents. */
   worktreePath?: string;
+  /** The paired remote environment this agent's PTY runs on (Phase 3b), or
+   *  undefined — the default — for an agent running on this machine. Persisted so
+   *  a restart re-spawns it on the SAME machine; without it a restore would try
+   *  to run the command locally against a path that only exists over there. */
+  remoteEnvironmentId?: string;
   /** Live context size of the agent's Claude session (tokens), polled from its
    *  transcript. Drives the context gauge on the agent card. */
   contextTokens?: number;
@@ -280,6 +293,13 @@ interface State {
    *  on switch). OfficeFloor depends on this and rebuilds the scene on change. */
   officeTheme: ThemeId;
   setOfficeTheme: (theme: ThemeId) => void;
+  /** Mirror of config.visitorMode — "someone outside the team is looking at
+   *  this screen". Every redacting surface subscribes to THIS, not to the
+   *  config object, so the seal lands in one repaint across the whole window.
+   *  Set by App from getConfig() and from the config:changed broadcast, so a
+   *  save in any floor window seals every floor. Policy: store/visitorMode.ts. */
+  visitorMode: boolean;
+  setVisitorMode: (on: boolean) => void;
   /** Mirror of config.webhookTriggers — the inbound HTTP endpoints. Webhooks are
    *  editable from BOTH Settings → Connections and the Triggers tab, so neither
    *  surface keeps its own copy: both render off this list and both call the
@@ -672,6 +692,16 @@ function newQueuedId(): string {
   return `q-${Date.now()}-${queuedSeq}`;
 }
 
+// "Dundies" closing-time recap (Phase 9): one long-lived tracker for the whole
+// session, fed a snapshot on every updateAgent() call below. In-memory only —
+// see dundiesStats.ts for why that's the right call, not an oversight.
+const dundiesTrack = createDundiesTrackState();
+/** Per-agent active time so far this session, most active first — read by the
+ *  closing-time recap modal. */
+export function getDundiesStats(): DundiesAgentStat[] {
+  return dundiesStatsSnapshot(dundiesTrack, Date.now());
+}
+
 export const useStore = create<State>((set, get) => ({
   agents: initialAgents,
   archivedAgents: initialArchivedAgents,
@@ -706,6 +736,10 @@ export const useStore = create<State>((set, get) => ({
       // only in memory, so the selector snapped back to the old model on reload
       // and restore relaunched the old command.
       if (touchesDurableAgentField(patch)) persistAgents(agents, s.selectedId);
+      // Dundies recap bookkeeping (see dundiesStats.ts) — cheap no-op unless
+      // this agent's status actually changed since the last call.
+      const updated = agents.find((a) => a.id === id);
+      if (updated) noteDundiesAgent(dundiesTrack, { id: updated.id, name: updated.name, status: updated.status }, Date.now());
       return { agents };
     }),
   syncDescriptionsFromRoles: (roles) =>
@@ -888,6 +922,11 @@ export const useStore = create<State>((set, get) => ({
   setHasOpenAiKey: (has) => set({ hasOpenAiKey: has }),
   officeTheme: 'office',
   setOfficeTheme: (theme) => set({ officeTheme: theme }),
+  // Starts OFF and stays off until App mirrors a config that says otherwise.
+  // Never persisted here (localStorage is not the source of truth for it) and
+  // never derived — see store/visitorMode.ts.
+  visitorMode: false,
+  setVisitorMode: (on) => set({ visitorMode: on }),
   webhookTriggers: [],
   setWebhookTriggers: (list) => set({ webhookTriggers: list }),
   // A copy, not the shared DEFAULT_ORG_TRIGGER instance — main takes the same

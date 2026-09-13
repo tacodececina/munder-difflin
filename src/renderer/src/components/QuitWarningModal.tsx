@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { PixelPanel } from './PixelPanel';
+import { PixelModal } from './PixelModal';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 
@@ -35,26 +35,20 @@ export function QuitWarningModal({ ptyCount, closing, onCancel, onConfirm, onClo
   const inClosingTime = !!closing && closing.phase !== 'error';
 
   return (
-    <div
-      onClick={inClosingTime ? undefined : onCancel}
-      style={{
-        position: 'fixed', inset: 0,
-        background: 'rgba(26, 19, 32, 0.7)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        // Above EVERY modal, not just most of them. Modals in this app sit at
-        // 500 (add agent, edit agent, the release drop) and overlays below that.
-        // At 300 this dialog opened BEHIND the release drop, so clicking quit
-        // with a drop on screen looked like quit did nothing — while a hidden
-        // dialog held the app open. This is the last thing the user is asked
-        // before the process dies; it outranks whatever it interrupts.
-        zIndex: 1000
-      }}
+    <PixelModal
+      onClose={inClosingTime ? undefined : onCancel}
+      title={inClosingTime ? 'CLOSING TIME' : 'QUITTING NOW?'}
+      width={480}
+      noPadding
+      // Above EVERY modal, not just most of them. Modals in this app sit at
+      // 500 (add agent, edit agent, the release drop) and overlays below that.
+      // At the default `modal` tier (300) this dialog opened BEHIND the release
+      // drop, so clicking quit with a drop on screen looked like quit did
+      // nothing — while a hidden dialog held the app open. This is the last
+      // thing the user is asked before the process dies; it outranks whatever
+      // it interrupts.
+      zIndex={1000}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{ width: 480, maxWidth: '92vw' }}
-      >
-        <PixelPanel variant="dialog" title={inClosingTime ? 'CLOSING TIME' : 'QUITTING NOW?'} noPadding>
           <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
             {inClosingTime ? (
               <>
@@ -201,8 +195,6 @@ export function QuitWarningModal({ ptyCount, closing, onCancel, onConfirm, onClo
               </>
             )}
           </div>
-        </PixelPanel>
-      </div>
-    </div>
+    </PixelModal>
   );
 }

@@ -1,14 +1,17 @@
 import { useEffect, useLayoutEffect, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
-import { PixelPanel } from './PixelPanel';
+import { PixelModal } from './PixelModal';
 import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
 import { Icon } from './Icon';
 import { ProviderLogo } from './ProviderLogo';
 import { useStore, type Agent } from '@/store/store';
 import { OFFICE_CAST, DEFAULT_CHARACTER, type OfficeCharacterName } from '@/scene/office/cast';
-import { type AccentColorName } from '@/design/tokens';
-import type { HireManifest } from '@shared/hire';
+import { useCustomCharacters, type CustomCharacter } from '@/scene/office/customCast';
+import { CharacterBuilderModal } from './CharacterBuilderModal';
+import { accentByName, hex as hexColor, type AccentColorName } from '@/design/tokens';
+import { HIRE_SPEC_V1, type HireManifest } from '@shared/hire';
+import type { RemoteEnvironment } from '@shared/remoteEnvironment';
 import { hireQueueProgress } from '@shared/hireQueue';
 import { MCP_CATALOG } from '@shared/mcpCatalog';
 import {
@@ -83,7 +86,7 @@ const DESCRIPTION_TEMPLATES: { labelKey: string; description: string; goal: stri
 // the exact JSON shape the importer accepts and ends with a fill-in section so the
 // user adds their own details (item 7). Kept in sync with the HireManifest schema
 // (src/shared/hire.ts) — provider allowlist is claude | codex | antigravity | cursor.
-const HIRE_PROMPT = `You are designing a "hire" — a ready-to-spawn AI agent for Munder Difflin, an app that runs a team of CLI coding agents. Output ONE JSON object (a hire manifest) and nothing else.
+const HIRE_PROMPT = `You are designing a "hire" — a ready-to-spawn AI agent for The Hive, an app that runs a team of CLI coding agents. Output ONE JSON object (a hire manifest) and nothing else.
 
 Make the agent genuinely useful: give it a sharp role, a concrete standing goal, and a description that makes it behave like an expert operator of its CLI engine (Claude Code, Codex, or Antigravity/Gemini). It should know how to use the terminal, read and edit files, run and inspect commands, lean on available skills and MCP tools, keep notes in memory, and work autonomously toward its goal without hand-holding.
 
@@ -112,6 +115,62 @@ Role / what I want this agent to do:
 Preferred engine (claude / codex / antigravity), if any:
 Repos, tools, style, or constraints to respect:
 `;
+
+// Hiring TEMPLATES (item 5): pre-wire a small, typical team in one click by
+// enqueueing several HireManifests at once into the SAME human-review queue
+// "Import hire" already drives (enqueuePendingHires / hireQueue below) — each
+// teammate still goes through the normal one-at-a-time review-then-Spawn-or-
+// Skip flow, exactly like a multi-file import. Nothing here can auto-spawn:
+// queueing only pre-fills the form, same security model as an imported
+// manifest (see hire.ts's doc comment). Provider/model are left unset so each
+// teammate spawns on the user's own default engine rather than a hardcoded
+// one. Briefings stay English for the same reason DESCRIPTION_TEMPLATES'
+// do — they become agent prompts, not UI copy.
+interface TeamTemplate {
+  labelKey: string;
+  descriptionKey: string;
+  manifests: HireManifest[];
+}
+
+const TEAM_TEMPLATES: TeamTemplate[] = [
+  {
+    labelKey: 'addAgent.teamTemplates.shipIt.label',
+    descriptionKey: 'addAgent.teamTemplates.shipIt.description',
+    manifests: [
+      {
+        spec: HIRE_SPEC_V1, name: 'Architect', character: 'dwight', accent: 'mint',
+        description: 'designs the technical approach before code is written',
+        goal: 'Design the technical approach before any code is written: read the existing codebase, propose a plan (files to touch, key decisions, risks), and write it to a short design note the implementer can follow. Do not write feature code yourself — hand the plan to the implementer once it is solid.'
+      },
+      {
+        spec: HIRE_SPEC_V1, name: 'Implementer', character: 'jim', accent: 'sky',
+        description: 'builds the feature end-to-end',
+        goal: 'Take the architect’s design note and build the feature end-to-end: write the code, keep commits small and reviewable, and flag any place where the design note turns out to be wrong so the architect can adjust it. Do not merge without the reviewer’s sign-off.'
+      },
+      {
+        spec: HIRE_SPEC_V1, name: 'Reviewer', character: 'angela', accent: 'coral',
+        description: 'reviews every change for correctness and quality',
+        goal: 'Review the implementer’s changes for correctness, edge cases, and adherence to the architect’s design: read the diff critically, run the tests, and leave concrete, actionable feedback. Approve only when you would be comfortable shipping it yourself.'
+      }
+    ]
+  },
+  {
+    labelKey: 'addAgent.teamTemplates.docsQa.label',
+    descriptionKey: 'addAgent.teamTemplates.docsQa.description',
+    manifests: [
+      {
+        spec: HIRE_SPEC_V1, name: 'Writer', character: 'pam', accent: 'lemon',
+        description: 'keeps user-facing docs accurate',
+        goal: 'Keep user-facing docs (README, changelog, in-app copy) accurate and in sync with what the team ships. Read recent changes, update the relevant docs, and flag any feature that shipped without documentation.'
+      },
+      {
+        spec: HIRE_SPEC_V1, name: 'QA', character: 'toby', accent: 'peach',
+        description: 'tries to break what the team ships',
+        goal: 'Try to break what the team ships: exercise edge cases, verify the test suite actually covers the new behavior, and file clear, reproducible bug reports for anything that does not hold up. Sign off only once you would trust it in front of a real user.'
+      }
+    ]
+  }
+];
 
 // The Add Agent form has 11+ fields, so it's grouped into sections the user jumps
 // between via a left sidebar index (one section shown at a time). Engine carries
@@ -189,12 +248,35 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   const initialModel = isClaudeProvider(initialProvider) ? config.defaultModel : undefined;
 
   const [name, setName] = useState(pendingHire?.name ?? 'Jim');
-  const [character, setCharacter] = useState<OfficeCharacterName>(knownCharacter(pendingHire?.character));
+  // Plain string: either a fixed OfficeCharacterName (the 15-tile grid below)
+  // or a custom character id (custom:<uuid>) from the "+ Create character"
+  // builder. A hire manifest only ever names a fixed character, so knownCharacter
+  // (used to seed/validate this from a manifest) still returns the narrow type.
+  const [character, setCharacter] = useState<string>(knownCharacter(pendingHire?.character));
+  const [showCharacterBuilder, setShowCharacterBuilder] = useState(false);
+  const customCharacters = useCustomCharacters();
   const [accent, setAccent] = useState<AccentColorName>(knownAccent(pendingHire?.accent));
   const [cwd, setCwd] = useState<string>(config.registeredRepos[0] ?? '');
   // Local mirror of the registered projects so one added from here shows as a
   // quick-pick immediately (the `config` prop is a snapshot taken at open time).
   const [repos, setRepos] = useState<string[]>(config.registeredRepos);
+  // ── Where does this agent run? (Phase 3b) ──────────────────────────────────
+  // '' = this machine, which is the default and preserves every existing
+  // behaviour exactly. Anything else is a PAIRED REMOTE ENVIRONMENT: the agent's
+  // PTY is spawned by the daemon on that machine, so `cwd` stops meaning "a
+  // folder on this computer" and the local folder picker is withdrawn.
+  const [remoteEnvs, setRemoteEnvs] = useState<RemoteEnvironment[]>([]);
+  const [remoteEnvId, setRemoteEnvId] = useState<string>('');
+  const remoteEnv = remoteEnvs.find((e) => e.id === remoteEnvId);
+  const isRemote = !!remoteEnv;
+  // The inline pairing form (shown only when the user asks for it).
+  const [showPairForm, setShowPairForm] = useState(false);
+  const [pairName, setPairName] = useState('');
+  const [pairHost, setPairHost] = useState('');
+  const [pairPort, setPairPort] = useState('8722');
+  const [pairCode, setPairCode] = useState('');
+  const [pairBusy, setPairBusy] = useState(false);
+  const [pairError, setPairError] = useState<string | undefined>();
   const [provider, setProvider] = useState<AgentProvider>(pendingHire?.provider ?? initialProvider);
   const [model, setModel] = useState<string | undefined>(
     pendingHire ? pendingHire.model : initialModel
@@ -236,6 +318,13 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   const preset = providerPreset(provider);
   const [goal, setGoal] = useState(pendingHire?.goal ?? '');
   const [isolate, setIsolate] = useState(pendingHire?.isolate ?? false);
+  // Opt out of this app's hive for an agent an EXTERNAL orchestrator (e.g. Hermes)
+  // already manages: it owns that identity's memory, task assignment and message
+  // routing, so provisioning our own memory.md + inbox/outbox for the same agent
+  // would duplicate and fight it. Checked ⇒ `submit()` omits the `hive` key from
+  // the spawn payload entirely (see there). Default OFF — unchanged for everyone
+  // who never touches this.
+  const [externalHive, setExternalHive] = useState(false);
   // #2 — optional Claude session id to continue. When set, the spawn seeds that
   // session's transcript into the cwd's project dir and launches `--resume`.
   const [resumeSessionId, setResumeSessionId] = useState('');
@@ -249,6 +338,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   // "Generate a hire with AI" helper — reveals a copy-paste prompt (item 7).
   const [showHirePrompt, setShowHirePrompt] = useState(false);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
+  const [showTeamTemplates, setShowTeamTemplates] = useState(false);
   const copyHirePrompt = async () => {
     try {
       await navigator.clipboard.writeText(HIRE_PROMPT);
@@ -269,6 +359,53 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [onClose]);
+
+  // Load the paired remote environments once, when the modal opens. A failure
+  // (or a build with nothing paired) simply leaves the list empty, and the
+  // "Where does this run?" picker degrades to the local-only default.
+  useEffect(() => {
+    let alive = true;
+    void window.cth.remoteList()
+      .then((envs) => { if (alive) setRemoteEnvs(Array.isArray(envs) ? envs : []); })
+      .catch(() => { /* older main process / nothing paired — stay local */ });
+    return () => { alive = false; };
+  }, []);
+
+  /** Run the one-time pairing handshake against a daemon the user just started.
+   *  The secret never reaches this process: main stores it encrypted and hands
+   *  back metadata only. On success the environment is selected immediately. */
+  const pairRemote = async () => {
+    setPairError(undefined);
+    const host = pairHost.trim();
+    const port = Number(pairPort.trim());
+    const code = pairCode.trim();
+    const name = pairName.trim() || host;
+    if (!host || !code || !Number.isInteger(port) || port < 1 || port > 65535) {
+      setPairError(tr('addAgent.errPairFields'));
+      return;
+    }
+    setPairBusy(true);
+    try {
+      const res = await window.cth.remotePair({ host, port, code, name });
+      if (!res.ok) { setPairError(res.error); return; }
+      setRemoteEnvs((prev) => [...prev.filter((e) => e.id !== res.environment.id), res.environment]);
+      setRemoteEnvId(res.environment.id);
+      setShowPairForm(false);
+      setPairCode('');
+    } catch (e) {
+      setPairError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPairBusy(false);
+    }
+  };
+
+  /** Forget a paired machine (and its stored secret). Nothing on that machine is
+   *  touched — this only drops our ability to talk to it. */
+  const unpairRemote = async (id: string) => {
+    try { await window.cth.remoteRemove(id); } catch { /* best-effort */ }
+    setRemoteEnvs((prev) => prev.filter((e) => e.id !== id));
+    if (remoteEnvId === id) setRemoteEnvId('');
+  };
 
   // Zero-step resume: when a session id is entered, look up the cwd it originally
   // ran in (from the transcript) and pre-fill the Folder so the user doesn't have
@@ -348,6 +485,12 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
     setDescription(m.description ?? 'a fresh harness');
     setGoal(m.goal ?? '');
     setIsolate(m.isolate ?? false);
+    // Not a manifest field — reset so a toggle flipped while reviewing one hire
+    // in a batch cannot leak into the next one.
+    setExternalHive(false);
+    // Same reasoning: a hire manifest never names a machine, so each hire in a
+    // batch starts back on "this machine".
+    setRemoteEnvId('');
     setResumeSessionId('');
     setFolderNote(undefined);
     setSection('identity');
@@ -388,6 +531,15 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
     advanceHireReview();
   };
 
+  /** Queue a whole team template at once — same queue, same one-at-a-time
+   *  review below (applyManifest re-seeds the form from `pendingHire`); this
+   *  just seeds several manifests instead of one imported file. */
+  const hireTeam = (manifests: HireManifest[]) => {
+    setError(undefined);
+    enqueuePendingHires(manifests);
+    setShowTeamTemplates(false);
+  };
+
   const submit = async () => {
     setError(undefined);
     // A required field can live in a section the user hasn't opened, so jump to
@@ -411,22 +563,42 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
       args,
       cols: 100,
       rows: 30,
+      // Run this agent on a paired remote machine instead of here. Undefined for
+      // the local default, so the payload is byte-identical to what it has
+      // always been unless the user explicitly picked an environment.
+      remoteEnvironmentId: remoteEnvId || undefined,
       // When set, the main process spawns this agent in its own git worktree.
       // Forced OFF when resuming a session — `--resume` needs the real cwd's
       // transcript, not a fresh worktree with a different (empty) project dir.
-      isolate: resuming ? false : isolate,
+      // Also off for a remote agent: worktrees are a LOCAL git operation on a
+      // LOCAL checkout, and there is neither on the other machine.
+      isolate: (resuming || isRemote) ? false : isolate,
       // #2 — continue an existing Claude session in this agent's cwd.
       resumeSessionId: resuming ? resumeSessionId.trim() : undefined,
       // Provision this agent in the hive (memory + mailbox + identity/protocol).
-      hive: {
-        id,
-        name: name.trim(),
-        provider,
-        cwd,
-        role: description.trim() || undefined,
-        // A hire manifest may carry validated capability tags (routing hints).
-        capabilities: hireMeta?.capabilities
-      }
+      //
+      // Externally managed agents opt out via a CONDITIONAL SPREAD, so the `hive`
+      // key is genuinely absent from the payload rather than present-and-undefined.
+      // Main gates provisioning on `if (opts.hive && hive.enabled())`, and its
+      // router only ever walks agents that have a hive/agents/<id>/ folder — which
+      // only ensureAgent() creates — so an agent spawned without `hive` is never
+      // given local memory/mailbox and stays invisible to GOD routing.
+      //
+      // A REMOTE agent takes the same opt-out for a harder reason: the hive is
+      // files on THIS disk (memory.md, inbox/outbox), and a CLI running on
+      // another machine cannot read them, so provisioning one would create a
+      // mailbox nobody ever reads. Cross-machine hive is out of scope for 3b.
+      ...((externalHive || isRemote) ? {} : {
+        hive: {
+          id,
+          name: name.trim(),
+          provider,
+          cwd,
+          role: description.trim() || undefined,
+          // A hire manifest may carry validated capability tags (routing hints).
+          capabilities: hireMeta?.capabilities
+        }
+      })
     });
     if (!spawnRes.ok) {
       setBusy(false);
@@ -471,6 +643,9 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
       // Persist the resolved worktree path (set only when isolation provisioned
       // one) so a restart can re-enter this exact worktree — see restoreTeam.
       worktreePath: spawnRes.worktreePath,
+      // …and the machine it runs on, for the same reason: a restore must send it
+      // back to the same daemon, not spawn it here against a path that is not here.
+      remoteEnvironmentId: remoteEnvId || undefined,
       // Crush (seedDelivery:'type-into-tui') hands its hive protocol back here
       // instead of on argv; useHive types it into the TUI after boot. (ondev-b)
       seedPrompt: spawnRes.seedPrompt,
@@ -480,7 +655,11 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
     // Remember the folder for the next hire: promote it to the front of the
     // registeredRepos quick-picks (the modal's default cwd) so back-to-back
     // hires land in the same project without re-picking.
-    if (projectCwd && repos[0] !== projectCwd) {
+    // …but a REMOTE path is a folder on another computer. registeredRepos is the
+    // local project quick-pick list (and main tilde-expands it against THIS
+    // home), so promoting one there would poison the picker with paths that do
+    // not exist here.
+    if (!isRemote && projectCwd && repos[0] !== projectCwd) {
       const nextRepos = [projectCwd, ...repos.filter((r) => r !== projectCwd && r !== cwd)];
       try {
         const updated = await window.cth.updateConfig({ registeredRepos: nextRepos });
@@ -505,24 +684,21 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   };
 
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed', inset: 0,
-        background: 'rgba(26, 19, 32, 0.6)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        // Must sit above fullscreen terminal/file overlays (250/280) and their
-        // hover popovers. The fullscreen Add Agent button uses this same modal.
-        zIndex: 500
-      }}
+    // Must sit above fullscreen terminal/file overlays (250/280) and their
+    // hover popovers. The fullscreen Add Agent button uses this same modal.
+    // zIndex/backdrop match the pre-migration hand-rolled wrapper exactly
+    // (500 / 0.6 alpha) — same box as EditAgentModal (940 / 95vw / 86vh),
+    // the two halves of one job.
+    <PixelModal
+      onClose={onClose}
+      title={tr('addAgent.title')}
+      width={940}
+      maxWidth="95vw"
+      zIndex={500}
+      backdropColor="rgba(26, 19, 32, 0.6)"
+      noPadding
+      panelStyle={{ padding: 16 }}
     >
-      <div onClick={(e) => e.stopPropagation()} style={{ width: 940, maxWidth: '95vw' }}>
-        <PixelPanel
-          variant="dialog"
-          title={tr('addAgent.title')}
-          style={{ padding: 16 }}
-          noPadding
-        >
           {/* Sectioned config with a left sidebar index. The form has 11+ fields,
               so they're grouped into 4 sections (Identity / Workspace / Engine /
               Briefing) shown one at a time; the sidebar jumps between them. The
@@ -707,8 +883,61 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
                             <span style={{ fontSize: 11, color: 'var(--cth-ink-700)' }}>{c.displayName}</span>
                           </button>
                         ))}
+                        {customCharacters.map(c => (
+                          <button
+                            key={c.id}
+                            onClick={() => { setCharacter(c.id); setName(c.displayName); }}
+                            title={c.displayName}
+                            style={{
+                              padding: 4,
+                              background: character === c.id ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
+                              boxShadow: character === c.id
+                                ? 'inset 0 0 0 1.5px var(--cth-ink-500)'
+                                : 'inset 0 0 0 1px var(--cth-ink-100)',
+                              cursor: 'pointer',
+                              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+                              border: 'none', width: 56
+                            }}
+                          >
+                            <div style={{ width: 44, height: 56, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden' }}>
+                              <SpritePortrait character={c.id} scale={2} />
+                            </div>
+                            <span style={{ fontSize: 11, color: 'var(--cth-ink-700)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 56 }}>
+                              {c.displayName}
+                            </span>
+                          </button>
+                        ))}
+                        <button
+                          onClick={() => setShowCharacterBuilder(true)}
+                          title={tr('addAgent.createCharacterTitle')}
+                          style={{
+                            padding: 4,
+                            background: 'var(--cth-cream-100)',
+                            boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+                            cursor: 'pointer',
+                            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2,
+                            border: 'none', width: 56, height: 76
+                          }}
+                        >
+                          <Icon name="plus" />
+                          <span style={{ fontSize: 11, color: 'var(--cth-ink-700)', textAlign: 'center', lineHeight: '13px' }}>
+                            {tr('addAgent.createCharacter')}
+                          </span>
+                        </button>
                       </div>
                     </Row>
+
+                    {showCharacterBuilder && (
+                      <CharacterBuilderModal
+                        onClose={() => setShowCharacterBuilder(false)}
+                        onCreate={(custom) => {
+                          setCharacter(custom.id);
+                          setName(custom.displayName);
+                          setShowCharacterBuilder(false);
+                        }}
+                        defaultAccentHex={hexColor(accentByName[accent])}
+                      />
+                    )}
 
                     <Row label={tr('addAgent.color')}>
                       <div style={{ display: 'flex', gap: 6 }}>
@@ -735,6 +964,148 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
 
                 {section === 'workspace' && (
                   <>
+                    {/* WHERE DOES THIS RUN? — local (default) or a paired remote
+                        machine running the remote PTY daemon. Picking a remote
+                        environment changes what every path below MEANS, so it
+                        sits above the folder field rather than beside it. */}
+                    <Row label={tr('addAgent.runsOn')}>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <button
+                          onClick={() => { setRemoteEnvId(''); setShowPairForm(false); }}
+                          style={ossChip(!isRemote, accent)}
+                        >
+                          {tr('addAgent.runsOnLocal')}
+                        </button>
+                        {remoteEnvs.map((e) => (
+                          <span
+                            key={e.id}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'stretch',
+                              background: remoteEnvId === e.id ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
+                              boxShadow: remoteEnvId === e.id
+                                ? 'inset 0 0 0 1.5px var(--cth-ink-500)'
+                                : 'inset 0 0 0 1px var(--cth-ink-100)'
+                            }}
+                          >
+                            <button
+                              onClick={() => {
+                                setRemoteEnvId(e.id);
+                                setShowPairForm(false);
+                                // Resume is local-only; drop a half-typed id so it
+                                // cannot ride along into a remote spawn payload.
+                                setResumeSessionId('');
+                                setFolderNote(undefined);
+                              }}
+                              title={`${e.host}:${e.port}`}
+                              style={{
+                                padding: '3px 4px 1px 8px', background: 'transparent', border: 'none',
+                                fontFamily: 'var(--cth-font-ui)', fontSize: 12, cursor: 'pointer',
+                                color: 'var(--cth-ink-900)'
+                              }}
+                            >
+                              {e.name}
+                            </button>
+                            <button
+                              onClick={() => unpairRemote(e.id)}
+                              title={tr('addAgent.unpairRemote', { name: e.name })}
+                              aria-label={tr('addAgent.unpairRemote', { name: e.name })}
+                              style={{
+                                padding: '3px 6px 1px 2px', background: 'transparent', border: 'none',
+                                fontFamily: 'var(--cth-font-ui)', fontSize: 12, lineHeight: 1,
+                                color: 'var(--cth-ink-500)', cursor: 'pointer'
+                              }}
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                        <button
+                          onClick={() => { setShowPairForm((v) => !v); setPairError(undefined); }}
+                          style={ossChip(showPairForm, accent)}
+                        >
+                          {tr('addAgent.pairRemote')}
+                        </button>
+                      </div>
+
+                      {showPairForm && (
+                        <div style={{
+                          marginTop: 8, padding: '8px 10px',
+                          background: 'var(--cth-cream-100)',
+                          boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+                          display: 'flex', flexDirection: 'column', gap: 6
+                        }}>
+                          <span style={{ fontSize: 12, color: 'var(--cth-ink-700)', lineHeight: '16px' }}>
+                            {tr('addAgent.pairHint')}
+                          </span>
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            <input
+                              value={pairName}
+                              onChange={(ev) => setPairName(ev.target.value)}
+                              placeholder={tr('addAgent.pairNamePlaceholder')}
+                              aria-label={tr('addAgent.pairName')}
+                              style={{ ...inputStyle, flex: '1 1 140px', fontSize: 13 }}
+                            />
+                            <input
+                              value={pairHost}
+                              onChange={(ev) => setPairHost(ev.target.value)}
+                              placeholder={tr('addAgent.pairHostPlaceholder')}
+                              aria-label={tr('addAgent.pairHost')}
+                              style={{ ...inputStyle, flex: '2 1 180px', fontFamily: 'var(--cth-font-mono)', fontSize: 13 }}
+                            />
+                            <input
+                              value={pairPort}
+                              onChange={(ev) => setPairPort(ev.target.value)}
+                              placeholder="8722"
+                              aria-label={tr('addAgent.pairPort')}
+                              style={{ ...inputStyle, flex: '0 0 80px', fontFamily: 'var(--cth-font-mono)', fontSize: 13 }}
+                            />
+                            <input
+                              value={pairCode}
+                              onChange={(ev) => setPairCode(ev.target.value.toUpperCase())}
+                              placeholder={tr('addAgent.pairCodePlaceholder')}
+                              aria-label={tr('addAgent.pairCode')}
+                              style={{ ...inputStyle, flex: '0 0 110px', fontFamily: 'var(--cth-font-mono)', fontSize: 13, letterSpacing: 1 }}
+                            />
+                          </div>
+                          {pairError && (
+                            <span style={{ fontSize: 12, color: 'var(--cth-coral, var(--cth-ink-900))' }}>{pairError}</span>
+                          )}
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <PixelButton variant="primary" size="sm" onClick={pairRemote} disabled={pairBusy}>
+                              {pairBusy ? tr('addAgent.pairing') : tr('addAgent.pairSubmit')}
+                            </PixelButton>
+                            <PixelButton variant="ghost" size="sm" onClick={() => setShowPairForm(false)} disabled={pairBusy}>
+                              {tr('common.cancel')}
+                            </PixelButton>
+                          </div>
+                        </div>
+                      )}
+
+                      {remoteEnv && (
+                        <span style={{ marginTop: 6, fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-700)' }}>
+                          {tr('addAgent.runsOnRemoteHint', { name: remoteEnv.name, host: remoteEnv.host, port: remoteEnv.port })}
+                        </span>
+                      )}
+                    </Row>
+
+                    {/* A remote agent's folder is a path on THAT machine, so the
+                        local project quick-picks and the folder dialog (which
+                        browses this computer) are withdrawn — they would only
+                        ever produce a path the daemon cannot open. */}
+                    {isRemote ? (
+                      <Row label={tr('addAgent.remotePath')}>
+                        <input
+                          value={cwd}
+                          onChange={(e) => setCwd(e.target.value)}
+                          placeholder={tr('addAgent.remotePathPlaceholder')}
+                          style={{ ...inputStyle, fontFamily: 'var(--cth-font-mono)', fontSize: 13 }}
+                        />
+                        <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-500)' }}>
+                          {tr('addAgent.remoteNoBrowse')}
+                        </span>
+                      </Row>
+                    ) : (
                     <Row label={tr('addAgent.project')}>
                       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
                         <span style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>
@@ -835,20 +1206,48 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
                         </button>
                       )}
                     </Row>
+                    )}
 
-                    <label style={{ display: 'flex', gap: 8, alignItems: 'center', cursor: resuming ? 'not-allowed' : 'pointer', opacity: resuming ? 0.5 : 1 }}>
+                    {/* Git isolation and session resume are both operations on a
+                        checkout that lives on THIS disk, so they are disabled
+                        (not hidden — the reason should stay visible) while a
+                        remote environment is selected. */}
+                    <label style={{ display: 'flex', gap: 8, alignItems: 'center', cursor: (resuming || isRemote) ? 'not-allowed' : 'pointer', opacity: (resuming || isRemote) ? 0.5 : 1 }}>
                       <input
                         type="checkbox"
-                        checked={resuming ? false : isolate}
-                        disabled={resuming}
+                        checked={(resuming || isRemote) ? false : isolate}
+                        disabled={resuming || isRemote}
                         onChange={(e) => setIsolate(e.target.checked)}
-                        style={{ width: 16, height: 16, cursor: resuming ? 'not-allowed' : 'pointer' }}
+                        style={{ width: 16, height: 16, cursor: (resuming || isRemote) ? 'not-allowed' : 'pointer' }}
                       />
                       <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-900)' }}>
                         {tr('addAgent.gitIsolation')}
                       </span>
                     </label>
 
+                    {/* Hand memory + message routing to an external orchestrator
+                        (Hermes and friends) instead of provisioning our own hive
+                        for the same identity. The hover text spells out what it
+                        turns off. */}
+                    <label
+                      title={tr('addAgent.externalHiveTitle')}
+                      style={{ display: 'flex', gap: 8, alignItems: 'center', cursor: 'pointer' }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={externalHive}
+                        onChange={(e) => setExternalHive(e.target.checked)}
+                        style={{ width: 16, height: 16, cursor: 'pointer' }}
+                      />
+                      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-900)' }}>
+                        {tr('addAgent.externalHive')}
+                      </span>
+                    </label>
+
+                    {/* Resume reads a transcript off THIS machine's disk and seeds
+                        it into the target project dir, so it has no meaning for a
+                        PTY on another computer. */}
+                    {!isRemote && (
                     <Row label={tr('addAgent.resumeSession')}>
                       <input
                         value={resumeSessionId}
@@ -868,6 +1267,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
                         </span>
                       )}
                     </Row>
+                    )}
                   </>
                 )}
 
@@ -1089,6 +1489,59 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
               </div>
             )}
 
+            {/* Hiring templates (item 5): pre-wire a small team in one step,
+                reusing the exact human-review queue "Import hire" drives —
+                each teammate still gets its own Spawn/Skip review below. */}
+            <div style={{
+              padding: '8px 10px',
+              background: 'var(--cth-cream-100)',
+              boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+              display: 'flex', flexDirection: 'column', gap: 6
+            }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 12, color: 'var(--cth-ink-700)', lineHeight: '17px' }}>
+                  {tr('addAgent.teamTemplatesDesc')}
+                </span>
+                <button
+                  onClick={() => setShowTeamTemplates((v) => !v)}
+                  style={{
+                    flexShrink: 0,
+                    padding: '2px 8px 1px', border: 'none', cursor: 'pointer',
+                    background: showTeamTemplates ? 'var(--cth-lemon-light)' : 'var(--cth-cream-200)',
+                    boxShadow: 'inset 0 0 0 1px var(--cth-ink-100)',
+                    fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-900)'
+                  }}
+                >
+                  {showTeamTemplates ? tr('addAgent.hideTeamTemplates') : tr('addAgent.showTeamTemplates')}
+                </button>
+              </div>
+              {showTeamTemplates && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {TEAM_TEMPLATES.map((tpl) => (
+                    <div
+                      key={tpl.labelKey}
+                      style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                        padding: '6px 8px', background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-100)'
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: 13, color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-display)' }}>
+                          {tr(tpl.labelKey)}
+                        </div>
+                        <div style={{ fontSize: 12, color: 'var(--cth-ink-700)' }}>
+                          {tr(tpl.descriptionKey)}
+                        </div>
+                      </div>
+                      <PixelButton variant="secondary" size="sm" onClick={() => hireTeam(tpl.manifests)} disabled={busy}>
+                        {tr('addAgent.useTeamTemplate')}
+                      </PixelButton>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Import-hire explainer + AI prompt generator (item 7) */}
             <div style={{
               padding: '8px 10px',
@@ -1159,9 +1612,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
               </PixelButton>
             </div>
           </div>
-        </PixelPanel>
-      </div>
-    </div>
+    </PixelModal>
   );
 }
 

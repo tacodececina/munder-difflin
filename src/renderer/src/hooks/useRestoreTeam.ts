@@ -121,7 +121,12 @@ export function useRestoreTeam(config?: HarnessConfig | null): RestoreTeamState 
           // fall back to the base repo cwd rather than spawning into a dead path.
           let cwd = a.cwd;
           let worktreeGone = false;
-          if (a.worktreePath) {
+          // A REMOTE agent's cwd, worktree and transcript all live on the OTHER
+          // machine, so none of the local checks below apply — `gitIsRepo` would
+          // interrogate this filesystem about a path that is not on it. Restore
+          // sends it straight back to the same daemon.
+          const remoteEnvironmentId = a.remoteEnvironmentId;
+          if (!remoteEnvironmentId && a.worktreePath) {
             if (await window.cth.gitIsRepo(a.worktreePath)) {
               cwd = a.worktreePath;
             } else {
@@ -146,8 +151,13 @@ export function useRestoreTeam(config?: HarnessConfig | null): RestoreTeamState 
             // agy --conversation) and for Claude reattaches the transcript. The
             // agent id is preserved across restart, so its registry entry,
             // memory.md and inbox reattach by id. No-op without a recorded session.
-            resume: true,
-            hive: { id: a.id, name: a.name, provider, cwd, role: roleForHiveSpawn(a) }
+            // Local resume reattaches a transcript on this disk; there is none for
+            // a remote agent, and its hive was never provisioned here either (see
+            // AddAgentModal), so both are omitted on that path.
+            resume: !remoteEnvironmentId,
+            ...(remoteEnvironmentId
+              ? { remoteEnvironmentId }
+              : { hive: { id: a.id, name: a.name, provider, cwd, role: roleForHiveSpawn(a) } })
           });
           if (res.ok) {
             restored++;

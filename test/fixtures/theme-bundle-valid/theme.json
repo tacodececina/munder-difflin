@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "label": "Minimal Example Theme",
+  "mapFile": "map.tmj",
+  "tilesets": [
+    { "file": "tileset.png", "embedded": true }
+  ],
+  "primarySeatNames": ["desk-ceo", "pc-1", "pc-2"],
+  "cafeSeatNames": ["cafe-seat-1", "cafe-seat-2"],
+  "cafeStands": [
+    ["cafe-stand-coffee", "coffee"],
+    ["cafe-stand-vending", "vending"]
+  ],
+  "coffee": {
+    "trayTile": { "x": 5, "y": 4 },
+    "trayStand": { "x": 5, "y": 5 },
+    "machineStand": { "x": 6, "y": 5 },
+    "sinkTile": { "x": 7, "y": 4 },
+    "sinkStand": { "x": 7, "y": 5 },
+    "maxCups": 4
+  },
+  "anchors": {
+    "calendar": { "x": 1, "y": 1 },
+    "boards": { "x": 1, "y": 3 },
+    "clock": { "x": 8, "y": 1 }
+  },
+  "errandSpots": [
+    { "kind": "water", "stand": { "x": 3, "y": 3 }, "facing": "down", "fx": { "x": 3, "y": 4 }, "duration": 4.5 }
+  ],
+  "monitor": {
+    "offTopLeftGid": 1,
+    "onGids": [[1, 0, 0]]
+  },
+  "palette": {
+    "background": "#1a1320",
+    "noteColors": {
+      "todo": "#f2df8a",
+      "doing": "#9ecbf0",
+      "blocked": "#f0a3a3",
+      "done": "#a8e0b0"
+    }
+  }
+}

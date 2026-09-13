@@ -44,6 +44,7 @@ const MAX_VISIBLE = 4;
 
 export function CompletionToast(): JSX.Element | null {
   const godName = useStore((s) => s.agents.find((a) => a.isGod)?.name) ?? 'the orchestrator';
+  const visitorMode = useStore((s) => s.visitorMode);
   const [toasts, setToasts] = useState<ActiveToast[]>([]);
   // Stable across renders so the subscription's closures always see live timers.
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -83,6 +84,13 @@ export function CompletionToast(): JSX.Element | null {
   }, []);
 
   if (toasts.length === 0) return null;
+  // VISITOR MODE — `summary` and `objective` are free-text descriptions of real
+  // work, and this is a fixed overlay that pops itself onto the screen without
+  // anyone clicking anything. That combination is exactly what the mode guards
+  // against, so it stays silent while armed. The subscription above keeps
+  // running and the toasts keep expiring on their timers, so lifting the mode
+  // surfaces whatever is still within its dismiss window — not a backlog.
+  if (visitorMode) return null;
 
   return (
     <div

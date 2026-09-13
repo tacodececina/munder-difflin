@@ -1,4 +1,5 @@
 import { Container } from 'pixi.js';
+import { motion } from '@/design/tokens';
 
 // Simplified port of shahar061/the-office (office/engine/camera.ts).
 // Phase targeting is dropped (we have no project phases); kept: fit-to-screen,
@@ -6,6 +7,28 @@ import { Container } from 'pixi.js';
 // pan toward the selected agent.
 
 const LERP_SPEED = 0.08;
+
+// nudgeToward's default duration, in ms — a scene-level camera glance, not a
+// UI micro-interaction, so it is a documented multiple of the "slow" UI
+// duration token (design/tokens.ts `motion.duration.slow`) rather than one of
+// the short tokens verbatim: those (90-300ms) read as a snap for a pan across
+// the whole office floor.
+const NUDGE_DURATION_MS = motion.duration.slow * 4; // 1200ms
+
+/** True when the OS/user has requested reduced motion. Pixi's ticker can't be
+ *  reached by the CSS `prefers-reduced-motion` media query (that rule in
+ *  design/global.css only collapses DOM transitions/animations), so the one
+ *  JS-driven camera animation in the app checks it explicitly. Guarded for
+ *  environments without a real `window` (tests). */
+function prefersReducedMotion(): boolean {
+  try {
+    return typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
 
 export class Camera {
   private container: Container;
@@ -64,8 +87,12 @@ export class Camera {
   }
 
   /** A gentle, decaying pan toward a world point without taking manual control. */
-  nudgeToward(worldX: number, worldY: number, duration = 1200): void {
+  nudgeToward(worldX: number, worldY: number, duration = NUDGE_DURATION_MS): void {
     if (this.manualOverride) return;
+    // Reduced motion: skip the animated glance entirely rather than merely
+    // shortening it — an "instant" transition here means no offset ever
+    // appears, not a fast one.
+    if (prefersReducedMotion()) return;
     this.nudgeOffsetX = (worldX - this.targetX) * this.nudgeStrength;
     this.nudgeOffsetY = (worldY - this.targetY) * this.nudgeStrength;
     this.nudgeElapsed = 0;
@@ -80,7 +107,12 @@ export class Camera {
     if (this.nudgeDuration > 0) {
       this.nudgeElapsed += dt;
       const t = Math.min(this.nudgeElapsed / this.nudgeDuration, 1);
-      const ease = 1 - t;
+      // Ease-out cubic on the RETREAT back to center (mirrors design/tokens.ts
+      // `motion.easeOut`'s cubic-bezier(0, 0, 0.2, 1) intent — quick initial
+      // pull toward the selection, then a gentle settle rather than the
+      // previous linear decay's constant-rate cut at the end). Pixi's ticker
+      // can't consume a CSS easing string, so this is the numeric equivalent.
+      const ease = Math.pow(1 - t, 3);
       this.currentX += this.nudgeOffsetX * ease;
       this.currentY += this.nudgeOffsetY * ease;
       if (t >= 1) {

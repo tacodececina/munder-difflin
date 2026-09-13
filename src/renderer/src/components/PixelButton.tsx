@@ -12,6 +12,10 @@ export interface PixelButtonProps {
   fullWidth?: boolean;
   style?: CSSProperties;
   title?: string;
+  /** Accessible name for icon-only buttons (no visible text child for a
+   *  screen reader to fall back on). Forwarded verbatim to the underlying
+   *  `<button>`; optional because most call sites have a visible label. */
+  'aria-label'?: string;
 }
 
 const heightBySize: Record<Size, number> = { sm: 24, md: 32, lg: 40 };
@@ -25,7 +29,8 @@ export function PixelButton({
   disabled = false,
   fullWidth = false,
   style,
-  title
+  title,
+  'aria-label': ariaLabel
 }: PixelButtonProps) {
   const [pressed, setPressed] = useState(false);
   const [hover, setHover] = useState(false);
@@ -81,6 +86,7 @@ export function PixelButton({
   return (
     <button
       title={title}
+      aria-label={ariaLabel}
       onClick={disabled ? undefined : onClick}
       onMouseDown={() => setPressed(true)}
       onMouseUp={() => setPressed(false)}

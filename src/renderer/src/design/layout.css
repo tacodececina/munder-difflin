@@ -1,0 +1,138 @@
+/* layout.css — Phase 2's macro shell regions ONLY: the title bar, the
+   scene/sidebar row, the agent strip, and the detail column, all owned by
+   AppShell.tsx. Leaf components (buttons, badges, individual cards) stay on
+   inline `style={{}}` per the project's existing convention — see
+   tokens.css's own header comment for that split. Mirrors design/tokens.ts's
+   `bp` (compact/wide) and useBreakpoint's `SHORT_HEIGHT` — the two files are
+   hand-kept in sync, same as tokens.ts/tokens.css already are.
+
+   Container queries (`@container`) are used below where the WINDOW is not
+   the right signal — see `.cth-detail-col`. Electron pins to Chromium via
+   the `electron` devDependency (package.json, currently ^32.x -> Chromium
+   ~128); `@container` shipped in Chromium 105, so it is safe to use directly
+   with no fallback.
+
+   Depends on tokens.css's custom properties (--cth-space-*, --cth-z-overlay,
+   --cth-shadow-lg, --cth-duration-base, --cth-ease-out) already being
+   loaded — global.css imports tokens.css before this file, so it is not
+   re-imported here. */
+
+/* ── Short-viewport chrome padding ───────────────────────────────────────────
+   `< 700px` tall: shed vertical padding from the title bar, the scene row,
+   the agent strip and the detail panel's header, all in one place, all in
+   terms of the existing `space` scale (design/tokens.ts / tokens.css) rather
+   than new magic numbers. Each var's DEFAULT (outside the query) is simply
+   the value that property already had before Phase 2 — nothing changes for
+   anyone above the threshold. */
+:root {
+  --cth-titlebar-h: 36px;
+  --cth-shell-pad-y: var(--cth-space-4); /* 16px */
+  --cth-strip-pad-y: 14px;
+  --cth-strip-h: 112px;
+  --cth-detail-header-pad-y: 6px;
+}
+
+@media (max-height: 700px) {
+  :root {
+    --cth-titlebar-h: 30px;
+    --cth-shell-pad-y: var(--cth-space-2); /* 8px, was 16px */
+    --cth-strip-pad-y: var(--cth-space-2); /* 8px, was 14px */
+    --cth-strip-h: 92px;
+    --cth-detail-header-pad-y: var(--cth-space-1); /* 4px, was 6px */
+  }
+}
+
+.cth-titlebar {
+  height: var(--cth-titlebar-h);
+  min-height: var(--cth-titlebar-h);
+  /* Defensive: nothing in the bar overflows today (MIN_WIN in
+     src/main/index.ts holds the window at >=1280px), but the row has no
+     backstop of its own if that ever changes — see the AppShell audit. */
+  overflow: hidden;
+}
+
+.cth-scene-row {
+  padding-top: var(--cth-shell-pad-y);
+  padding-bottom: var(--cth-shell-pad-y);
+}
+
+.cth-agent-strip {
+  padding-top: var(--cth-strip-pad-y);
+  padding-bottom: var(--cth-strip-pad-y);
+  height: var(--cth-strip-h);
+  min-height: var(--cth-strip-h);
+}
+
+.cth-detail-header {
+  padding-top: var(--cth-detail-header-pad-y);
+  padding-bottom: var(--cth-detail-header-pad-y);
+}
+
+/* ── Detail column (AgentDetailPanel's slot in AppShell) ─────────────────────
+   A query container in BOTH bands: its own inline-size drives the "wide"
+   reading-width cap below, independent of whichever band the window itself
+   is in. */
+.cth-detail-col {
+  container-type: inline-size;
+  container-name: cth-detail-col;
+}
+
+/* "wide": once the column's OWN rendered width crosses a comfortable reading
+   width, stop stretching its content edge-to-edge and centre a narrower
+   column inside it. Deliberately keyed to the panel's OWN width (a container
+   query) rather than to `bp.wide` (a viewport media query): SidebarSplitter
+   already lets a user drag this column up to 1200px on ANY window size (see
+   its `max` prop in components/SidebarSplitter.tsx), so the window's width is
+   the wrong signal here — it would under-protect a merely-cozy window with
+   the splitter dragged wide, and needlessly cap a genuinely wide window
+   whose sidebar sits at its narrow default. This is the one place in this
+   phase where @container does real work a media query could not. */
+@container cth-detail-col (min-width: 760px) {
+  .cth-detail-col-inner {
+    max-width: 760px;
+    margin-inline: auto;
+  }
+}
+
+/* "compact" (see bp.compact, design/tokens.ts): not enough window width for
+   the scene AND a fixed sidebar column side by side, so the column floats
+   above the scene instead of squeezing it — SidebarSplitter is hidden
+   alongside this (AppShell.tsx) since there is nothing left to drag against.
+   Logical (inset-inline-*) rather than physical (left/right) properties, so
+   this mirrors correctly under an RTL app language (html[dir="rtl"], see
+   i18n/useDirection.ts) with no extra code. */
+.cth-detail-col--overlay {
+  position: fixed;
+  inset-block: calc(var(--cth-titlebar-h) + var(--cth-shell-pad-y)) var(--cth-strip-h);
+  inset-inline-end: var(--cth-space-4);
+  width: min(92vw, 480px);
+  z-index: var(--cth-z-overlay);
+  box-shadow: var(--cth-shadow-lg);
+  animation: cth-detail-slide-in-end var(--cth-duration-base) var(--cth-ease-out);
+}
+
+@keyframes cth-detail-slide-in-end {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Under RTL the panel is still anchored to (and enters from) its
+   inline-end edge — which is physically the LEFT in RTL — so the slide
+   direction has to flip with it, not just the anchor. */
+[dir='rtl'] .cth-detail-col--overlay {
+  animation-name: cth-detail-slide-in-end-rtl;
+}
+
+@keyframes cth-detail-slide-in-end-rtl {
+  from { opacity: 0; transform: translateX(-12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Users with reduced-motion preferences skip the slide, same convention as
+   the rest of a11y-conscious UI (fade only, no positional motion). */
+@media (prefers-reduced-motion: reduce) {
+  .cth-detail-col--overlay,
+  [dir='rtl'] .cth-detail-col--overlay {
+    animation: none;
+  }
+}

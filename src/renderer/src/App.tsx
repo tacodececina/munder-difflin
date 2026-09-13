@@ -3,40 +3,47 @@ import { useStore, selectedAgent } from '@/store/store';
 import { startMockLoop, stopMockLoop } from '@/store/mockEvents';
 import type { HarnessConfig } from '@/store/config';
 import { DEFAULT_ORG_TRIGGER } from '@shared/triggers';
-import { OfficeFloor } from '@/scene/office/OfficeFloor';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { useHive } from '@/hooks/useHive';
+import { useBreakpoint } from '@/hooks/useBreakpoint';
 import { useResolvedGodName } from '@/hooks/useResolvedGodName';
 import { useGodNameSync } from '@/i18n/useGodNameSync';
 import { useDirectionSync } from '@/i18n/useDirection';
 import { useArabicTerminalSync } from '@/terminal/useArabicTerminalSync';
-import { MemoryPanel } from '@/components/MemoryPanel';
-import { AgentDetailPanel } from '@/components/AgentDetailPanel';
-import { AgentStrip } from '@/components/AgentStrip';
 import { AddAgentModal } from '@/components/AddAgentModal';
-import { MichaelBooting } from '@/components/MichaelBooting';
 import { OnboardingWizard } from '@/components/OnboardingWizard';
 import { HivePicker } from '@/components/HivePicker';
 import { QuitWarningModal, type ClosingTimeState } from '@/components/QuitWarningModal';
-import { CompletionToast } from '@/realtime/CompletionToast';
-import { UpdateToast } from '@/components/UpdateToast';
-import { UpdateBadge } from '@/components/UpdateBadge';
+import { DundiesModal } from '@/components/DundiesModal';
 import { useAppTheme, toggleAppTheme } from '@/design/theme';
 import { SettingsModal, type Section as SettingsSection } from '@/components/SettingsModal';
-import { PixelPanel } from '@/components/PixelPanel';
-import { PixelButton } from '@/components/PixelButton';
-import { Icon } from '@/components/Icon';
-import { SidebarSplitter } from '@/components/SidebarSplitter';
 import { acquireTerminal, notifyThemeChangeAll } from '@/components/terminalPool';
 import { FullscreenTerminal } from '@/components/FullscreenTerminal';
 import { TaskDetailOverlay } from '@/components/TaskDetailOverlay';
 import { IdePanel } from '@/ide/IdePanel';
 import { useHoldOptionToTalk } from '@/freeflow/holdOption';
-import brandLogo from '@brand/logo.png?url';
+import { AppShell } from '@/AppShell';
 
 // Injected at build time from package.json (see electron.vite.config.ts).
 declare const __APP_VERSION__: string;
 
+/**
+ * Phase 0 hardening: the ROOT error boundary, the last resort behind every
+ * more specific one below (office floor, per-agent terminals, agent detail
+ * panel, each modal). Wrapping the OUTER `App` rather than putting the
+ * boundary inside `AppInner` means it also covers the early-return states —
+ * the loading blank, OnboardingWizard, HivePicker — not just the fully-booted
+ * UI, without duplicating a boundary at each of those return sites.
+ */
 export function App() {
+  return (
+    <ErrorBoundary>
+      <AppInner />
+    </ErrorBoundary>
+  );
+}
+
+function AppInner() {
   // Point every {{godName}} string at the orchestrator's real, renameable name.
   useGodNameSync();
   // Mirror the document only for a user who has picked an RTL app language.
@@ -57,6 +64,7 @@ export function App() {
   const setSidebarWidth = useStore(s => s.setSidebarWidth);
   const ideOpen = useStore(s => s.ideOpen);
   const setIdeOpen = useStore(s => s.setIdeOpen);
+  const visitorMode = useStore(s => s.visitorMode);
 
   const [config, setConfig] = useState<HarnessConfig | null>(null);
   // Whether the user has passed the launch-time hive picker this session. Starts
@@ -78,7 +86,31 @@ export function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection | undefined>(undefined);
   const [quitWarn, setQuitWarn] = useState<{ ptyCount: number } | null>(null);
   const [closing, setClosing] = useState<ClosingTimeState | null>(null);
-  const [vpWidth, setVpWidth] = useState<number>(window.innerWidth);
+  // "Dundies" recap (Phase 9): shown as an interstitial the moment the human
+  // clicks "closing time", BEFORE the real protocol below actually starts.
+  const [showDundies, setShowDundies] = useState(false);
+  // Phase 2: the width tracking itself now lives in useBreakpoint (one shared
+  // `resize` listener for the whole app, see that hook) — this used to be its
+  // own useState + resize effect here, duplicating what AppShell now also
+  // needs for its band-driven layout decisions.
+  const { width: vpWidth } = useBreakpoint();
+
+  // Bug fix (post-redesign devtools audit): in the 'compact' band, AppShell
+  // renders the detail column as a `position: fixed` overlay
+  // (`.cth-detail-col--overlay`, design/layout.css) docked over the right
+  // ~45% of the office scene. It had no way to ever be dismissed — permanently
+  // covering part of the scene on any window narrower than `bp.compact`
+  // (1100px), which reads as "the office is cropped" regardless of theme.
+  // This flag is the missing "is the drawer open" bit AppShell's own docs
+  // note it deliberately never grew; it stays here (not in AppShell) per that
+  // component's "no state of its own" convention. Defaults open (matches the
+  // old always-on behavior) and re-opens whenever the selected agent changes,
+  // so picking someone from the strip reliably brings their panel back even
+  // after the previous one was dismissed.
+  const [compactOverlayOpen, setCompactOverlayOpen] = useState(true);
+  useEffect(() => {
+    setCompactOverlayOpen(true);
+  }, [agent?.id]);
 
   // Deep link into Settings from anywhere in the tree. Settings' open state is
   // local to App, so a nested control (e.g. "set it now" beside a disabled Talk
@@ -121,6 +153,10 @@ export function App() {
       const withTriggers = c as HarnessConfig;
       useStore.getState().setWebhookTriggers(withTriggers.webhookTriggers ?? []);
       useStore.getState().setOrgTrigger(withTriggers.orgTrigger ?? DEFAULT_ORG_TRIGGER);
+      // Visitor mode seals surfaces all over the tree, so it is mirrored into
+      // the store rather than threaded through props. `=== true` on purpose: a
+      // config that predates the field must read as OFF, never as sealed.
+      useStore.getState().setVisitorMode(withTriggers.visitorMode === true);
     });
     // Mirror BYOK OpenAI key presence (boolean only; the key never leaves main) so the
     // Realtime Michael voice toggle can gate on it. Lives in the secret broker, not
@@ -138,7 +174,14 @@ export function App() {
 
   // Config subscription — the copy loaded above would otherwise go stale the
   // moment anything saves a setting.
-  useEffect(() => window.cth.onConfigChanged(setConfig), []);
+  useEffect(() => window.cth.onConfigChanged((c) => {
+    setConfig(c);
+    // The one mirror that MUST follow every broadcast rather than only the
+    // Settings save path: visitor mode is a privacy control, and a second floor
+    // window still showing terminals after the operator armed it in the first
+    // would defeat the entire point.
+    useStore.getState().setVisitorMode((c as HarnessConfig).visitorMode === true);
+  }), []);
 
   // Quit warning subscription
   useEffect(() => window.cth.onCloseRequested((info) => setQuitWarn(info)), []);
@@ -185,6 +228,15 @@ export function App() {
   const cancelClosingTime = () => {
     void window.cth.cancelClosingTime();
     setClosing(null);
+  };
+  /** Shared by the modal's own Cancel button and its error boundary's Retry:
+   *  a QuitWarningModal that crashed must back OUT of the quit flow, not sit
+   *  there re-rendering into the same error. */
+  const cancelQuit = () => {
+    if (closing) cancelClosingTime();
+    window.cth.cancelClose();
+    setQuitWarn(null);
+    setShowDundies(false);
   };
 
   // The hive: god-agent bootstrap, hook-driven avatars, idle-agent waking. Held
@@ -245,13 +297,6 @@ export function App() {
     useStore.getState().restoreFocusMode();
   }, [config?.onboardingComplete, agents]);
 
-  // Track viewport width for splitter clamping
-  useEffect(() => {
-    const onResize = () => setVpWidth(window.innerWidth);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-
   if (!config) {
     return <div style={{ width: '100vw', height: '100vh', background: 'var(--cth-cream-100)' }} />;
   }
@@ -268,304 +313,112 @@ export function App() {
     return <HivePicker config={config} onOpenCurrent={() => setHiveOpened(true)} />;
   }
 
+  // Theme toggle handler — flips the app theme, tells every pooled terminal
+  // (so a live TUI's truecolor palette follows without a restart), and
+  // persists the choice so future agent spawns match. Owned here (not in
+  // AppShell) because it is orchestration, not layout: AppShell only renders
+  // the button and calls this back.
+  const onToggleTheme = () => {
+    const next = toggleAppTheme();
+    notifyThemeChangeAll(next === 'dark' ? 'dark' : 'light');
+    void window.cth.updateConfig({ terminalTheme: next });
+  };
+
+  const onOpenSettings = () => { setSettingsSection(undefined); setSettingsOpen(true); };
+
+  const onToggleFullscreen = () => {
+    if (fullscreenAgentId) { useStore.getState().setFullscreen(null); return; }
+    const all = useStore.getState().agents;
+    const target = all.find((x) => x.id === useStore.getState().selectedId && x.ptyId)
+      ?? all.find((x) => x.isGod && x.ptyId)
+      ?? all.find((x) => x.ptyId);
+    if (target) useStore.getState().setFullscreen(target.id);
+  };
+
   return (
-    <div style={{
-      display: 'flex', flexDirection: 'column',
-      width: '100vw', height: '100vh',
-      overflow: 'hidden'
-    }}>
-      {/* rt-12: global fixed-overlay toast for voice-Michael completions ("Oscar
-          finished X"). Self-positions bottom-right; renders null until one arrives. */}
-      <CompletionToast />
-      {/* v0.3.4: background-update toast ("restart to update"); renders null until
-          main's updater pushes a status. */}
-      <UpdateToast />
-      {/* Title bar */}
-      <div
-        className="cth-titlebar-drag"
-        style={{
-          height: 36, minHeight: 36,
-          background: 'linear-gradient(180deg, var(--cth-cream-100) 0%, var(--cth-cream-200) 100%)',
-          borderBottom: '1px solid var(--cth-ink-300)',
-          display: 'flex',
-          alignItems: 'center',
-          paddingLeft: 96,
-          paddingRight: 12,
-          gap: 12,
-          userSelect: 'none'
-        }}
-      >
-        <img
-          src={brandLogo}
-          alt="Munder Difflin"
-          style={{ height: 20, width: 'auto', display: 'block' }}
-        />
-        {/* v0.3.7: the version is no longer inert text — it doubles as the
-            update control (check / download / restart to update). */}
-        <UpdateBadge />
-        <span style={{
-          fontFamily: 'var(--cth-font-ui)',
-          fontSize: 13,
-          color: 'var(--cth-ink-500)'
-        }}>
-          {config.autoMode ? 'auto mode on' : 'auto mode off'}
-        </span>
-        {/* v0.3.4: theme + fullscreen live HERE (top right), not buried in the
-            terminal header — and the theme darkens the whole app, terminals
-            included (design/theme.ts + tokens.css dark block). */}
-        <button
-          className="cth-titlebar-nodrag cth-tip"
-          onClick={() => {
-            const next = toggleAppTheme();
-            // Tell every RUNNING program the theme flipped. xterm repaints its own
-            // cells, but a TUI that painted its panels with explicit colours keeps
-            // them until it redraws, which left OpenCode's boxes in the old palette
-            // until the agent restarted. Only programs that enabled DEC mode 2031
-            // are told, and it is every pooled terminal rather than the visible one,
-            // so a background agent is not stale when you switch to it.
-            notifyThemeChangeAll(next === 'dark' ? 'dark' : 'light');
-            // Mirror into the harness config: every agent (re)spawned from now
-            // on gets the matching `theme` in its per-session Claude settings,
-            // so the TUI's truecolor palette fits the terminal. Scoped to
-            // harness agents — the user's global Claude theme is never touched.
-            void window.cth.updateConfig({ terminalTheme: next });
-          }}
-          data-tip={appThemeNow === 'dark' ? 'Light theme' : 'Dark theme'}
-          aria-label="Toggle dark mode"
-          style={{
-            marginLeft: 'auto',
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            width: 28, height: 28, padding: 0,
-            background: 'var(--cth-paper-100)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
-            border: 'none', borderRadius: 2, cursor: 'pointer',
-            color: 'var(--cth-ink-900)', fontSize: 13, lineHeight: 1
-          }}
-        >
-          {appThemeNow === 'dark' ? '☀' : '☾'}
-        </button>
-        {/* v0.3.4: the IDE button moved to agent level — every agent's header
-            (sidebar detail, god Command Center, fullscreen) carries it. */}
-        <button
-          className="cth-titlebar-nodrag cth-settings-btn cth-tip"
-          onClick={() => { setSettingsSection(undefined); setSettingsOpen(true); }}
-          data-tip="Settings"
-          aria-label="Settings"
-          style={{
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            width: 28, height: 28, padding: 0,
-            background: 'var(--cth-paper-100)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
-            border: 'none', borderRadius: 2, cursor: 'pointer',
-            color: 'var(--cth-ink-900)'
-          }}
-        >
-          <GearGlyph />
-        </button>
-        {/* Fullscreen. The title bar is chrome, not canvas, so these two use
-            clean stroke icons rather than the 16x16 pixel set the rest of the UI
-            is drawn in — at 16-18px a pixel-grid glyph reads as a rendering
-            artifact next to the OS window controls, not as a style choice. */}
-        <button
-          className="cth-titlebar-nodrag cth-tip"
-          onClick={() => {
-            if (fullscreenAgentId) { useStore.getState().setFullscreen(null); return; }
-            const all = useStore.getState().agents;
-            const target = all.find((x) => x.id === useStore.getState().selectedId && x.ptyId)
-              ?? all.find((x) => x.isGod && x.ptyId)
-              ?? all.find((x) => x.ptyId);
-            if (target) useStore.getState().setFullscreen(target.id);
-          }}
-          data-tip={fullscreenAgentId ? 'Exit focus mode (Esc)' : 'Focus mode'}
-          aria-label="Toggle focus mode"
-          style={{
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            width: 28, height: 28, padding: 0,
-            background: 'var(--cth-paper-100)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
-            border: 'none', borderRadius: 2, cursor: 'pointer',
-            color: 'var(--cth-ink-900)'
-          }}
-        >
-          {fullscreenAgentId ? <CollapseGlyph /> : <ExpandGlyph />}
-        </button>
-
-      </div>
-
-      <div style={{
-        flex: 1, minHeight: 0,
-        display: 'flex',
-        padding: 16,
-        gap: 0
-      }}>
-        <div style={{ flex: 1, minHeight: 0, minWidth: 0, position: 'relative' }}>
-          <OfficeFloor />
-          <MemoryPanel />
-          {agentCount === 0 && godStatus === 'booting' && <MichaelBooting />}
-          {agentCount === 0 && godStatus !== 'booting' && (
-            <div style={{
-              position: 'absolute', inset: 0,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              pointerEvents: 'none'
-            }}>
-              <div style={{ pointerEvents: 'auto', width: 360 }}>
-                <PixelPanel variant="dialog" title="EMPTY FLOOR" noPadding>
-                  <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    <p style={{ margin: 0, fontSize: 13, lineHeight: '20px' }}>
-                      No agents on the floor yet. Spawn one to see real claude output stream in here.
-                    </p>
-                    <PixelButton variant="primary" size="md" onClick={() => setAddAgentOpen(true)}>
-                      <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                        <Icon name="plus" /> add agent
-                      </span>
-                    </PixelButton>
-                  </div>
-                </PixelPanel>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <SidebarSplitter
-          width={sidebarWidth}
-          onChange={setSidebarWidth}
-          viewportWidth={vpWidth}
-        />
-
-        <div style={{
-          width: sidebarWidth, flexShrink: 0,
-          minHeight: 0, display: 'flex', flexDirection: 'column'
-        }}>
-          {agent ? (
-            <AgentDetailPanel agent={agent} />
-          ) : godStatus === 'booting' ? (
-            <PixelPanel variant="default" noPadding style={{
-              padding: 16, height: '100%',
-              display: 'flex', flexDirection: 'column',
-              justifyContent: 'center', alignItems: 'center', gap: 12
-            }}>
-              <div style={{
-                fontFamily: 'var(--cth-font-display)', fontSize: 10, lineHeight: '14px',
-                color: 'var(--cth-ink-500)'
-              }}>WAKING THE FLOOR</div>
-              <p style={{ margin: 0, fontSize: 13, textAlign: 'center', color: 'var(--cth-ink-700)' }}>
-                {bootingGodName} is clocking in.<br />
-                The terminal will land here once he's seated.
-              </p>
-            </PixelPanel>
-          ) : (
-            <PixelPanel variant="default" noPadding style={{
-              padding: 16, height: '100%',
-              display: 'flex', flexDirection: 'column',
-              justifyContent: 'center', alignItems: 'center', gap: 12
-            }}>
-              <div style={{
-                fontFamily: 'var(--cth-font-display)', fontSize: 10, lineHeight: '14px',
-                color: 'var(--cth-ink-500)'
-              }}>NO AGENT SELECTED</div>
-              <p style={{ margin: 0, fontSize: 13, textAlign: 'center', color: 'var(--cth-ink-700)' }}>
-                Spawn an agent from the strip below.<br />
-                The terminal and command bar will land here.
-              </p>
-              <PixelButton variant="secondary" size="md" onClick={() => setAddAgentOpen(true)}>
-                <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                  <Icon name="plus" /> add agent
-                </span>
-              </PixelButton>
-            </PixelPanel>
-          )}
-        </div>
-      </div>
-
-      <AgentStrip config={config} />
-
+    <AppShell
+      config={config}
+      agent={agent}
+      agentCount={agentCount}
+      godStatus={godStatus}
+      bootingGodName={bootingGodName}
+      fullscreenAgentId={fullscreenAgentId}
+      appThemeNow={appThemeNow}
+      sidebarWidth={sidebarWidth}
+      onSidebarWidthChange={setSidebarWidth}
+      vpWidth={vpWidth}
+      onAddAgent={() => setAddAgentOpen(true)}
+      onOpenSettings={onOpenSettings}
+      onToggleTheme={onToggleTheme}
+      onToggleFullscreen={onToggleFullscreen}
+      compactOverlayOpen={compactOverlayOpen}
+      onCloseCompactOverlay={() => setCompactOverlayOpen(false)}
+      onOpenCompactOverlay={() => setCompactOverlayOpen(true)}
+    >
+      {/* Every modal's MOUNT POINT gets its own boundary, not its inner content —
+          so a crash during the modal's own initial mount (not just later, once
+          it's up) is caught too. `onReset` closes the modal instead of the
+          default remount: re-opening the SAME modal into the SAME props would
+          most likely throw again immediately. */}
       {addAgentOpen && (
-        <AddAgentModal
-          onClose={closeAddAgentReview}
-          config={config}
-          onConfigChange={setConfig}
-        />
+        <ErrorBoundary onReset={closeAddAgentReview}>
+          <AddAgentModal
+            onClose={closeAddAgentReview}
+            config={config}
+            onConfigChange={setConfig}
+          />
+        </ErrorBoundary>
       )}
 
       {settingsOpen && (
-        <SettingsModal
-          config={config}
-          initialSection={settingsSection}
-          onClose={() => { setSettingsOpen(false); setSettingsSection(undefined); }}
-        />
+        <ErrorBoundary onReset={() => { setSettingsOpen(false); setSettingsSection(undefined); }}>
+          <SettingsModal
+            config={config}
+            initialSection={settingsSection}
+            onClose={() => { setSettingsOpen(false); setSettingsSection(undefined); }}
+          />
+        </ErrorBoundary>
       )}
 
-      {quitWarn && (
-        <QuitWarningModal
-          ptyCount={quitWarn.ptyCount}
-          closing={closing}
-          onCancel={() => {
-            if (closing) cancelClosingTime();
-            window.cth.cancelClose();
-            setQuitWarn(null);
-          }}
-          onConfirm={async () => { await window.cth.confirmClose(); }}
-          onClosingTime={startClosingTime}
-        />
+      {quitWarn && showDundies && (
+        <ErrorBoundary onReset={() => setShowDundies(false)}>
+          <DundiesModal
+            onCancel={() => setShowDundies(false)}
+            onConfirm={() => { setShowDundies(false); void startClosingTime(); }}
+          />
+        </ErrorBoundary>
+      )}
+
+      {quitWarn && !showDundies && (
+        <ErrorBoundary onReset={cancelQuit}>
+          <QuitWarningModal
+            ptyCount={quitWarn.ptyCount}
+            closing={closing}
+            onCancel={cancelQuit}
+            onConfirm={async () => { await window.cth.confirmClose(); }}
+            onClosingTime={() => setShowDundies(true)}
+          />
+        </ErrorBoundary>
       )}
 
       {fullscreenAgentId && <FullscreenTerminal config={config} />}
-      {ideOpen && <IdePanel />}
-      <TaskDetailOverlay />
-    </div>
-  );
-}
+      {/* VISITOR MODE — the IDE and the task detail are gated at their MOUNT,
+          not sealed from the inside. Both are overlays that cover the office
+          floor, so a placeholder in their place would hide the one thing the
+          mode wants on screen; and gating here means the file tree, the Monaco
+          buffers and the ledger poll are never even constructed, so nothing is
+          read off disk to be hidden in the first place.
 
-/* ── Title-bar glyphs ────────────────────────────────────────────────────────
-   Stroke icons on a 16 unit box, inheriting `currentColor` so they follow the
-   theme exactly as the pixel set does. Deliberately NOT added to
-   components/Icon.tsx: that library is the app's pixel-art identity and is used
-   at tab and card scale, where the pixel grid is the point. These three sit
-   beside the OS traffic lights, which is the one place that identity reads as a
-   blurry asset rather than a decision. */
-function Glyph({ children }: { children: React.ReactNode }) {
-  return (
-    <svg
-      width="16" height="16" viewBox="0 0 16 16" fill="none"
-      stroke="currentColor" strokeWidth={1.4}
-      strokeLinecap="round" strokeLinejoin="round"
-      aria-hidden="true" focusable="false"
-    >{children}</svg>
-  );
-}
-
-/** Four outward corner brackets — enter fullscreen. */
-function ExpandGlyph() {
-  return (
-    <Glyph>
-      <path d="M6.2 3H3v3.2M9.8 3H13v3.2M6.2 13H3V9.8M9.8 13H13V9.8" />
-    </Glyph>
-  );
-}
-
-/** The same brackets turned inward — leave fullscreen. */
-function CollapseGlyph() {
-  return (
-    <Glyph>
-      <path d="M3 6.2h3.2V3M13 6.2H9.8V3M3 9.8h3.2V13M13 9.8H9.8V13" />
-    </Glyph>
-  );
-}
-
-/** A wrench. The previous glyph was a hub with eight radiating spokes, which at
- *  18px is indistinguishable from a sun — sitting immediately beside a theme
- *  toggle whose light-mode icon IS a sun. A tool shape carries "settings"
- *  without competing with its neighbour. Drawn on a 24 box for curve headroom
- *  and rendered at 16. */
-function GearGlyph() {
-  return (
-    <svg
-      width="16" height="16" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth={2}
-      strokeLinecap="round" strokeLinejoin="round"
-      aria-hidden="true" focusable="false"
-    >
-      <path d="M15.5 3.5a5 5 0 0 0-6.1 6.1l-5.6 5.6a2.3 2.3 0 1 0 3.2 3.2l5.6-5.6a5 5 0 0 0 6.1-6.1l-3 3-2.2-.6-.6-2.2z" />
-    </svg>
+          `ideOpen` / `taskDetailId` are left set on purpose: this is a veil,
+          not a close, and lifting the mode brings back exactly what was open.
+          (FullscreenTerminal makes the same call for the same reason — see its
+          own early return.) */}
+      {ideOpen && !visitorMode && <IdePanel />}
+      {!visitorMode && (
+        <ErrorBoundary onReset={() => useStore.getState().closeTaskDetail()}>
+          <TaskDetailOverlay />
+        </ErrorBoundary>
+      )}
+    </AppShell>
   );
 }

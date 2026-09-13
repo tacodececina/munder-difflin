@@ -17,7 +17,7 @@ export const SCENE_H = 32;
 const OUTLINE: RGB = [38, 34, 46];
 const HX0 = 4, HX1 = 13; // head skin columns
 
-type RGB = [number, number, number];
+export type RGB = [number, number, number];
 type Buf = Uint8ClampedArray;
 
 // Current canvas dims — set per compose() so the same drawing primitives serve
@@ -59,6 +59,8 @@ const SKIN: Record<string, SkinPal> = {
   brown: { hi: [180, 130, 94],  base: [158, 112, 78],  sh: [124, 86, 58],   line: [90, 60, 40] },
   dark:  { hi: [142, 98, 70],   base: [120, 80, 56],   sh: [94, 62, 42],    line: [64, 42, 28] },
 };
+/** Enumerable skin-palette keys, for a picker in the custom-character builder. */
+export const SKIN_KEYS: string[] = Object.keys(SKIN);
 
 // ─── head + face ─────────────────────────────────────────────────────────────
 function drawHead(buf: Buf, skin: string): void {
@@ -77,8 +79,11 @@ function drawHead(buf: Buf, skin: string): void {
   rect(buf, 7, 17, 10, 18, s.sh); rect(buf, 7, 17, 9, 17, s.base);
 }
 
-type Brow = 'flat' | 'angry' | 'raised' | 'soft';
-type Mouth = 'neutral' | 'smile' | 'frown' | 'grin';
+export type Brow = 'flat' | 'angry' | 'raised' | 'soft';
+export type Mouth = 'neutral' | 'smile' | 'frown' | 'grin';
+/** Enumerable option lists, for pickers in the custom-character builder. */
+export const BROW_OPTIONS: Brow[] = ['flat', 'angry', 'raised', 'soft'];
+export const MOUTH_OPTIONS: Mouth[] = ['neutral', 'smile', 'frown', 'grin'];
 function drawFace(buf: Buf, skin: string, brow: Brow, mouth: Mouth, blush: boolean, lashes = false): void {
   const s = SKIN[skin];
   const white: RGB = [250, 248, 244], pup: RGB = [46, 38, 42];
@@ -110,7 +115,7 @@ function drawFace(buf: Buf, skin: string, brow: Brow, mouth: Mouth, blush: boole
 }
 
 // ─── hairstyles ──────────────────────────────────────────────────────────────
-interface HairArgs { part?: 'L' | 'R'; recede?: number; length?: number; vol?: number; }
+export interface HairArgs { part?: 'L' | 'R'; recede?: number; length?: number; vol?: number; }
 type HairFn = (buf: Buf, color: RGB, skinBase: RGB, a: HairArgs) => void;
 
 const styleShort: HairFn = (buf, color, skinBase, a) => {
@@ -244,10 +249,14 @@ const styleBald: HairFn = (buf, color, skinBase, a) => {
 };
 
 const HAIR_FNS = { styleShort, styleFloppy, styleFrame, styleBun, styleCurly, styleMessy, styleRecede, styleSpiky, styleBald };
-type HairStyle = keyof typeof HAIR_FNS;
+export type HairStyle = keyof typeof HAIR_FNS;
+/** Enumerable hair styles, in the same order as HAIR_FNS — for a thumbnail grid
+ *  in the custom-character builder. */
+export const HAIR_STYLES: HairStyle[] = Object.keys(HAIR_FNS) as HairStyle[];
 
 // ─── facial hair ─────────────────────────────────────────────────────────────
-type Facial = 'mustache' | 'mustacheSm' | 'stubble' | 'goatee';
+export type Facial = 'mustache' | 'mustacheSm' | 'stubble' | 'goatee' | 'fullbeard';
+export const FACIAL_OPTIONS: Facial[] = ['mustache', 'mustacheSm', 'stubble', 'goatee', 'fullbeard'];
 function drawFacial(buf: Buf, kind: Facial, color: RGB): void {
   const [, base, sh] = shades(color);
   if (kind === 'mustache') {
@@ -262,33 +271,184 @@ function drawFacial(buf: Buf, kind: Facial, color: RGB): void {
     for (const x of [8, 9]) set(buf, x, 15, base);
     set(buf, 8, 14, base); set(buf, 9, 14, base);
     for (const x of [7, 8, 9, 10]) set(buf, x, 13, base);
+  } else if (kind === 'fullbeard') {
+    // Fuller coverage than a goatee: solid beard climbing both jaw edges up to
+    // the sideburns plus a filled chin — the mouth's center still peeks through.
+    for (const x of [5, 6, 11, 12]) set(buf, x, 14, base);
+    for (const x of [5, 6, 7, 10, 11, 12]) set(buf, x, 15, base);
+    for (const x of [6, 7, 8, 9, 10, 11]) set(buf, x, 16, base);
+    set(buf, 8, 15, sh); set(buf, 9, 15, sh);
   }
 }
 
 // ─── glasses ─────────────────────────────────────────────────────────────────
-// Clear prescription glasses (NOT sunglasses): a thin rim that frames each eye
-// without covering it. The lens interior keeps the eye/skin already drawn, plus
-// a small white glint so the lens reads as transparent glass.
-function drawGlasses(buf: Buf): void {
+// An enumerable style choice rather than a single fixed look. `Recipe.glasses`
+// being unset/omitted still means "no glasses" (mirrors how `Recipe.facial`
+// works) — the fixed cast's `glasses: true` era is migrated to `glasses:
+// 'round'`, which reproduces the original single style byte-for-byte.
+export type GlassesKind = 'round' | 'square' | 'sun';
+export const GLASSES_OPTIONS: GlassesKind[] = ['round', 'square', 'sun'];
+function drawGlasses(buf: Buf, kind: GlassesKind): void {
   const frame: RGB = [60, 54, 62];
   const glint: RGB = [236, 240, 246];
-  // Left lens rim around the eye at (5-6, 9): top, bottom, outer + inner edge.
+  if (kind === 'square') {
+    // Thicker, boxier rim: a full rectangle around each eye (no cut corners),
+    // reading heavier/more structured than the round style.
+    for (const x of [4, 5, 6, 7]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
+    for (const x of [9, 10, 11, 12]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
+    set(buf, 4, 9, frame); set(buf, 7, 9, frame);
+    set(buf, 9, 9, frame); set(buf, 12, 9, frame);
+    set(buf, 8, 8, frame);
+    set(buf, 3, 9, frame); set(buf, 13, 9, frame);
+    set(buf, 4, 8, glint); set(buf, 9, 8, glint);
+    return;
+  }
+  if (kind === 'sun') {
+    // Same cut-corner rim as 'round', but with fully opaque dark lenses —
+    // hides the eyes entirely instead of just framing them.
+    const lens: RGB = [30, 28, 34];
+    for (const x of [5, 6]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
+    for (const x of [10, 11]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
+    set(buf, 4, 9, frame); set(buf, 7, 9, frame);
+    set(buf, 9, 9, frame); set(buf, 12, 9, frame);
+    set(buf, 8, 8, frame);
+    set(buf, 3, 9, frame); set(buf, 13, 9, frame);
+    for (const x of [5, 6]) set(buf, x, 9, lens);
+    for (const x of [10, 11]) set(buf, x, 9, lens);
+    set(buf, 5, 8, glint);
+    return;
+  }
+  // 'round' — clear prescription glasses (the original single fixed look): a
+  // thin rim that frames each eye without covering it, plus a glint so the
+  // lens reads as transparent glass.
   for (const x of [5, 6]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
   set(buf, 4, 9, frame); set(buf, 7, 9, frame);
   set(buf, 4, 8, frame); set(buf, 7, 8, frame);
-  // Right lens rim around the eye at (10-11, 9).
   for (const x of [10, 11]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
   set(buf, 9, 9, frame); set(buf, 12, 9, frame);
   set(buf, 9, 8, frame); set(buf, 12, 8, frame);
-  // Bridge over the nose + temple arms out to the hair.
   set(buf, 8, 8, frame);
   set(buf, 3, 9, frame); set(buf, 13, 9, frame);
-  // Glass glint on each rim's top-outer corner so the lens reads as clear glass.
   set(buf, 4, 8, glint); set(buf, 9, 8, glint);
 }
 
+// ─── accessories (second wave: cheap, purely-additive overlays) ──────────────
+// Drawn LAST in compose()/composeScene(), after clothing, head, hair, facial
+// hair and glasses are already painted — a pure overlay that never touches any
+// pixel unless `Recipe.accessory` is set, so all 15 fixed cast recipes (which
+// never set it) render byte-identical to before this feature existed.
+export type AccessoryKind = 'cap' | 'headphones' | 'earrings' | 'scarf' | 'lanyard' | 'watch';
+export const ACCESSORY_OPTIONS: AccessoryKind[] = ['cap', 'headphones', 'earrings', 'scarf', 'lanyard', 'watch'];
+
+/** Sensible default color per accessory kind, used when `Recipe.accessoryColor`
+ *  is omitted — exported so the character-builder UI can seed its color picker
+ *  with the same value the drawing engine would otherwise fall back to. */
+export const ACCESSORY_DEFAULT_COLOR: Record<AccessoryKind, RGB> = {
+  cap: [72, 96, 138],
+  headphones: [42, 40, 46],
+  earrings: [212, 175, 55],
+  scarf: [176, 58, 58],
+  lanyard: [70, 96, 150],
+  watch: [206, 210, 220],
+};
+
+/** Baseball-cap crown + a short shaded brim, painted over the top of the head
+ *  regardless of the hairstyle underneath (long styles keep flowing from the
+ *  sides/back below the cap's edge). */
+function drawCapFront(buf: Buf, color: RGB): void {
+  const [hi, base] = shades(color);
+  rect(buf, HX0, 1, HX1, 3, base);
+  for (let x = HX0 - 1; x <= HX1 + 1; x++) set(buf, x, 2, base);
+  rect(buf, HX0 - 1, 3, HX1 + 1, 4, base);
+  for (let x = HX0; x <= HX1; x++) set(buf, x, 5, base);
+  for (const x of [6, 7, 8]) set(buf, x, 1, hi);
+  // Brim silhouette along the dome's front edge — sits above the eyebrows.
+  const [, , brimSh] = shades(color, 1.22, 0.6);
+  for (const x of [6, 7, 8, 9, 10, 11]) set(buf, x, 5, brimSh);
+}
+
+/** Back-of-head cap: same crown, no brim (not visible from behind), plus a
+ *  small strap-adjuster mark for a bit of read at scene scale. */
+function drawCapBack(buf: Buf, color: RGB): void {
+  const [hi, base, sh] = shades(color);
+  rect(buf, HX0, 1, HX1, 3, base);
+  for (let x = HX0 - 1; x <= HX1 + 1; x++) set(buf, x, 2, base);
+  rect(buf, HX0 - 1, 3, HX1 + 1, 4, base);
+  for (let x = HX0; x <= HX1; x++) set(buf, x, 5, base);
+  for (const x of [8, 9]) set(buf, x, 1, hi);
+  set(buf, 8, 5, sh); set(buf, 9, 5, sh);
+}
+
+/** Over-ear headphones: a band across the crown plus a cushion block at each
+ *  ear, wide enough to read clearly over the character's own small ear bump.
+ *  Symmetric front-to-back, so the same drawing works for both directions. */
+function drawHeadphones(buf: Buf, color: RGB): void {
+  const [hi, base, sh] = shades(color);
+  for (let x = HX0; x <= HX1; x++) set(buf, x, 1, base);
+  set(buf, HX0 - 1, 1, base); set(buf, HX1 + 1, 1, base);
+  for (let y = 2; y <= 7; y++) { set(buf, HX0 - 1, y, base); set(buf, HX1 + 1, y, base); }
+  for (const ex of [HX0 - 2, HX0 - 1]) rect(buf, ex, 8, ex, 11, base);
+  for (const ex of [HX1 + 1, HX1 + 2]) rect(buf, ex, 8, ex, 11, base);
+  set(buf, HX0 - 2, 9, hi); set(buf, HX1 + 2, 9, hi);
+  set(buf, HX0 - 1, 11, sh); set(buf, HX1 + 1, 11, sh);
+  for (const x of [7, 8, 9, 10]) if (alphaAt(buf, x, 1)) set(buf, x, 1, hi);
+}
+
+/** A single dangling stud below each ear — the cheapest possible accessory,
+ *  front-only (hidden by the head from behind). */
+function drawEarrings(buf: Buf, color: RGB): void {
+  const [hi] = shades(color);
+  set(buf, HX0 - 1, 12, hi);
+  set(buf, HX1 + 1, 12, hi);
+}
+
+/** A wrap around the base of the neck, low enough to clear any cap/headphones
+ *  at the head. Drawn identically for front and back (a scarf wraps all the
+ *  way around) and at the same head-relative rows in both the portrait and
+ *  the scene sprite, since the neck sits at a fixed height in both canvases. */
+function drawScarf(buf: Buf, color: RGB): void {
+  const [hi, base, sh] = shades(color);
+  for (const x of [6, 7, 8, 9, 10, 11]) set(buf, x, 17, base);
+  set(buf, 6, 17, sh); set(buf, 11, 17, sh);
+  for (const x of [7, 8, 9, 10]) set(buf, x, 18, base);
+  set(buf, 9, 19, hi); // a short hanging tail down the front
+}
+
+/** A badge on a neck strap, hanging over the chest — front-only (an office
+ *  worker's ID badge). */
+function drawLanyard(buf: Buf, color: RGB): void {
+  const [hi, base] = shades(color);
+  for (const y of [18, 19, 20]) { set(buf, 7, y, base); set(buf, 10, y, base); }
+  const card: RGB = [244, 242, 238];
+  rect(buf, 7, 21, 10, 24, card);
+  rect(buf, 8, 22, 9, 23, hi);
+}
+
+/** A one-two pixel bright accent on the arm's outer sleeve edge, standing in
+ *  for a wrist — the cheapest possible accessory, in the spirit of
+ *  `drawEarrings`. Portrait and scene place the "wrist" at different rows
+ *  (the scene torso sits higher, over legs), so this reads `CUR_H` to pick
+ *  the right spot in whichever canvas is currently being composed. */
+function drawWatch(buf: Buf, color: RGB): void {
+  const [hi] = shades(color);
+  if (CUR_H === SCENE_H) { set(buf, 4, 23, hi); set(buf, 4, 24, hi); }
+  else { set(buf, 2, 26, hi); set(buf, 2, 27, hi); }
+}
+
+/** Dispatch for the accessory overlay — called once from compose() (portrait,
+ *  always front) and once per frame from composeScene() (front AND back). */
+function drawAccessory(buf: Buf, kind: AccessoryKind, color: RGB, back: boolean): void {
+  if (kind === 'cap') { if (back) drawCapBack(buf, color); else drawCapFront(buf, color); return; }
+  if (kind === 'headphones') { drawHeadphones(buf, color); return; }
+  if (kind === 'earrings' && !back) drawEarrings(buf, color);
+  if (kind === 'scarf') { drawScarf(buf, color); return; }
+  if (kind === 'lanyard' && !back) drawLanyard(buf, color);
+  if (kind === 'watch') { drawWatch(buf, color); return; }
+}
+
 // ─── clothing ────────────────────────────────────────────────────────────────
-type Cloth = 'suit' | 'dressshirt' | 'polo' | 'blouse' | 'cardigan' | 'sweater';
+export type Cloth = 'suit' | 'dressshirt' | 'polo' | 'blouse' | 'cardigan' | 'sweater' | 'tshirt' | 'hoodie' | 'blazer';
+export const CLOTH_KINDS: Cloth[] = ['suit', 'dressshirt', 'polo', 'blouse', 'cardigan', 'sweater', 'tshirt', 'hoodie', 'blazer'];
 function bodyShape(buf: Buf, col: RGB, heavy = false): void {
   const [, base, sh] = shades(col);
   const rows: [number, number, number][] = heavy
@@ -326,6 +486,32 @@ function drawClothing(buf: Buf, kind: Cloth, c1: RGB, c2: RGB | undefined, tie: 
     for (const [x, y] of [[6, 19], [7, 19], [10, 19], [11, 19]] as const) set(buf, x, y, sh);
   } else if (kind === 'sweater') {
     for (const [x, y] of [[6, 19], [7, 19], [8, 19], [9, 19], [10, 19], [11, 19]] as const) set(buf, x, y, sh);
+  } else if (kind === 'tshirt') {
+    // Rounded crew neckline (no popped collar) plus a short-sleeve hem
+    // highlight at the shoulder edge — reads more casual than a polo/sweater.
+    for (const x of [7, 8, 9, 10]) set(buf, x, 19, sh);
+    set(buf, 8, 20, hi); set(buf, 9, 20, hi);
+    for (const [x, y] of [[6, 21], [11, 21]] as const) set(buf, x, y, hi);
+  } else if (kind === 'hoodie') {
+    // A hood pooling behind the neck: a raised collar wider than a normal
+    // collar. Drawstrings hang from the neckline; a low seam hints at the
+    // kangaroo pocket.
+    for (const [x, y] of [[5, 20], [12, 20]] as const) set(buf, x, y, sh);
+    for (const x of [6, 7, 10, 11]) set(buf, x, 19, sh);
+    const string: RGB = c2 ? shades(c2)[0] : [235, 233, 226];
+    set(buf, 7, 21, string); set(buf, 7, 22, string);
+    set(buf, 10, 21, string); set(buf, 10, 22, string);
+    for (let x = 6; x <= 11; x++) set(buf, x, 25, sh);
+  } else if (kind === 'blazer') {
+    // Notched lapels folding open from the collarbone in the jacket's own
+    // light/dark shades (no shirt-white insert) — structured, dressier than a
+    // suit worn without a tie. A single button anchors the front.
+    for (const [x, y] of [[7, 19], [6, 20]] as const) set(buf, x, y, hi);
+    for (const [x, y] of [[10, 19], [11, 20]] as const) set(buf, x, y, hi);
+    set(buf, 8, 19, sh); set(buf, 9, 19, sh);
+    for (const [x, y] of [[7, 21], [10, 21]] as const) set(buf, x, y, sh);
+    const button: RGB = c2 ? shades(c2)[2] : sh;
+    set(buf, 8, 23, button); set(buf, 9, 23, button);
   }
 }
 function collarNeck(buf: Buf, skin: string): void {
@@ -392,6 +578,24 @@ function drawSceneTorso(buf: Buf, r: Recipe, back: boolean): void {
     for (const [x, y] of [[6, 18], [7, 18], [10, 18], [11, 18]] as const) set(buf, x, y, sh);
   } else if (r.cloth === 'sweater') {
     for (const [x, y] of [[6, 18], [7, 18], [8, 18], [9, 18], [10, 18], [11, 18]] as const) set(buf, x, y, sh);
+  } else if (r.cloth === 'tshirt') {
+    for (const x of [7, 8, 9, 10]) set(buf, x, 18, sh);
+    set(buf, 8, 19, hi); set(buf, 9, 19, hi);
+    for (const [x, y] of [[6, 20], [11, 20]] as const) set(buf, x, y, hi);
+  } else if (r.cloth === 'hoodie') {
+    for (const [x, y] of [[5, 19], [12, 19]] as const) set(buf, x, y, sh);
+    for (const x of [6, 7, 10, 11]) set(buf, x, 18, sh);
+    const string: RGB = r.c2 ? shades(r.c2)[0] : [235, 233, 226];
+    set(buf, 7, 20, string); set(buf, 7, 21, string);
+    set(buf, 10, 20, string); set(buf, 10, 21, string);
+    for (let x = 6; x <= 11; x++) set(buf, x, 24, sh);
+  } else if (r.cloth === 'blazer') {
+    for (const [x, y] of [[7, 18], [6, 19]] as const) set(buf, x, y, hi);
+    for (const [x, y] of [[10, 18], [11, 19]] as const) set(buf, x, y, hi);
+    set(buf, 8, 18, sh); set(buf, 9, 18, sh);
+    for (const [x, y] of [[7, 20], [10, 20]] as const) set(buf, x, y, sh);
+    const button: RGB = r.c2 ? shades(r.c2)[2] : sh;
+    set(buf, 8, 22, button); set(buf, 9, 22, button);
   }
 }
 
@@ -464,14 +668,31 @@ function outlinePass(buf: Buf): void {
 }
 
 // ─── recipes ─────────────────────────────────────────────────────────────────
-interface Recipe {
+/** The full parametric description of a character: every knob the drawing
+ *  primitives below understand. `paintPortrait`/`sceneFrameBufs` resolve one of
+ *  these from the fixed `RECIPES` map by `OfficeCharacterName`;
+ *  `paintPortraitFromRecipe`/`sceneFrameBufsFromRecipe` accept one directly, so
+ *  a custom character (built from the same knobs) renders through the exact
+ *  same drawing code as the 15 fixed cast members. */
+export interface Recipe {
   skin: string; hairc: RGB; hair: HairStyle; hairargs?: HairArgs;
   cloth: Cloth; c1: RGB; c2?: RGB; tie?: RGB; pants?: RGB;
-  brow?: Brow; mouth?: Mouth; blush?: boolean; facial?: Facial; glasses?: boolean;
+  brow?: Brow; mouth?: Mouth; blush?: boolean; facial?: Facial;
+  /** Glasses style. Omitted (like `facial`) means no glasses at all — there is
+   *  no separate on/off flag. */
+  glasses?: GlassesKind;
   /** Bigger, lashed eyes for a more feminine, expressive face. */
   lashes?: boolean;
   /** Heavier build: chubby cheeks, a double chin, and a wider torso. */
   heavy?: boolean;
+  /** Optional cosmetic accessory (cap / headphones / earrings / scarf / lanyard
+   *  / watch), drawn last as a pure overlay — omitting it renders byte-identical
+   *  to before this field existed, so it never affects the 15 fixed cast
+   *  recipes above. */
+  accessory?: AccessoryKind;
+  /** Accent color for the accessory. Falls back to ACCESSORY_DEFAULT_COLOR[kind]
+   *  when omitted. */
+  accessoryColor?: RGB;
 }
 
 // Puff the lower face into round cheeks + a double chin so a character reads as
@@ -494,12 +715,12 @@ const RECIPES: Record<OfficeCharacterName, Recipe> = {
   michael:  { skin: 'light', hairc: [58, 42, 28],   hair: 'styleShort',  hairargs: { part: 'L' }, cloth: 'suit', c1: [58, 63, 74], tie: [170, 58, 58], brow: 'flat', mouth: 'smile' },
   jim:      { skin: 'light', hairc: [92, 60, 34],   hair: 'styleFloppy', cloth: 'dressshirt', c1: [172, 196, 224], tie: [120, 130, 150], brow: 'flat', mouth: 'smile' },
   pam:      { skin: 'light', hairc: [120, 76, 42],  hair: 'styleFrame',  hairargs: { length: 18, vol: 2 }, cloth: 'cardigan', c1: [236, 174, 192], c2: [244, 242, 238], brow: 'soft', mouth: 'smile', blush: true, lashes: true },
-  dwight:   { skin: 'light', hairc: [64, 48, 28],   hair: 'styleShort',  hairargs: { part: 'L', recede: 1 }, cloth: 'dressshirt', c1: [184, 155, 62], tie: [120, 82, 46], glasses: true, brow: 'angry', mouth: 'neutral' },
+  dwight:   { skin: 'light', hairc: [64, 48, 28],   hair: 'styleShort',  hairargs: { part: 'L', recede: 1 }, cloth: 'dressshirt', c1: [184, 155, 62], tie: [120, 82, 46], glasses: 'round', brow: 'angry', mouth: 'neutral' },
   kevin:    { skin: 'light', hairc: [58, 44, 30],   hair: 'styleBald',   cloth: 'polo', c1: [110, 140, 180], c2: [90, 120, 160], brow: 'flat', mouth: 'neutral', heavy: true },
   angela:   { skin: 'light', hairc: [186, 154, 90], hair: 'styleBun',    cloth: 'cardigan', c1: [150, 146, 170], c2: [235, 233, 226], brow: 'angry', mouth: 'frown', lashes: true },
   oscar:    { skin: 'tan',   hairc: [28, 22, 18],   hair: 'styleShort',  hairargs: { part: 'L' }, cloth: 'sweater', c1: [122, 60, 74], brow: 'flat', mouth: 'smile' },
-  stanley:  { skin: 'dark',  hairc: [60, 54, 48],   hair: 'styleRecede', cloth: 'dressshirt', c1: [150, 120, 86], tie: [120, 78, 52], glasses: true, facial: 'mustache', brow: 'flat', mouth: 'neutral', heavy: true },
-  phyllis:  { skin: 'light', hairc: [196, 162, 110], hair: 'styleCurly', cloth: 'blouse', c1: [202, 160, 192], glasses: true, brow: 'soft', mouth: 'smile', lashes: true, heavy: true },
+  stanley:  { skin: 'dark',  hairc: [60, 54, 48],   hair: 'styleRecede', cloth: 'dressshirt', c1: [150, 120, 86], tie: [120, 78, 52], glasses: 'round', facial: 'mustache', brow: 'flat', mouth: 'neutral', heavy: true },
+  phyllis:  { skin: 'light', hairc: [196, 162, 110], hair: 'styleCurly', cloth: 'blouse', c1: [202, 160, 192], glasses: 'round', brow: 'soft', mouth: 'smile', lashes: true, heavy: true },
   andy:     { skin: 'light', hairc: [74, 51, 32],   hair: 'styleShort',  hairargs: { part: 'R' }, cloth: 'polo', c1: [176, 65, 58], c2: [150, 50, 46], brow: 'raised', mouth: 'smile' },
   kelly:    { skin: 'tan',   hairc: [24, 18, 22],   hair: 'styleFrame',  hairargs: { length: 20, vol: 1 }, cloth: 'blouse', c1: [212, 90, 158], brow: 'soft', mouth: 'smile', blush: true, lashes: true },
   ryan:     { skin: 'light', hairc: [42, 32, 24],   hair: 'styleSpiky',  cloth: 'suit', c1: [58, 58, 68], tie: [40, 40, 50], brow: 'flat', mouth: 'neutral' },
@@ -516,7 +737,7 @@ function drawHeadGroup(buf: Buf, r: Recipe): void {
   drawFace(buf, r.skin, r.brow ?? 'flat', r.mouth ?? 'neutral', r.blush ?? false, r.lashes ?? false);
   if (r.facial) drawFacial(buf, r.facial, r.hairc);
   HAIR_FNS[r.hair](buf, r.hairc, skinBase, r.hairargs ?? {});
-  if (r.glasses) drawGlasses(buf);
+  if (r.glasses) drawGlasses(buf, r.glasses);
 }
 
 function defaultPants(r: Recipe): RGB {
@@ -531,6 +752,7 @@ function compose(r: Recipe): Buf {
   drawClothing(buf, r.cloth, r.c1, r.c2, r.tie, r.skin, r.heavy ?? false);
   collarNeck(buf, r.skin);
   drawHeadGroup(buf, r);
+  if (r.accessory) drawAccessory(buf, r.accessory, r.accessoryColor ?? ACCESSORY_DEFAULT_COLOR[r.accessory], false);
   outlinePass(buf);
   return buf;
 }
@@ -542,43 +764,78 @@ function composeScene(r: Recipe, phase: number, back: boolean): Buf {
   drawSceneBody(buf, r, phase, back);
   if (back) drawHeadBack(buf, r);
   else drawHeadGroup(buf, r);
+  if (r.accessory) drawAccessory(buf, r.accessory, r.accessoryColor ?? ACCESSORY_DEFAULT_COLOR[r.accessory], back);
   outlinePass(buf);
   return buf;
 }
 
 // ─── public render ───────────────────────────────────────────────────────────
-const bufCache = new Map<OfficeCharacterName, Buf>();
-const sceneCache = new Map<OfficeCharacterName, SceneFrames>();
+// Both the fixed 15-character roster (by `OfficeCharacterName`) and arbitrary
+// user-built recipes render through the exact same compose()/composeScene()
+// calls and the exact same caches below — a fixed name is just sugar for
+// `RECIPES[name]` used as the cache key, so the 15 existing characters keep
+// rendering byte-identically to before this module gained a recipe-based API.
+const bufCache = new Map<string, Buf>();
+const sceneCache = new Map<string, SceneFrames>();
 
-function getBuf(name: OfficeCharacterName): Buf {
-  let buf = bufCache.get(name);
+/** Cheap, non-cryptographic string hash (cyrb53) over a recipe's JSON — just
+ *  enough to key the render caches so an identical custom recipe (e.g. redrawn
+ *  every frame for a live preview) is composed once, not on every call. */
+export function hashRecipe(r: Recipe): string {
+  const s = JSON.stringify(r);
+  let h1 = 0xdeadbeef ^ s.length, h2 = 0x41c6ce57 ^ s.length;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+
+function getBufForRecipe(key: string, r: Recipe): Buf {
+  let buf = bufCache.get(key);
   if (!buf) {
-    buf = compose(RECIPES[name] ?? RECIPES.jim);
-    bufCache.set(name, buf);
+    buf = compose(r);
+    bufCache.set(key, buf);
   }
   return buf;
 }
 
+function getBuf(name: OfficeCharacterName): Buf {
+  return getBufForRecipe(name, RECIPES[name] ?? RECIPES.jim);
+}
+
 export interface SceneFrames { front: Buf[]; back: Buf[]; }
 
-/** Walk-phase frames (stand, step-L, step-R) for the in-scene sprite, front + back. */
-export function sceneFrameBufs(name: OfficeCharacterName): SceneFrames {
-  let frames = sceneCache.get(name);
+function getSceneForRecipe(key: string, r: Recipe): SceneFrames {
+  let frames = sceneCache.get(key);
   if (!frames) {
-    const r = RECIPES[name] ?? RECIPES.jim;
     frames = {
       front: [composeScene(r, 0, false), composeScene(r, 1, false), composeScene(r, 2, false)],
       back: [composeScene(r, 0, true), composeScene(r, 1, true), composeScene(r, 2, true)],
     };
-    sceneCache.set(name, frames);
+    sceneCache.set(key, frames);
   }
   return frames;
 }
 
-/** Paint a character's procedural portrait onto `ctx`, nearest-neighbor at `scale`. */
-export function paintPortrait(ctx: CanvasRenderingContext2D, name: OfficeCharacterName, scale = 2): void {
-  const buf = getBuf(name);
-  // Stage at 1× on an offscreen canvas, then blit scaled with smoothing off.
+/** Walk-phase frames (stand, step-L, step-R) for the in-scene sprite, front + back. */
+export function sceneFrameBufs(name: OfficeCharacterName): SceneFrames {
+  return getSceneForRecipe(name, RECIPES[name] ?? RECIPES.jim);
+}
+
+/** Same as `sceneFrameBufs`, for an arbitrary (e.g. user-built) recipe rather
+ *  than a fixed cast name. Cached by a hash of the recipe's contents. */
+export function sceneFrameBufsFromRecipe(recipe: Recipe): SceneFrames {
+  return getSceneForRecipe(hashRecipe(recipe), recipe);
+}
+
+/** Stage `buf` (a PORTRAIT_W×PORTRAIT_H RGBA buffer) at 1× on an offscreen
+ *  canvas, then blit it onto `ctx` scaled with smoothing off — the actual
+ *  pixel-art blit shared by both public paint functions below. */
+function blitPortrait(ctx: CanvasRenderingContext2D, buf: Buf, scale: number): void {
   const stage = document.createElement('canvas');
   stage.width = PORTRAIT_W; stage.height = PORTRAIT_H;
   const sctx = stage.getContext('2d')!;
@@ -588,4 +845,16 @@ export function paintPortrait(ctx: CanvasRenderingContext2D, name: OfficeCharact
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, PORTRAIT_W * scale, PORTRAIT_H * scale);
   ctx.drawImage(stage, 0, 0, PORTRAIT_W, PORTRAIT_H, 0, 0, PORTRAIT_W * scale, PORTRAIT_H * scale);
+}
+
+/** Paint a character's procedural portrait onto `ctx`, nearest-neighbor at `scale`. */
+export function paintPortrait(ctx: CanvasRenderingContext2D, name: OfficeCharacterName, scale = 2): void {
+  blitPortrait(ctx, getBuf(name), scale);
+}
+
+/** Same as `paintPortrait`, for an arbitrary (e.g. user-built) recipe rather
+ *  than a fixed cast name. Synchronous and cheap enough to call on every
+ *  keystroke of a live builder preview — cached by a hash of the recipe. */
+export function paintPortraitFromRecipe(ctx: CanvasRenderingContext2D, recipe: Recipe, scale = 2): void {
+  blitPortrait(ctx, getBufForRecipe(hashRecipe(recipe), recipe), scale);
 }

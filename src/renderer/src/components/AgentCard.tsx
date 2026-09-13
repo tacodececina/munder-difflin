@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PixelPanel } from './PixelPanel';
 import { PixelBadge, StatusKind } from './PixelBadge';
@@ -6,13 +6,16 @@ import { useHasTerminalDraft } from './terminalPool';
 import { SpritePortrait } from './SpritePortrait';
 import { RealtimeMichaelToggle } from './RealtimeMichaelToggle';
 import { CostHud } from '@/realtime/CostHud';
-import { AccentColorName } from '@/design/tokens';
-import { OfficeCharacterName } from '@/scene/office/cast';
+import { AccentColorName, motion } from '@/design/tokens';
 import { AgentNameEditor } from './AgentNameEditor';
+import { useStore } from '@/store/store';
+import { isSealed, visitorSafeProject } from '@/store/visitorMode';
 
 export interface AgentCardProps {
   name: string;
-  character: OfficeCharacterName;
+  /** A fixed `OfficeCharacterName`, or a custom character id (`custom:<uuid>`)
+   *  — SpritePortrait resolves either. */
+  character: string;
   accent: AccentColorName;
   status: StatusKind;
   /** This agent's pty, if it has one. Only used to notice that the USER has
@@ -45,6 +48,15 @@ export interface AgentCardProps {
   /** Opens the note editor (the strip owns the editing overlay). When set, the
    *  card shows a small ✎ affordance on its note row. */
   onEditNote?: () => void;
+  /** Phase 2 `compact` band (see useBreakpoint/bp.compact): collapses the card
+   *  to just the portrait plus a small status dot — no name, no project/action
+   *  line, no note, no gauge. There is not room for a labelled 220px card AND
+   *  a usable scene AND a sidebar at once, and the strip already scrolls, so
+   *  this trades identity-at-a-glance for fitting more of the roster on
+   *  screen. The full name still reaches assistive tech via `aria-label` and
+   *  sighted users via the native `title` tooltip — nothing is silently lost,
+   *  only hidden from the pixel-art card face. */
+  compact?: boolean;
 }
 
 const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
@@ -57,11 +69,31 @@ const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
 export function AgentCard({
   name, character, accent, status, ptyId, project, action, progress = 0,
   contextTokens, contextLimit, selected, isGod, onClick, onRename,
-  doingCount = 0, onTaskNoteClick, draggable, note, onEditNote
+  doingCount = 0, onTaskNoteClick, draggable, note, onEditNote, compact = false
 }: AgentCardProps) {
   const { t } = useTranslation();
   const [hover, setHover] = useState(false);
   const typing = useHasTerminalDraft(ptyId);
+  const visitorMode = useStore((s) => s.visitorMode);
+
+  // Status-change "pop": a chunky 2-frame scale bump (steps easing, not a
+  // smooth fade) whenever this agent's status changes — thinking→working→
+  // success etc. Deliberately sprite-like, matching the pixel-art identity,
+  // rather than a generic CSS fade. The ref starts at the CURRENT status so
+  // mounting a card never pops (only real transitions do).
+  const prevStatusRef = useRef(status);
+  const [popping, setPopping] = useState(false);
+  useEffect(() => {
+    if (prevStatusRef.current === status) return;
+    prevStatusRef.current = status;
+    setPopping(true);
+    // Hold the popped scale for one "beat" (duration.base) before the same
+    // stepped transition eases it back down — reduced-motion users get this
+    // instantly via the global `transition-duration: 0s !important` rule
+    // (design/global.css), same mechanism every other transition here relies on.
+    const id = setTimeout(() => setPopping(false), motion.duration.base);
+    return () => clearTimeout(id);
+  }, [status]);
   // IDENTITY and SELECTION are two different things, and conflating them is why
   // selecting Michael appeared to do nothing.
   //
@@ -102,8 +134,11 @@ export function AgentCard({
   // that gets cut. Widened for every card so the dock stays uniform, with enough
   // slack that Talk's info mark (which only appears when the OpenAI key is
   // missing) has somewhere to sit rather than pushing the row apart.
-  const width = 220;
-  const height = 78;
+  // Compact: a snug tile around the portrait itself (36x56 at scale 2, see
+  // SpritePortrait/portraitArt.ts) rather than the full 220-wide identity
+  // card — see the `compact` prop doc for why the rest of the card is dropped.
+  const width = compact ? 48 : 220;
+  const height = compact ? 64 : 78;
   const lift = (isGod ? -2 : 0) - (hover ? 1 : 0) - (selected ? 1 : 0);
   /** God's distinction: a tinted surface plus a thin accent border all the way
    *  around — NOT the 3px rule that used to sit on the top edge alone. That rule
@@ -125,8 +160,21 @@ export function AgentCard({
     .filter(Boolean).join(', ') || 'none';
 
   // One context line: what it's DOING while working, WHERE it lives while idle.
-  const infoLine = (status !== 'idle' && action) ? action : project;
-  const noteFirstLine = (note ?? '').split('\n').find((l) => l.trim()) ?? '';
+  // VISITOR MODE — both halves of that line are operational: `action` is the
+  // live tool call with its target ("edit src/main/config.ts"), and `project`
+  // names the repo, which is often the client or the unshipped thing. The card
+  // keeps its name, portrait, status badge and gauge (the floor's pulse) and
+  // gives up the line. The private note goes with it: it is free text the
+  // operator wrote for themselves, which is the definition of not-for-guests.
+  const infoLine = visitorSafeProject(
+    (status !== 'idle' && action) ? action : project,
+    t('visitorMode.activity'),
+    visitorMode
+  );
+  const noteHidden = isSealed('activity', visitorMode);
+  const noteFirstLine = noteHidden
+    ? ''
+    : ((note ?? '').split('\n').find((l) => l.trim()) ?? '');
 
   return (
     <div
@@ -146,14 +194,24 @@ export function AgentCard({
       // The ring is the visual answer to "which terminal is open"; this is the
       // same answer for a screen reader. Matches SidebarRow in fullscreen.
       aria-current={selected ? 'true' : undefined}
+      // Compact drops the visible name/status text (see the prop doc) — this
+      // is where that information still reaches assistive tech, and the
+      // native `title` gives sighted mouse users the same thing on hover.
+      // Non-compact needs neither: the card's own text IS its accessible name.
+      aria-label={compact ? `${name}${infoLine ? ` — ${infoLine}` : ''}` : undefined}
+      title={compact ? `${name}${infoLine ? ` — ${infoLine}` : ''}` : undefined}
       className="cth-titlebar-nodrag"
       style={{
         width, minWidth: width, height,
         padding: 0, border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left',
         position: 'relative',
-        transform: lift ? `translateY(${lift}px)` : 'none',
+        transform: [lift ? `translateY(${lift}px)` : '', popping ? 'scale(1.08)' : '']
+          .filter(Boolean).join(' ') || 'none',
         boxShadow: outerShadow,
-        transition: 'transform 90ms steps(2, end), box-shadow 90ms steps(2, end)'
+        // steps(2) — a deliberate 2-frame "sprite" pop, not a smooth interpolation
+        // (see design/tokens.ts `motion.easeSprite`). Drives both the hover/select
+        // lift AND the status-change pop above via the same `transform` property.
+        transition: `transform ${motion.duration.fast}ms ${motion.easeSprite(2)}, box-shadow ${motion.duration.fast}ms ${motion.easeSprite(2)}`
       }}
     >
       {/* The taken note, stuck to the card like on the desk: this worker is
@@ -180,9 +238,37 @@ export function AgentCard({
       )}
       <PixelPanel
         variant="default"
-        style={{ height: '100%', padding: '6px 8px', ...godSurface }}
+        style={{ height: '100%', padding: compact ? 4 : '6px 8px', ...godSurface }}
         noPadding
       >
+        {compact ? (
+          // Portrait + a single status dot. Logical inset properties (not
+          // left/right) so the dot's corner follows reading direction under
+          // an RTL app language instead of always pinning to the same
+          // physical side — see i18n/useDirection.ts.
+          <div style={{
+            position: 'relative', height: '100%',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden'
+          }}>
+            <SpritePortrait character={character} scale={2} />
+            <span
+              title={`${typing ? t('badge.typing') : t(`badge.${status}`)}`}
+              style={{
+                position: 'absolute', insetInlineEnd: 2, bottom: 2,
+                width: 8, height: 8,
+                background: `var(--cth-status-${typing ? 'typing' : status})`,
+                boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
+              }}
+            />
+            {isGod && (
+              <span style={{
+                position: 'absolute', insetInlineStart: 2, top: 2,
+                fontFamily: 'var(--cth-font-display)', fontSize: 6, lineHeight: '9px',
+                background: `var(--cth-${accent})`, color: 'var(--cth-ink-900)', padding: '0 2px'
+              }}>{t('agentCard.boss')}</span>
+            )}
+          </div>
+        ) : (
         <div style={{ display: 'flex', gap: 8, height: '100%' }}>
           {/* Portrait tile — vertically centred so the card reads calm and even. */}
           <div style={{
@@ -232,7 +318,9 @@ export function AgentCard({
 
             {/* Context line: action while working, repo while idle. */}
             <div
-              title={`${project}${action && status !== 'idle' ? ` — ${action}` : ''}`}
+              title={noteHidden
+                ? infoLine
+                : `${project}${action && status !== 'idle' ? ` — ${action}` : ''}`}
               style={{
                 fontSize: 11, lineHeight: '14px',
                 color: 'var(--cth-ink-500)',
@@ -265,7 +353,7 @@ export function AgentCard({
               >
                 {noteFirstLine ? (
                   <span
-                    title={note}
+                    title={noteHidden ? undefined : note}
                     style={{
                       flex: 1, minWidth: 0, fontSize: 10.5, lineHeight: '14px',
                       color: 'var(--cth-ink-500)', fontStyle: 'italic',
@@ -308,6 +396,7 @@ export function AgentCard({
             </div>
           </div>
         </div>
+        )}
       </PixelPanel>
     </div>
   );

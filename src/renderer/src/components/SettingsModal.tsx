@@ -225,6 +225,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
   const cfgX = config as HarnessConfig & {
     strongKeepalive?: boolean; audience?: string; autoMode?: boolean;
     defaultModel?: string; maxTurns?: number; semanticMemory?: boolean;
+    visitorMode?: boolean;
   };
   /**
    * ONE SAVE BUTTON.
@@ -262,6 +263,24 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     const next = !keepAwake;
     setKeepAwake(next);
     stage({ strongKeepalive: next } as Partial<HarnessConfig>);
+  };
+  /**
+   * VISITOR MODE — the only explicitly-armed privacy control in this app.
+   *
+   * `=== true`, never `!== false`: the default is OFF and an absent value must
+   * read as off. It is staged through the same one-save path as everything else
+   * here, so arming it is a deliberate two-step (flip, Save) and the seal lands
+   * across every floor window at once via the config:changed broadcast.
+   *
+   * Nothing else in the app ever writes this key — not onboarding, not the
+   * voice action list, not a heuristic about screen sharing. A privacy screen
+   * that turns itself on is a privacy screen you cannot trust to be off.
+   */
+  const [visitorMode, setVisitorMode] = useState<boolean>(cfgX.visitorMode === true);
+  const toggleVisitorMode = (): void => {
+    const next = !visitorMode;
+    setVisitorMode(next);
+    stage({ visitorMode: next } as Partial<HarnessConfig>);
   };
   const [simpleMode, setSimpleMode] = useState<boolean>(cfgX.audience === 'non-technical');
   // Renderer-local, not part of HarnessConfig — it only changes how this window
@@ -1014,6 +1033,20 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                             </div>
                             <PixelButton variant={simpleMode ? 'primary' : 'secondary'} size="sm" onClick={toggleSimpleMode}>
                               {simpleMode ? t('common.on') : t('common.off')}
+                            </PixelButton>
+                          </div>
+                          {/* Visitor mode. Sits with the environment toggles
+                              because that is what it describes: not what the
+                              app does, but who is currently able to see it. */}
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>{t('settings.general.visitorMode')}</span>
+                              <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                {t('settings.general.visitorModeDesc')}
+                              </span>
+                            </div>
+                            <PixelButton variant={visitorMode ? 'primary' : 'secondary'} size="sm" onClick={toggleVisitorMode}>
+                              {visitorMode ? t('common.on') : t('common.off')}
                             </PixelButton>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>

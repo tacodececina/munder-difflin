@@ -407,6 +407,14 @@ const breaker = new CircuitBreaker(() => {
 // heartbeat mission is disabled (it ships off).
 let fleetTimer: ReturnType<typeof setInterval> | null = null;
 let breakerBeatTimer: ReturnType<typeof setInterval> | null = null;
+/** …and the task-completion observer, which turns a real `…→done` transition in
+ *  tasks.json into a `task_done` row in log.jsonl (hive.observeTaskCompletions).
+ *  Agents edit the ledger directly, so polling is the only vantage point that
+ *  sees every closure — see that method for the full rationale. */
+let taskDoneTimer: ReturnType<typeof setInterval> | null = null;
+/** Cadence of that observer. Matches the renderer's own 5s ledger poll, so a
+ *  closure is recorded about as fast as the kanban shows it. */
+const TASK_DONE_POLL_MS = 5_000;
 // Feed the breaker's api_error-storm trip from Oscar's OTel api_error spans —
 // Jim's one breaker input with no on-branch source (telemetry.onApiError seam).
 telemetry.onApiError((agentId) => breaker.recordError(agentId));
@@ -1263,9 +1271,14 @@ function reengageGod(digest: string): void {
   hive.send({ to: 'god', act: 'request', subject: 'Heartbeat', body: digest }, 'heartbeat');
 }
 
-/** A native toast for breaker constrain/stop, gated on the notifications setting. */
+/** A native toast for breaker constrain/stop, gated on the notifications setting
+ *  AND on visitor mode: an OS toast paints an agent name and a trip reason over
+ *  whatever is on screen, which is the one thing the mode exists to prevent.
+ *  Main owns `visitorMode` in HarnessConfig, so it gates here rather than trying
+ *  to un-ring the bell in the renderer — the notification is never created. */
 function breakerToast(title: string, body: string): void {
-  if (!readConfig().notifications) return;
+  const cfg = readConfig();
+  if (!cfg.notifications || cfg.visitorMode === true) return;
   try { if (Notification.isSupported()) new Notification({ title, body }).show(); }
   catch { /* unsupported platform */ }
 }
@@ -4734,6 +4747,15 @@ const completionWatcher = initCompletionWatcher({
   },
   onNotify: (evt) => {
     try {
+      // VISITOR MODE — `evt.summary` is the free-text description of finished
+      // work that CompletionToast deliberately refuses to paint while the mode
+      // is armed. A native toast is the same text on the same screen, only
+      // outside the app's own window, so the renderer's gate is worthless
+      // without this one. (Left independent of the `notifications` setting:
+      // that setting defaults OFF and this toast is the visual half of voice
+      // Michael's "respond when done" — gating it there would silence the
+      // feature by default. Privacy is the only reason to suppress it.)
+      if (readConfig().visitorMode === true) return;
       if (!Notification.isSupported()) return;
       const reg = hive.registry();
       const title = resolveGodName(reg.agents[reg.godId ?? 'god']?.name);
@@ -5478,6 +5500,14 @@ function armAlwaysOnBeats(): void {
   if (workerWakeTimer) clearInterval(workerWakeTimer);
   workerWakeTimer = setInterval(() => { try { runWorkerWakeBeat(); } catch (e) { console.error('[worker-wake beat]', e); } }, WORKER_WAKE_POLL_MS);
   runWorkerWakeBeat(); // catch-up on arm — power-resume re-arms and drains the backlog
+  if (taskDoneTimer) clearInterval(taskDoneTimer);
+  // Baseline immediately (this call records the CURRENT statuses and emits
+  // nothing), then watch. Re-arming after a power-resume is harmless: the
+  // observer keeps its baseline across arms, so nothing is re-announced.
+  try { hive.observeTaskCompletions(); } catch (e) { console.error('[task-done beat]', e); }
+  taskDoneTimer = setInterval(() => {
+    try { hive.observeTaskCompletions(); } catch (e) { console.error('[task-done beat]', e); }
+  }, TASK_DONE_POLL_MS);
 }
 
 /** Wall-clock instant we last observed the machine suspend or lock, so a resume

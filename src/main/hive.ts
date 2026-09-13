@@ -1421,7 +1421,7 @@ export class HiveManager {
     // us) was invisible to every investigation.
     const rt = this.runtimeInfo();
     const runtimeLine = rt
-      ? `RUNNING BUILD: Munder Difflin v${rt.version}, ${rt.packaged ? 'packaged app' : 'local dev build'}${rt.appPath ? `, from ${rt.appPath}` : ''}. Say this version if asked which one is running, and do not assume behaviour from an older one. A local dev build inherits the launching shell's environment (umask included) where a packaged app does not, so file modes and inherited env can legitimately differ between the two. \`log.jsonl\` records an \`app-start\` event on every launch, which is how you spot a restart or a build switch.`
+      ? `RUNNING BUILD: The Hive v${rt.version}, ${rt.packaged ? 'packaged app' : 'local dev build'}${rt.appPath ? `, from ${rt.appPath}` : ''}. Say this version if asked which one is running, and do not assume behaviour from an older one. A local dev build inherits the launching shell's environment (umask included) where a packaged app does not, so file modes and inherited env can legitimately differ between the two. \`log.jsonl\` records an \`app-start\` event on every launch, which is how you spot a restart or a build switch.`
       : '';
     // Item 11: god could not find the spawn queue. The mechanism has worked since
     // v0.4.4, but nothing told him it existed — the prompt said "spawn" without
@@ -1760,6 +1760,92 @@ export class HiveManager {
     this.writeTasks(next);
     return true;
   }
+  /** Status of every task id as of the last {@link observeTaskCompletions} tick,
+   *  and the hive root that map describes. null = no baseline yet. */
+  private taskStatusSeen: Map<string, string> | null = null;
+  private taskStatusRoot: string | null = null;
+
+  /**
+   * Watch the task ledger for real `…→done` transitions and record each one in
+   * `log.jsonl` as a `task_done` event.
+   *
+   * WHY this exists: `tasks.json` carries no completion timestamp and no record
+   * of WHO closed a card — a card that is `done` today looks identical to one
+   * closed a week ago. And `writeTasks` cannot be the place to notice it: agents
+   * edit `tasks.json` DIRECTLY (PROTOCOL.md tells them to keep their card's
+   * status current), so most closures never pass through this process's writer
+   * at all. Polling the file is the only vantage point that sees every one.
+   *
+   * The event is a FACT, not a summary: `{ kind:'task_done', taskId, title,
+   * assignee, from }` plus `appendLog`'s own `ts`. Nothing is derived, scored or
+   * phrased here — the renderer's legend panel projects these rows, so the log
+   * stays the single source of truth and no second store is introduced.
+   *
+   * BASELINE: the very first tick (and the first tick after the hive root
+   * changes) only records the current statuses and emits nothing. Without that,
+   * every app start would re-announce every card ever closed. A card already
+   * `done` at baseline is therefore never logged — it predates the observer, and
+   * the panel falls back to the ledger for those.
+   *
+   * Best-effort and never throws: an unreadable ledger skips the tick, leaving
+   * the previous baseline untouched.
+   *
+   * @returns the task ids logged on this tick (empty on a baseline tick).
+   */
+  observeTaskCompletions(): string[] {
+    const root = this.root();
+    if (!root) return [];
+    // Read RAW rather than through readJson: readJson folds a parse failure into
+    // its `{ tasks: [] }` fallback, which here would be a lie with teeth. Agents
+    // rewrite tasks.json in place, so a poll can catch the file mid-write; taking
+    // that as "the board is empty" wipes the baseline, and the next good read
+    // then re-announces every card on the board as freshly closed. A failed read
+    // must skip the tick, not redefine history.
+    let list: unknown[];
+    const ledgerPath = join(root, 'tasks.json');
+    if (!existsSync(ledgerPath)) return [];
+    try {
+      const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8')) as { tasks?: unknown };
+      list = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
+    } catch { return []; } // unreadable ledger → skip, keep the last baseline
+
+    // A root switch (config:changeHome) invalidates the old baseline: those ids
+    // describe a DIFFERENT hive, so re-baseline instead of reporting the new
+    // hive's existing dones as fresh closures.
+    const baseline = this.taskStatusRoot === root ? this.taskStatusSeen : null;
+    const next = new Map<string, string>();
+    const fresh: Array<{ id: string; event: Record<string, unknown> }> = [];
+
+    for (const raw of list) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const card = raw as Record<string, unknown>;
+      const id = typeof card.id === 'string' && card.id ? card.id : null;
+      if (!id || next.has(id)) continue; // first card wins on a duplicated id
+      const status = typeof card.status === 'string' ? card.status : 'todo';
+      next.set(id, status);
+      if (status !== 'done' || !baseline) continue;
+      const before = baseline.get(id);
+      if (before === 'done') continue; // already closed — not a transition
+      fresh.push({
+        id,
+        event: {
+          kind: 'task_done',
+          taskId: id,
+          title: typeof card.title === 'string' ? card.title : '',
+          assignee: typeof card.assignee === 'string' ? card.assignee : undefined,
+          // The status it came FROM ('todo'/'doing'/'blocked'), or undefined for a
+          // card that first appeared already done (created and closed inside one tick).
+          from: before
+        }
+      });
+    }
+
+    this.taskStatusSeen = next;
+    this.taskStatusRoot = root;
+    for (const { event } of fresh) this.appendLog(event);
+    return fresh.map((f) => f.id);
+  }
+
   memory(id: string): string {
     const p = join(this.agentDir(id), 'memory.md');
     return existsSync(p) ? readFileSync(p, 'utf8') : '';

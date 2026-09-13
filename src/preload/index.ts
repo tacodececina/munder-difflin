@@ -348,6 +348,10 @@ export interface HarnessConfig {
   /** Opt-in strong keep-alive (prevent-display-sleep). Mirrors main + renderer
    *  HarnessConfig so updateConfig({ strongKeepalive }) is typed across the bridge. */
   strongKeepalive?: boolean;
+  /** Visitor mode — renderer-only screen redaction for over-the-shoulder /
+   *  screen-share viewing. Default OFF. Mirrors main + renderer HarnessConfig
+   *  so updateConfig({ visitorMode }) is typed across the bridge. */
+  visitorMode?: boolean;
   /** Auto-update from GitHub releases (default ON; Settings → General). */
   autoUpdate?: boolean;
   /** Anonymous product analytics (default ON, opt-out; see TELEMETRY.md).

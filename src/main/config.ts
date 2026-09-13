@@ -293,6 +293,20 @@ export interface HarnessConfig {
    *  AC). Default OFF: the honest default is "survive sleep + catch up once on
    *  resume" (see the powerMonitor 'resume' handler), not "stay awake". */
   strongKeepalive?: boolean;
+  /** VISITOR MODE — "someone external is looking at this screen".
+   *
+   *  Purely a RENDERER presentation flag: it seals the operational surfaces
+   *  (terminal output, hive threads, tool traces, git, IDE, memory, the god's
+   *  Command Center, task detail) behind a placeholder and strips the live
+   *  activity text out of the office scene's thought bubbles, leaving the
+   *  office itself — the thing that is actually worth showing — on screen.
+   *
+   *  It changes NOTHING about what agents do, what is written to disk, or what
+   *  crosses IPC; hiding is the whole feature. Default OFF, and it is only ever
+   *  set from the explicit Settings → General toggle — nothing in the app turns
+   *  it on by itself, because a privacy control that arms itself is a control
+   *  the operator cannot reason about. (Mirrored in preload + renderer config.) */
+  visitorMode?: boolean;
   /** Auto-update from GitHub releases (v0.3.4). Default ON. Packaged builds
    *  check on boot + every ~6h, download in the background, and show a
    *  "restart to update" toast — installation is always user-initiated. OFF
@@ -493,6 +507,8 @@ const DEFAULTS: HarnessConfig = {
   missions: [OPS_STANDUP_MISSION],
   notifications: false,
   strongKeepalive: false,
+  // Never on by default, and never inferred: see the field's doc comment.
+  visitorMode: false,
   autoUpdate: true,
   telemetryEnabled: true,
   multiWindow: true,

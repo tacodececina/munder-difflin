@@ -1,5 +1,6 @@
 @import './fonts.css';
 @import './tokens.css';
+@import './layout.css';
 
 *, *::before, *::after { box-sizing: border-box; }
 
@@ -179,6 +180,20 @@ canvas, img, svg { image-rendering: pixelated; image-rendering: crisp-edges; }
 @keyframes cth-pulse {
   0%, 49% { transform: scale(1); }
   50%, 100% { transform: scale(0.7); }
+}
+
+/* Kanban: one-shot wobble + mint highlight when a card lands in DONE.
+   4 discrete stops (0/25/50/75/100%) paired with steps(4, end) in the caller
+   (design/tokens.ts `motion.easeSprite(4)`) so each step lands exactly on a
+   keyframe value — no interpolation blur, same "sprite" convention as
+   cth-pulse above. Elevation on the middle stops reuses --cth-shadow-sm
+   (mirrors design/tokens.ts `elevation.sm`) rather than a bespoke shadow. */
+@keyframes cth-task-done {
+  0%   { transform: translateX(0); box-shadow: inset 0 0 0 1px var(--cth-ink-100); }
+  25%  { transform: translateX(-2px); box-shadow: inset 0 0 0 1px var(--cth-mint), var(--cth-shadow-sm); }
+  50%  { transform: translateX(2px); box-shadow: inset 0 0 0 1px var(--cth-mint), var(--cth-shadow-sm); }
+  75%  { transform: translateX(-1px); box-shadow: inset 0 0 0 1px var(--cth-mint), var(--cth-shadow-sm); }
+  100% { transform: translateX(0); box-shadow: inset 0 0 0 1px var(--cth-ink-100); }
 }
 
 /* Reduce motion */

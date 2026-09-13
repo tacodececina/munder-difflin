@@ -17,7 +17,10 @@ import { EditAgentModal } from './EditAgentModal';
 import { GitTab } from './GitTab';
 import { Icon } from './Icon';
 import { AgentNameEditor } from './AgentNameEditor';
+import { ErrorBoundary } from './ErrorBoundary';
+import { VisitorShield } from './VisitorShield';
 import { useStore, type Agent } from '@/store/store';
+import { isSealed, visitorSafeProject } from '@/store/visitorMode';
 import { usePtyParser } from '@/hooks/usePtyParser';
 
 export interface AgentDetailPanelProps {
@@ -82,6 +85,15 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
   const fullscreenAgentId = useStore(s => s.fullscreenAgentId);
   const sidebarTab = useStore(s => s.sidebarTab);
   const setSidebarTab = useStore(s => s.setSidebarTab);
+  // The header sits OUTSIDE the tab bodies the shield covers, and three things
+  // in it leak: the "open terminal" tooltip spells out the cwd, a failed open
+  // echoes the OS error verbatim (which quotes the path), and the line under
+  // the name is the repo name — the same `project` field AgentCard already
+  // redacts through `visitorSafeProject`, for the same reason (it names the
+  // client, the product, or the unreleased thing). It is one field, so it gets
+  // one policy, applied in both places.
+  const visitorMode = useStore(s => s.visitorMode);
+  const pathsHidden = isSealed('activity', visitorMode);
   const isReal = !!agent.ptyId;
   // While this agent is shown in the fullscreen overlay, the fullscreen view
   // owns the pty (it sizes it to fill the screen). Keeping the embedded terminal
@@ -135,10 +147,13 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
       }}
       noPadding
     >
-      {/* Thin header strip */}
-      <div ref={headerRef} style={{
+      {/* Thin header strip. Vertical padding lives in design/layout.css's
+          `.cth-detail-header` (Phase 2's short-viewport rule) — an inline
+          style on the same property would always win over that media query,
+          so only the horizontal padding stays inline here. */}
+      <div ref={headerRef} className="cth-detail-header" style={{
         display: 'flex', alignItems: 'center', gap: 8,
-        padding: '6px 8px',
+        paddingLeft: 8, paddingRight: 8,
         background: 'var(--cth-cream-100)',
         borderBottom: '1px solid var(--cth-ink-700)',
         flexShrink: 0
@@ -169,7 +184,7 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
             <span style={{
               fontSize: 12, color: 'var(--cth-ink-500)',
               whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-            }}>{agent.project}</span>
+            }}>{visitorSafeProject(agent.project, t('visitorMode.activity'), visitorMode)}</span>
           </div>
         </div>
         <PixelButton variant="secondary" size="sm" onClick={() => setEditOpen(true)}>
@@ -187,7 +202,12 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
         <PixelButton variant="secondary" size="sm" onClick={() => useStore.getState().setIdeOpen(true, agent.id)}>
           <span
             className="cth-tip cth-tip-wrap"
-            data-tip={t('agentDetail.ideTip', { project: agent.project })}
+            /* Sealed, the tip names neither the repo nor the fact that clicking
+               does nothing — App.tsx refuses to mount the IDE overlay while the
+               mode is armed, so the honest tip is the seal notice itself. */
+            data-tip={pathsHidden
+              ? t('visitorMode.sealedIde')
+              : t('agentDetail.ideTip', { project: agent.project })}
             aria-label={t('agentDetail.openIde')}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
           >
@@ -200,7 +220,9 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
               get; the tip names the folder you get it in. */}
           <span
             className="cth-tip cth-tip-wrap"
-            data-tip={t('agentDetail.terminalTip', { cwd: agent.cwd })}
+            data-tip={pathsHidden
+              ? t('visitorMode.pathHidden')
+              : t('agentDetail.terminalTip', { cwd: agent.cwd })}
             aria-label={t('agentDetail.openTerminalAria')}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
           >
@@ -227,7 +249,7 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
           padding: '2px 8px',
           background: 'var(--cth-coral-light)',
           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-        }}>{openTerminalError}</div>
+        }}>{pathsHidden ? t('visitorMode.errorHidden') : openTerminalError}</div>
       )}
 
       {/* #7C — operator control (pause / halt / steer) for live agents */}
@@ -238,8 +260,13 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
 
       {/* Active tab body — fills remaining space */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+        {/* Visitor mode seals each tab body individually rather than the whole
+            `<div>` above: the tab strip stays usable and stays honest about
+            which surface you are on, and the seal copy can name the specific
+            thing being withheld instead of a blanket "hidden". */}
         {sidebarTab === 'terminal' && (
-          isReal && agent.ptyId ? (
+          <VisitorShield surface="terminal" label={t('visitorMode.sealedTerminal')}>
+          {isReal && agent.ptyId ? (
             isFullscreenedHere ? (
               <EmptyTab title={t('agentDetail.inFullscreen')}>
                 {t('agentDetail.fullscreenDesc')}
@@ -247,21 +274,26 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
             ) : (
             <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
               <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-                <PtyTerminalView
-                  key={terminalInstanceKey(agent.ptyId, agent.terminalGeneration)}
-                  ptyId={agent.ptyId}
-                  onStreamData={onPtyStream}
-                  onUserPrompt={(t) => {
-                    updateAgent(agent.id, { lastPrompt: t });
-                    if (t.trim().toLowerCase() === '/clear') {
-                      updateAgent(agent.id, { contextTokens: 0, contextLimit: undefined, progress: 0 });
-                    }
-                    void window.cth.historyAdd({ agentId: agent.id, cwd: agent.cwd, text: t });
-                  }}
-                  onToggleFullscreen={() => setFullscreen(agent.id)}
-                  fullscreen={false}
-                  embedded
-                />
+                {/* A boundary PER agent terminal (keyed the same as the terminal
+                    itself), not one shared across every agent — a crash on one
+                    agent's pty view must not blank out the rest of the roster. */}
+                <ErrorBoundary key={terminalInstanceKey(agent.ptyId, agent.terminalGeneration)}>
+                  <PtyTerminalView
+                    key={terminalInstanceKey(agent.ptyId, agent.terminalGeneration)}
+                    ptyId={agent.ptyId}
+                    onStreamData={onPtyStream}
+                    onUserPrompt={(t) => {
+                      updateAgent(agent.id, { lastPrompt: t });
+                      if (t.trim().toLowerCase() === '/clear') {
+                        updateAgent(agent.id, { contextTokens: 0, contextLimit: undefined, progress: 0 });
+                      }
+                      void window.cth.historyAdd({ agentId: agent.id, cwd: agent.cwd, text: t });
+                    }}
+                    onToggleFullscreen={() => setFullscreen(agent.id)}
+                    fullscreen={false}
+                    embedded
+                  />
+                </ErrorBoundary>
               </div>
               <MessageQueueComposer agent={agent} />
             </div>
@@ -270,24 +302,33 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
             <EmptyTab title={t('agentDetail.noPty')}>
               {t('agentDetail.noPtyDesc')}
             </EmptyTab>
-          )
+          )}
+          </VisitorShield>
         )}
 
         {sidebarTab === 'git' && (
-          <GitTab cwd={agent.cwd} />
+          <VisitorShield surface="git" label={t('visitorMode.sealedGit')}>
+            <GitTab cwd={agent.cwd} />
+          </VisitorShield>
         )}
 
         {sidebarTab === 'messages' && (
-          <ThreadsPanel agentId={agent.id} />
+          <VisitorShield surface="threads" label={t('visitorMode.sealedThreads')}>
+            <ThreadsPanel agentId={agent.id} />
+          </VisitorShield>
         )}
 
         {sidebarTab === 'traces' && (
-          <ToolWaterfall agentId={agent.id} />
+          <VisitorShield surface="traces" label={t('visitorMode.sealedTraces')}>
+            <ToolWaterfall agentId={agent.id} />
+          </VisitorShield>
         )}
       </div>
 
       {editOpen && (
-        <EditAgentModal agent={agent} onClose={() => setEditOpen(false)} />
+        <ErrorBoundary onReset={() => setEditOpen(false)}>
+          <EditAgentModal agent={agent} onClose={() => setEditOpen(false)} />
+        </ErrorBoundary>
       )}
     </PixelPanel>
   );

@@ -88,6 +88,12 @@ export interface HarnessConfig {
    *  while away (battery cost; best on AC). Default off = survive + catch up on
    *  resume. Mirrors the main-process field (src/main/config.ts). */
   strongKeepalive?: boolean;
+  /** Visitor mode — seals the operational surfaces (terminal, threads, traces,
+   *  git, IDE, memory, Command Center, task detail) and strips activity text
+   *  out of the office scene, so an external viewer watching this screen sees
+   *  the office and nothing else. Default OFF; only the Settings → General
+   *  toggle ever sets it. Mirrors src/main/config.ts. */
+  visitorMode?: boolean;
   /** Auto-update from GitHub releases (default ON; Settings → General). */
   autoUpdate?: boolean;
   /** Anonymous product analytics (default ON, opt-out; see TELEMETRY.md).

@@ -1,12 +1,14 @@
 import { useEffect, useRef } from 'react';
-import { paintCastPortrait, type OfficeCharacterName } from '@/scene/office/cast';
+import { paintCastPortrait } from '@/scene/office/cast';
 import { PORTRAIT_W, PORTRAIT_H } from '@/scene/office/portraitArt';
 
 const FRAME_W = PORTRAIT_W;
 const FRAME_H = PORTRAIT_H;
 
 export interface SpritePortraitProps {
-  character: OfficeCharacterName;
+  /** A fixed `OfficeCharacterName`, or a custom character id (`custom:<uuid>`)
+   *  from the custom-character registry — paintCastPortrait resolves either. */
+  character: string;
   /** Pixels per source pixel. Whole numbers are exact; half-steps (1.5, 2.5)
    *  double every other row, which pixel art survives. The blit runs with
    *  smoothing off, so nothing here is ever interpolated. */

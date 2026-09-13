@@ -81,6 +81,40 @@
   /* Hard drop shadow — no blur, softer than before */
   --cth-shadow-hard: 3px 3px 0 rgba(26, 19, 32, 0.14);
 
+  /* Elevation scale — sm/lg round --cth-shadow-hard (kept as-is, has callers)
+     out into a proper 3-step scale. Solid offset, zero blur, always — that is
+     the pixel-art identity; never swap in a soft/blurred shadow here.
+     Mirrors design/tokens.ts `elevation`. */
+  --cth-shadow-sm: 2px 2px 0 rgba(26, 19, 32, 0.14);
+  --cth-shadow-lg: 5px 5px 0 rgba(26, 19, 32, 0.18);
+
+  /* Border/frame widths — the "chunky console" framing already used by
+     PixelPanel's variants. Mirrors design/tokens.ts `border`. */
+  --cth-border-hairline: 1px;
+  --cth-border-chunky: 3px;
+
+  /* Motion — ms durations for UI transitions, plus stepped easings for
+     frame-by-frame "sprite" animation alongside standard UI easings.
+     Mirrors design/tokens.ts `motion`. */
+  --cth-duration-fast: 90ms;
+  --cth-duration-base: 180ms;
+  --cth-duration-slow: 300ms;
+  --cth-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --cth-ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --cth-ease-sprite-4: steps(4, end);
+  --cth-ease-sprite-8: steps(8, end);
+
+  /* Z-index scale — named tiers for new overlays. Existing inline zIndex
+     values across the app were audited (grep) and range from ~40 (in-scene
+     popovers) to 1000 (the quit-warning dialog — intentionally above every
+     modal) and 9999 (the completion toast); these anchor the common tiers
+     without renumbering anything already shipped. Mirrors design/tokens.ts
+     `zIndex`. */
+  --cth-z-panel: 40;
+  --cth-z-overlay: 200;
+  --cth-z-modal: 300;
+  --cth-z-toast: 9999;
+
   /* Panel borders — v0.3.4: single hairlines. The old three-layer package
      boxed every surface in thick chrome; structure now comes from surface
      contrast, not outlines. Dialogs keep one slightly stronger line. */
@@ -170,4 +204,6 @@
 
   /* Hard shadow reads as depth, not void */
   --cth-shadow-hard: 4px 4px 0 rgba(0, 0, 0, 0.45);
+  --cth-shadow-sm: 3px 3px 0 rgba(0, 0, 0, 0.4);
+  --cth-shadow-lg: 6px 6px 0 rgba(0, 0, 0, 0.5);
 }

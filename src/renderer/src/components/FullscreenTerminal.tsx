@@ -9,6 +9,7 @@ import { MessageQueueComposer } from './MessageQueueComposer';
 import { AgentControlStrip } from './AgentControlStrip';
 import { CommandCenterPanel } from './CommandCenterPanel';
 import { EditAgentModal } from './EditAgentModal';
+import { ErrorBoundary } from './ErrorBoundary';
 import { Icon } from './Icon';
 import { SpritePortrait } from './SpritePortrait';
 import { PORTRAIT_W } from '@/scene/office/portraitArt';
@@ -156,6 +157,7 @@ export function FullscreenTerminal({ config }: FullscreenTerminalProps) {
   const select = useStore(s => s.select);
   const setAddAgentOpen = useStore(s => s.setAddAgentOpen);
   const addAgentOpen = useStore(s => s.addAgentOpen);
+  const visitorMode = useStore(s => s.visitorMode);
   // Owned HERE, not in Header, purely so the Esc handler below can see it:
   // Esc closing the dialog must not also throw you out of focus mode.
   const [editAgentOpen, setEditAgentOpen] = useState(false);
@@ -279,6 +281,16 @@ export function FullscreenTerminal({ config }: FullscreenTerminalProps) {
 
   if (!agent || !agent.ptyId) return null;
 
+  // VISITOR MODE — the one surface that yields entirely instead of showing a
+  // placeholder. This overlay is a full-bleed window over the office whose only
+  // content is pty output (or, for the god, the Command Center); sealed, it
+  // would be a screen-sized "hidden" card sitting on top of the exact thing the
+  // mode exists to keep showing. So it stands down and hands the window back to
+  // the floor. Focus-mode state is deliberately left alone — `fullscreenAgentId`
+  // and the persisted preference are untouched — so turning the mode back off
+  // brings this view back up on the same agent, without a re-click.
+  if (visitorMode) return null;
+
   // No kill button here on purpose. Killing an agent is a destructive action
   // that belongs with the rest of its lifecycle controls in the docked panel;
   // sitting inches from the tab you click to switch agents, it was only ever a
@@ -308,7 +320,7 @@ export function FullscreenTerminal({ config }: FullscreenTerminalProps) {
         <span style={{
           fontFamily: 'var(--cth-font-display)', fontSize: 12, lineHeight: '20px',
           color: 'var(--cth-ink-900)'
-        }}>MUNDER DIFFLIN · FOCUS MODE</span>
+        }}>THE HIVE · FOCUS MODE</span>
         {/* Same top-right controls as the main title bar — fullscreen covers
             it, so theme / exit-fullscreen / IDE must live here too. */}
         <div className="cth-titlebar-nodrag" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -578,7 +590,9 @@ export function FullscreenTerminal({ config }: FullscreenTerminalProps) {
             <>
               <Header agent={agent} onEdit={() => setEditAgentOpen(true)} />
               {editAgentOpen && (
-                <EditAgentModal agent={agent} onClose={() => setEditAgentOpen(false)} />
+                <ErrorBoundary onReset={() => setEditAgentOpen(false)}>
+                  <EditAgentModal agent={agent} onClose={() => setEditAgentOpen(false)} />
+                </ErrorBoundary>
               )}
 
               {/* #7C — pause / halt / steer. These only existed in the docked
@@ -587,20 +601,24 @@ export function FullscreenTerminal({ config }: FullscreenTerminalProps) {
 
               <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
                 <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-                  <PtyTerminalView
-                    key={terminalInstanceKey(agent.ptyId, agent.terminalGeneration)}
-                    ptyId={agent.ptyId}
-                    onStreamData={parser}
-                    onUserPrompt={(t) => {
-                      updateAgent(agent.id, { lastPrompt: t });
-                      if (t.trim().toLowerCase() === '/clear') {
-                        updateAgent(agent.id, { contextTokens: 0, contextLimit: undefined, progress: 0 });
-                      }
-                      void window.cth.historyAdd({ agentId: agent.id, cwd: agent.cwd, text: t });
-                    }}
-                    onToggleFullscreen={() => setFullscreen(null)}
-                    fullscreen
-                  />
+                  {/* Per-agent boundary — see AgentDetailPanel's copy of this
+                      same comment for why it's keyed and why it isn't shared. */}
+                  <ErrorBoundary key={terminalInstanceKey(agent.ptyId, agent.terminalGeneration)}>
+                    <PtyTerminalView
+                      key={terminalInstanceKey(agent.ptyId, agent.terminalGeneration)}
+                      ptyId={agent.ptyId}
+                      onStreamData={parser}
+                      onUserPrompt={(t) => {
+                        updateAgent(agent.id, { lastPrompt: t });
+                        if (t.trim().toLowerCase() === '/clear') {
+                          updateAgent(agent.id, { contextTokens: 0, contextLimit: undefined, progress: 0 });
+                        }
+                        void window.cth.historyAdd({ agentId: agent.id, cwd: agent.cwd, text: t });
+                      }}
+                      onToggleFullscreen={() => setFullscreen(null)}
+                      fullscreen
+                    />
+                  </ErrorBoundary>
                 </div>
                 <MessageQueueComposer agent={agent} />
               </div>

@@ -1,10 +1,12 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { PixelPanel } from './PixelPanel';
+import { useTranslation } from 'react-i18next';
+import { PixelModal } from './PixelModal';
+import { VisitorShield } from './VisitorShield';
 import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
 import { ProviderLogo } from './ProviderLogo';
 import { useStore, type Agent } from '@/store/store';
-import { OFFICE_CAST, type OfficeCharacterName } from '@/scene/office/cast';
+import { OFFICE_CAST } from '@/scene/office/cast';
 import { type AccentColorName } from '@/design/tokens';
 import {
   type AgentProvider,
@@ -30,11 +32,17 @@ export interface EditAgentModalProps {
  * via updateAgent (engine changes apply on the next restart).
  */
 export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
+  const { t } = useTranslation();
   const updateAgent = useStore((s) => s.updateAgent);
   const [config, setConfig] = useState<HarnessConfig | null>(null);
 
   const [name, setName] = useState(agent.name);
-  const [character, setCharacter] = useState<OfficeCharacterName>(agent.character);
+  // Plain string: agent.character may be a fixed OfficeCharacterName or a
+  // custom character id (custom:<uuid>). This modal's own picker below only
+  // offers the fixed 15 (the custom-character builder lives in AddAgentModal),
+  // so an agent already on a custom character simply shows no tile selected —
+  // switching away is still possible, editing the custom recipe from here is not.
+  const [character, setCharacter] = useState<string>(agent.character);
   const [accent, setAccent] = useState<AccentColorName>(agent.accent);
   const [provider, setProvider] = useState<AgentProvider>(
     inferAgentProvider(agent.command, agent.provider)
@@ -92,20 +100,21 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
   };
 
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed', inset: 0,
-        background: 'rgba(26, 19, 32, 0.6)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        zIndex: 500
-      }}
+    // Same box as Add Agent (940 / 95vw / 86vh). They are the two halves of
+    // one job — describe an agent — and a tall narrow dialog next to a wide
+    // one reads as two unrelated screens.
+    // zIndex/backdrop match the pre-migration hand-rolled wrapper exactly (500 /
+    // 0.6 alpha) — this dialog used to sit above the default modal tier.
+    <PixelModal
+      onClose={onClose}
+      title="EDIT AGENT"
+      width={940}
+      maxWidth="95vw"
+      zIndex={500}
+      backdropColor="rgba(26, 19, 32, 0.6)"
+      noPadding
+      panelStyle={{ padding: 16 }}
     >
-      {/* Same box as Add Agent (940 / 95vw / 86vh). They are the two halves of
-          one job — describe an agent — and a tall narrow dialog next to a wide
-          one reads as two unrelated screens. */}
-      <div onClick={(e) => e.stopPropagation()} style={{ width: 940, maxWidth: '95vw' }}>
-        <PixelPanel variant="dialog" title="EDIT AGENT" style={{ padding: 16 }} noPadding>
           <div style={{
             display: 'flex', flexDirection: 'column', gap: 14,
             padding: 16, maxHeight: '86vh', overflowY: 'auto'
@@ -258,6 +267,13 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
               </div>
               <div style={{ minWidth: 0 }}>
             <Section label="Briefing" hint="description · goal">
+              {/* VISITOR MODE — identity and engine are chrome (a name, a face,
+                  which CLI), but the briefing is operator-authored free text
+                  about what the work IS: the same class as the private note on
+                  AgentCard, which the mode hides for exactly this reason. The
+                  modal itself stays open and editable above; only these two
+                  fields are sealed, so the seal costs nothing but the leak. */}
+              <VisitorShield surface="activity" label={t('visitorMode.sealedBriefing')}>
               <Row label="Description">
                 <input
                   value={description}
@@ -276,6 +292,7 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
                   style={{ ...inputStyle, fontFamily: 'var(--cth-font-ui)', resize: 'vertical', minHeight: 200 }}
                 />
               </Row>
+              </VisitorShield>
             </Section>
               </div>
             </div>
@@ -286,9 +303,7 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
               <PixelButton variant="primary" size="md" onClick={save}>save changes</PixelButton>
             </div>
           </div>
-        </PixelPanel>
-      </div>
-    </div>
+    </PixelModal>
   );
 }
 

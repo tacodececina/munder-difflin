@@ -165,11 +165,11 @@
     "reportProblem": "反馈问题",
     "fullChangelog": "完整更新日志 →",
     "announcement": "公告",
-    "proLaunch": "v0.5.0 与 Munder Difflin Pro 一同发布。",
+    "proLaunch": "v0.5.0 与 The Hive Pro 一同发布。",
     "proCommunityFree": "社区版保持免费、开源，并持续获得更新。",
     "proParagraph": "Pro 版将带来新的功能与集成，全年持续上新；它领先于社区版，面向想要充分发挥编码智能体与智能体工具链潜力的重度用户。Pro 路线图还包括移动端应用。",
     "foundersWallTitle": "在 Founders' Wall 上吗？",
-    "foundersWallBody": "免费获得一个月的 Munder Difflin Pro，此后年度套餐享 5 折。仅限前 100 位上榜用户。",
+    "foundersWallBody": "免费获得一个月的 The Hive Pro，此后年度套餐享 5 折。仅限前 100 位上榜用户。",
     "seeTheWall": "查看榜单",
     "joinDiscord": "加入 Discord"
   },
@@ -191,7 +191,16 @@
     "stillWorkingPlural": "⚠ {{count}} 个智能体仍在工作。",
     "cantUndo": "此操作无法撤销。",
     "switching": "切换中…",
-    "deleteSwitch": "删除 {{count}} 个并切换"
+    "deleteSwitch": "删除 {{count}} 个并切换",
+    "import": {
+      "action": "导入主题…",
+      "validating": "验证中…",
+      "badge": "已导入",
+      "remove": "移除已导入的主题",
+      "errorsTitle": "无法导入此主题",
+      "errorsIntro": "请修复以下问题后重试：",
+      "success": "已导入 \"{{label}}\"——在上方选择即可切换。"
+    }
   },
   "settings": {
     "title": "设置",
@@ -230,6 +239,8 @@
       "keepAwakeDesc": "阻止显示屏休眠，让计划任务和终端准时触发。更耗电——最好接电源。",
       "simpleMode": "用通俗方式解释",
       "simpleModeDesc": "智能体用日常语言而不是工程术语向你汇报。",
+      "visitorMode": "访客模式",
+      "visitorModeDesc": "用于团队以外的人能看到这块屏幕的场合。会遮蔽终端、蜂巢内部消息、工具追踪、git、IDE、记忆和指挥中心，并从办公室气泡中去掉文件名。办公室本身照常运转。默认关闭，不会自行开启。",
       "notifications": "通知",
       "desktopNotifications": "桌面通知",
       "desktopNotificationsDesc": "智能体完成或需要你输入时弹出系统通知。",
@@ -240,6 +251,8 @@
       "autoUpdateDesc": "后台检查 GitHub 发布并下载更新；由你选择何时重启。绝不会自行重启。",
       "telemetry": "匿名使用统计",
       "telemetryDesc": "少量匿名事件（打开应用、生成智能体、使用功能）——绝不包含提示词、代码、路径或智能体输出。完整清单见 TELEMETRY.md。",
+      "officeChatter": "办公室闲聊（实验性）",
+      "officeChatterDesc": "休息室对话由模型根据每个智能体的性格、关系历史和当前状态实时撰写，取代固定台词。使用简短的隐藏 Claude 会话（限速为每小时数次）。楼层上的金色星标表示生成的对话。",
       "language": "语言",
       "languageDesc": "选择应用界面的语言。默认英文。",
       "dangerZone": "危险区",
@@ -390,6 +403,7 @@
       "terminal": "终端",
       "floor": "监控",
       "tasks": "任务",
+      "legend": "传奇",
       "human": "问我",
       "triggers": "触发器",
       "history": "历史",
@@ -505,6 +519,8 @@
     "name": "名字",
     "namePlaceholder": "Ada",
     "character": "角色",
+    "createCharacter": "+ 创建角色",
+    "createCharacterTitle": "从零开始构建自定义角色",
     "color": "颜色",
     "project": "项目",
     "pickProject": "选择项目，或添加新项目：",
@@ -516,6 +532,27 @@
     "saveAsProject": "另存为项目",
     "saveAsProjectTitle": "把这个文件夹保存到你的项目里，下次一键选择",
     "gitIsolation": "Git 隔离（独立工作树）",
+    "externalHive": "外部托管（无本地 hive）",
+    "externalHiveTitle": "该智能体的记忆和消息路由由外部工具（例如 Hermes）管理，而非本应用自身的 hive。将为该智能体禁用本地记忆/收件箱和 GOD 路由。",
+    "runsOn": "在哪里运行？",
+    "runsOnLocal": "本机（本地）",
+    "runsOnRemoteHint": "在 {{name}}（{{host}}:{{port}}）上运行。下面的每个路径都是该机器上的路径。",
+    "pairRemote": "+ 配对远程环境",
+    "pairHint": "在目标机器上启动远程守护进程——它会打印一个 6 位配对码。请在 2 分钟内在此输入。",
+    "pairName": "名称",
+    "pairNamePlaceholder": "studio-mac",
+    "pairHost": "主机或 IP",
+    "pairHostPlaceholder": "100.x.y.z（Tailscale 地址）",
+    "pairPort": "端口",
+    "pairCode": "配对码",
+    "pairCodePlaceholder": "ABC123",
+    "pairSubmit": "配对",
+    "pairing": "配对中…",
+    "unpairRemote": "忘记 {{name}}。不会影响那台机器上的任何内容——只是本应用连接它的能力。",
+    "remotePath": "远程机器上的文件夹",
+    "remotePathPlaceholder": "/home/you/project — 远程机器上的路径",
+    "remoteNoBrowse": "请手动输入：文件夹选择器只能浏览本机。",
+    "errPairFields": "名称、主机、端口和配对码均为必填项。",
     "resumeSession": "恢复会话 ID（可选）",
     "resumePlaceholder": "粘贴 Claude 会话 ID 以继续其对话",
     "folderFromSession": "已根据会话设置文件夹：{{path}}",
@@ -574,11 +611,140 @@
     "errFolder": "请先选择文件夹",
     "errCommand": "必须填写命令",
     "hireProgress": "hire 第 {{current}} / {{total}} 项",
-    "skipHire": "跳过 hire"
+    "skipHire": "跳过 hire",
+    "teamTemplatesDesc": "招聘模板可以一次性预配置一个小团队——选一个，然后像审核导入的 hire 一样，逐个确认并生成每位队员。",
+    "showTeamTemplates": "招聘一个团队…",
+    "hideTeamTemplates": "隐藏团队模板",
+    "useTeamTemplate": "使用这个团队",
+    "teamTemplates": {
+      "shipIt": {
+        "label": "交付小队",
+        "description": "架构师 + 实现者 + 审核者——一个精简的功能团队。"
+      },
+      "docsQa": {
+        "label": "文档与测试搭档",
+        "description": "撰写者 + 测试——让文档可信、上线有人把关。"
+      }
+    }
+  },
+  "characterBuilder": {
+    "title": "创建角色",
+    "nameLabel": "名称",
+    "namePlaceholder": "你的角色名称",
+    "fallbackName": "自定义",
+    "tabs": {
+      "face": "面部",
+      "hair": "头发",
+      "clothing": "服装",
+      "accessory": "配饰"
+    },
+    "portraitPreview": "头像预览",
+    "walkPreview": "行走预览",
+    "randomize": "随机生成",
+    "save": "保存角色",
+    "skin": "肤色",
+    "browLabel": "眉毛",
+    "mouthLabel": "嘴型",
+    "facialHair": "胡须",
+    "facialNone": "无",
+    "blush": "腮红",
+    "lashes": "大眼睛（睫毛）",
+    "glasses": "眼镜",
+    "glassesNone": "无",
+    "heavy": "较壮体型",
+    "hairStyle": "发型",
+    "hairColor": "发色",
+    "hairPart": "分线",
+    "hairPartLeft": "左",
+    "hairPartRight": "右",
+    "hairRecede": "发际线后移",
+    "hairLength": "长度",
+    "hairVolume": "蓬松度",
+    "clothCut": "款式",
+    "primaryColor": "主色",
+    "secondaryColor": "副色",
+    "useSecondaryColor": "使用副色",
+    "wearTie": "系领带",
+    "overridePants": "自定义裤子颜色",
+    "accessory": "配饰",
+    "accessoryNone": "无",
+    "accessoryColor": "配饰颜色",
+    "browOptions": {
+      "flat": "平直",
+      "angry": "愤怒",
+      "raised": "上扬",
+      "soft": "柔和"
+    },
+    "mouthOptions": {
+      "neutral": "中性",
+      "smile": "微笑",
+      "frown": "皱眉",
+      "grin": "露齿笑"
+    },
+    "facialOptions": {
+      "mustache": "胡子",
+      "mustacheSm": "细胡子",
+      "stubble": "胡茬",
+      "goatee": "山羊胡",
+      "fullbeard": "络腮胡"
+    },
+    "glassesOptions": {
+      "round": "圆框",
+      "square": "方框",
+      "sun": "墨镜"
+    },
+    "hairStyleNames": {
+      "styleShort": "短发",
+      "styleFloppy": "蓬松",
+      "styleFrame": "垂发",
+      "styleBun": "发髻",
+      "styleCurly": "卷发",
+      "styleMessy": "凌乱",
+      "styleRecede": "后移",
+      "styleSpiky": "刺猬",
+      "styleBald": "光头"
+    },
+    "clothNames": {
+      "suit": "西装",
+      "dressshirt": "衬衫",
+      "polo": "polo衫",
+      "blouse": "女式衬衫",
+      "cardigan": "开衫",
+      "sweater": "毛衣",
+      "tshirt": "T恤",
+      "hoodie": "连帽衫",
+      "blazer": "西装外套"
+    },
+    "skinNames": {
+      "light": "浅色",
+      "tan": "小麦色",
+      "brown": "棕色",
+      "dark": "深色"
+    },
+    "accessoryOptions": {
+      "cap": "鸭舌帽",
+      "headphones": "耳机",
+      "earrings": "耳环",
+      "scarf": "围巾",
+      "lanyard": "工作证挂绳",
+      "watch": "手表"
+    }
+  },
+  "dundies": {
+    "title": "DUNDIES 颁奖夜",
+    "subtitle": "在办公室打烊之前，先看看今天的收获。",
+    "loadingTasks": "正在清点任务板…",
+    "tasksClosed": "今天完成了 {{count}} 个任务",
+    "tasksOpen": "还有 {{count}} 个未完成",
+    "activeTimeHeading": "在岗时长",
+    "noAgents": "今天没有人打卡——安静的一天。",
+    "joke": "没有奖杯，没有彩带——只有踏实的工作。明天见。",
+    "notYet": "还不行——先回去干活",
+    "startClosing": "可以了——开始打烊流程"
   },
   "onboarding": {
     "titles": {
-      "persona": "欢迎来到 MUNDER DIFFLIN",
+      "persona": "欢迎来到 THE HIVE",
       "welcome": "认识你的办公室",
       "home": "第 1 步，共 4 步 · HARNESS 主目录",
       "homePlain": "第 1 步，共 4 步 · 为应用找一个家",
@@ -591,7 +757,7 @@
     },
     "persona": {
       "headline": "一个 24/7 工作的你",
-      "body": "Munder Difflin 把你在用的 CLI 智能体变成你的克隆——一个经营着一屋子长期运行智能体、在你离开时持续工作的存在。它管理着围绕它们的一切：上下文、记忆、任务、触发器、环境、文件和集成。",
+      "body": "The Hive 把你在用的 CLI 智能体变成你的克隆——一个经营着一屋子长期运行智能体、在你离开时持续工作的存在。它管理着围绕它们的一切：上下文、记忆、任务、触发器、环境、文件和集成。",
       "bodyLocal": " 一切都在本机运行。",
       "ask": "首先——你是谁？（我们会据此定制设置）",
       "technicalTitle": "我是技术人员",
@@ -690,7 +856,7 @@
       "openAtLogin": "开机启动",
       "openAtLoginDesc": "重启后自动重新启动 harness，让计划任务自行恢复。无提示——立即生效。",
       "shareStats": "共享匿名使用统计",
-      "shareStatsDesc": "少量匿名事件（打开应用、生成智能体、使用功能），用于改进 Munder Difflin——绝不包含提示词、代码、文件路径或智能体输出。完整清单见 TELEMETRY.md；可随时在设置中更改。",
+      "shareStatsDesc": "少量匿名事件（打开应用、生成智能体、使用功能），用于改进 The Hive——绝不包含提示词、代码、文件路径或智能体输出。完整清单见 TELEMETRY.md；可随时在设置中更改。",
       "stayAwake": "接电源时保持唤醒（手动）",
       "stayAwakeDesc": "macOS 只允许你自己设置这一项。在「电池」→「选项」中，开启「防止显示器关闭时自动进入睡眠」（接电源适配器时），这样显示器休眠时定时器也能继续触发。没有防休眠设置的话 Mac 仍会真正休眠——工作会保存并在唤醒后补上。",
       "openBattery": "打开电池设置",
@@ -826,7 +992,7 @@
     "localEndpoint": "本地端点 · 默认模型（按引擎）",
     "defaultModelPlaceholder": "默认模型（提供商/模型）",
     "runningOpenModels": "要跑开源模型？分步指南：",
-    "runOnOpenModels": "在开源模型上运行 Munder Difflin",
+    "runOnOpenModels": "在开源模型上运行 The Hive",
     "setUpMacMini": "在 Mac Mini 上配置",
     "autoModeCaveat": "⚠ 在自动模式下，这些引擎以完整的文件系统 + shell 访问权限运行（无沙箱）——就像 Claude 的绕过模式。把自动模式关掉（通用页）即可让它们先询问。与真实模型调用的端到端实测仍在等待你的密钥 / 本地 LLM。"
   },
@@ -876,7 +1042,7 @@
     "downloadingHeadline": "正在下载 v{{version}}",
     "downloadingDetail": "已完成 {{percent}}%。你可以继续工作；重启由你自己决定。",
     "downloadedHeadline": "v{{version}} 已就绪，可安装",
-    "downloadedDetail": "重启 Munder Difflin 以完成从 v{{v}} 的更新。",
+    "downloadedDetail": "重启 The Hive 以完成从 v{{v}} 的更新。",
     "restartBtn": "重启以更新",
     "manualDetail": "此安装无法自行更新——请从发布页面下载。",
     "manualDetailReason": "此安装无法自行更新（{{reason}}）——请从发布页面下载。",
@@ -903,7 +1069,7 @@
     "webhooks": "Webhook",
     "webhooksBlurb": "让外部系统把工作投进来。",
     "organisation": "组织",
-    "organisationBlurb": "让队友的 Munder Difflin 给你的发消息。"
+    "organisationBlurb": "让队友的 The Hive 给你的发消息。"
   },
   "orgSection": {
     "acceptMessages": "接受来自你组织的消息",
@@ -1291,6 +1457,20 @@
     "assign": "分配",
     "priority": "优先级 {{level}}/5"
   },
+  "legend": {
+    "count": "{{count}} 项战绩",
+    "longest": "最长连击 ×{{count}}",
+    "hint": "由真实完成的工作写成——这里没有虚构",
+    "empty": "墙上还空着",
+    "emptyHint": "这层楼自己书写传奇。完成一项真实任务，它就会出现在这里，连同完成者与时间。",
+    "by": "由 {{name}} 完成",
+    "unassigned": "无人认领的完成",
+    "undated": "在日志开始记录之前完成",
+    "first": "首次",
+    "firstTitle": "这层楼完成的第一项任务",
+    "streak": "×{{count}} 连击",
+    "streakTitle": "{{name}} 连续完成 {{count}} 项"
+  },
   "queueComposer": {
     "recording": "● 录音中——点击停止转写",
     "transcribing": "转写中…",
@@ -1400,5 +1580,34 @@
     "viewSource": "查看源码",
     "loading": "正在加载图片…",
     "decodeFailed": "无法解码此图片——文件可能已损坏或扩展名有误"
+  },
+  "errorBoundary": {
+    "title": "出现问题",
+    "description": "The Hive 的这一部分遇到了意外错误，已停止渲染。应用的其余部分应仍可正常使用——你可以在下方重试。",
+    "showDetails": "显示技术细节",
+    "copyError": "复制错误",
+    "copied": "已复制！",
+    "retry": "重试"
+  },
+  "appShell": {
+    "closeDetail": "关闭面板",
+    "openDetail": "打开代理面板"
+  },
+  "visitorMode": {
+    "badge": "访客模式",
+    "badgeTip": "访客模式已开启 — 运营面板已隐藏。可在设置 → 通用中关闭。",
+    "sealed": "对访客隐藏",
+    "sealedGeneric": "访客模式开启期间，此面板已隐藏。",
+    "sealedHint": "在设置 → 通用中关闭访客模式即可恢复。",
+    "sealedTerminal": "访客模式开启期间，终端输出已隐藏。",
+    "sealedThreads": "访客模式开启期间，蜂巢内部消息已隐藏。",
+    "sealedTraces": "访客模式开启期间，工具追踪已隐藏。",
+    "sealedGit": "访客模式开启期间，仓库活动已隐藏。",
+    "sealedCommandCenter": "访客模式开启期间，指挥中心已隐藏。",
+    "sealedIde": "访客模式开启期间，IDE 已隐藏。",
+    "sealedBriefing": "访客模式开启期间，该智能体的任务简介已隐藏。",
+    "activity": "工作中",
+    "pathHidden": "访客模式开启期间，文件夹已隐藏",
+    "errorHidden": "操作失败 — 访客模式开启期间，详情已隐藏。"
   }
 }

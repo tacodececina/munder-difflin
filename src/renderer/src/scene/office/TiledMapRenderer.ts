@@ -1,56 +1,39 @@
 import { Container, Sprite, Texture, Rectangle } from 'pixi.js';
+import {
+  TILE_ID_MASK,
+  parseCollisionGrid,
+  parseSpawnPoints,
+  markWalkableSpawnPoints,
+  parseZones,
+  resolveTilesetIndex,
+  findLayer as findLayerPure,
+  WALKABLE_SPAWN_PREFIXES,
+  type TiledMap,
+  type TiledLayer,
+  type TiledObject,
+  type TiledTilesetRef,
+  type ZoneRect,
+  type Point,
+} from './tiledCollision';
 
 // Trimmed port of shahar061/the-office (office/engine/TiledMapRenderer.ts):
 // renders floor/walls/furniture tile layers and parses collision, spawn-points
 // and zones. Interactive-object / war-room / monitor-glow extraction is dropped
 // (we render every tile statically), so no tiles ever go missing.
+//
+// The collision/spawn-point/zone PARSING is pure logic with no pixi.js
+// dependency — it lives in ./tiledCollision so the theme-bundle validator
+// (Phase 4) can reuse the exact same rules without importing pixi.js. This
+// class re-exports those types below for every existing importer
+// (themeLoader.ts, DeskScreen.ts, Character.ts, OfficeFloor.tsx).
+
+export type { TiledMap, TiledLayer, TiledObject, TiledTilesetRef, ZoneRect, Point };
 
 const FLIPPED_H_FLAG = 0x80000000;
 const FLIPPED_V_FLAG = 0x40000000;
 const FLIPPED_D_FLAG = 0x20000000;
-const TILE_ID_MASK = 0x1fffffff;
-
-export interface TiledMap {
-  width: number;
-  height: number;
-  tilewidth: number;
-  tileheight: number;
-  layers: TiledLayer[];
-  tilesets: TiledTilesetRef[];
-}
-
-export interface TiledLayer {
-  name: string;
-  type: 'tilelayer' | 'objectgroup';
-  data?: number[];
-  objects?: TiledObject[];
-}
-
-export interface TiledObject {
-  name: string;
-  x: number;
-  y: number;
-  width?: number;
-  height?: number;
-}
-
-export interface TiledTilesetRef {
-  firstgid: number;
-  source?: string;
-  image?: string;
-  columns?: number;
-  tilewidth?: number;
-  tileheight?: number;
-  tilecount?: number;
-}
-
-export interface ZoneRect { x: number; y: number; width: number; height: number; }
-export interface Point { x: number; y: number; }
 
 const TILE_LAYERS = ['floor', 'walls', 'furniture-below', 'furniture-above'] as const;
-const COLLISION_LAYER = 'collision';
-const SPAWN_POINTS_LAYER = 'spawn-points';
-const ZONES_LAYER = 'zones';
 
 export class TiledMapRenderer {
   readonly width: number;
@@ -63,8 +46,6 @@ export class TiledMapRenderer {
   private characterContainer: Container;
   private rootContainer: Container;
 
-  private static readonly WALKABLE_SPAWN_PREFIXES = ['desk-', 'pc-', 'warroom-', 'entrance'];
-
   constructor(private mapData: TiledMap, private tilesetTextures: Texture[]) {
     this.width = mapData.width;
     this.height = mapData.height;
@@ -73,10 +54,12 @@ export class TiledMapRenderer {
     this.characterContainer = new Container();
     this.characterContainer.sortableChildren = true;
 
-    this.parseCollisionLayer();
-    this.parseSpawnPoints();
-    this.markWalkableSpawnPoints();
-    this.parseZones();
+    // Collision/spawn-point/zone parsing is pure logic shared with the
+    // theme-bundle validator — see ./tiledCollision.
+    this.walkabilityGrid = parseCollisionGrid(mapData);
+    this.spawnPoints = parseSpawnPoints(mapData);
+    markWalkableSpawnPoints(this.walkabilityGrid, this.spawnPoints, this.width, this.height, WALKABLE_SPAWN_PREFIXES);
+    this.zones = parseZones(mapData);
     this.buildTileLayers();
   }
 
@@ -129,60 +112,10 @@ export class TiledMapRenderer {
     return new Texture({ source: texture.source, frame });
   }
 
-  private parseCollisionLayer(): void {
-    const layer = this.findLayer(COLLISION_LAYER, 'tilelayer');
-    this.walkabilityGrid = Array.from({ length: this.height }, () => Array(this.width).fill(true));
-    if (!layer?.data) return;
-    for (let y = 0; y < this.height; y++) {
-      for (let x = 0; x < this.width; x++) {
-        const rawId = layer.data[y * this.width + x];
-        if ((rawId & TILE_ID_MASK) !== 0) this.walkabilityGrid[y][x] = false;
-      }
-    }
-  }
-
-  private parseSpawnPoints(): void {
-    const layer = this.findLayer(SPAWN_POINTS_LAYER, 'objectgroup');
-    if (!layer?.objects) return;
-    for (const obj of layer.objects) {
-      this.spawnPoints.set(obj.name, {
-        x: Math.floor(obj.x / this.tileSize),
-        y: Math.floor(obj.y / this.tileSize),
-      });
-    }
-  }
-
-  /** Force seat/desk tiles walkable so agents can path onto them even though
-   *  the underlying chair/desk tile is non-walkable in the collision layer. */
-  private markWalkableSpawnPoints(): void {
-    for (const [name, point] of this.spawnPoints) {
-      if (!TiledMapRenderer.WALKABLE_SPAWN_PREFIXES.some((p) => name.startsWith(p))) continue;
-      if (point.y >= 0 && point.y < this.height && point.x >= 0 && point.x < this.width) {
-        this.walkabilityGrid[point.y][point.x] = true;
-      }
-    }
-  }
-
-  private parseZones(): void {
-    const layer = this.findLayer(ZONES_LAYER, 'objectgroup');
-    if (!layer?.objects) return;
-    for (const obj of layer.objects) {
-      this.zones.set(obj.name, {
-        x: Math.floor(obj.x / this.tileSize),
-        y: Math.floor(obj.y / this.tileSize),
-        width: Math.floor((obj.width ?? 0) / this.tileSize),
-        height: Math.floor((obj.height ?? 0) / this.tileSize),
-      });
-    }
-  }
-
   private resolveTileset(tileId: number): { tileset: TiledTilesetRef; texture: Texture } | undefined {
-    for (let i = this.mapData.tilesets.length - 1; i >= 0; i--) {
-      if (tileId >= this.mapData.tilesets[i].firstgid) {
-        return { tileset: this.mapData.tilesets[i], texture: this.tilesetTextures[i] };
-      }
-    }
-    return undefined;
+    const i = resolveTilesetIndex(tileId, this.mapData.tilesets);
+    if (i === undefined) return undefined;
+    return { tileset: this.mapData.tilesets[i], texture: this.tilesetTextures[i] };
   }
 
   private buildTileLayers(): void {
@@ -256,6 +189,6 @@ export class TiledMapRenderer {
   }
 
   private findLayer(name: string, type: 'tilelayer' | 'objectgroup'): TiledLayer | undefined {
-    return this.mapData.layers.find((l) => l.name === name && l.type === type);
+    return findLayerPure(this.mapData.layers, name, type);
   }
 }

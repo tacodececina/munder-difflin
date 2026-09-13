@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { PixelBadge } from './PixelBadge';
+import { PixelModal } from './PixelModal';
 import { Icon } from './Icon';
 import { useStore } from '@/store/store';
 import { MarkdownPreview } from '@/markdown/MarkdownPreview';
 import { useRtl } from '@/i18n/useDirection';
+import { motion } from '@/design/tokens';
+
+/** Duration of the "just landed in DONE" wobble (see the `cth-task-done`
+ *  keyframe in design/global.css) — one shared constant so the animation and
+ *  the timeout that clears the highlighted-id set never drift apart. */
+const DONE_POP_MS = motion.duration.slow;
 
 /** A card on the task kanban. Mirrors HiveTask in the main/preload process —
  *  re-declared locally so the renderer doesn't reach into the preload package
@@ -150,6 +156,36 @@ export function TasksKanban() {
     return () => { if (timer.current) clearInterval(timer.current); };
   }, [refresh]);
 
+  // Micro-interaction: a brief wobble+highlight on any card that just landed in
+  // DONE (usually an agent marking its own task complete, picked up on the next
+  // 5s poll — not a drag gesture, this board has none). Tracks each task's
+  // PREVIOUS status across polls so the effect fires exactly once per real
+  // transition, never on mount (prevStatusRef starts empty) and never again on
+  // a later poll that simply re-confirms the same 'done' status.
+  const prevStatusRef = useRef<Map<string, Status>>(new Map());
+  const [justCompletedIds, setJustCompletedIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    const newlyDone = tasks
+      .filter((t) => prev.get(t.id) && prev.get(t.id) !== 'done' && t.status === 'done')
+      .map((t) => t.id);
+    prevStatusRef.current = new Map(tasks.map((t) => [t.id, t.status] as const));
+    if (newlyDone.length === 0) return;
+    setJustCompletedIds((old) => {
+      const next = new Set(old);
+      newlyDone.forEach((id) => next.add(id));
+      return next;
+    });
+    const id = setTimeout(() => {
+      setJustCompletedIds((old) => {
+        const next = new Set(old);
+        newlyDone.forEach((doneId) => next.delete(doneId));
+        return next;
+      });
+    }, DONE_POP_MS);
+    return () => clearTimeout(id);
+  }, [tasks]);
+
   const restorableAgents = useStore((s) => s.restorableAgents);
   /** Resolve an assignee id to a display name — falls back to the restorable
    *  roster so a done card keeps its author's name even after that worker's
@@ -209,6 +245,7 @@ export function TasksKanban() {
                     assigneeName={nameFor(t.assignee)}
                     onOpen={() => openTaskDetail(t.id)}
                     onDismiss={() => dismissTask(t.id)}
+                    justCompleted={justCompletedIds.has(t.id)}
                   />
                 ))}
               </div>
@@ -225,12 +262,15 @@ export function TasksKanban() {
 // assignee. Everything else (the full contract, deps, controls) lives in the
 // detail view a click away: a kanban card can carry a title at most.
 
-function TaskCard({ task, accent, assigneeName, onOpen, onDismiss }: {
+function TaskCard({ task, accent, assigneeName, onOpen, onDismiss, justCompleted }: {
   task: HiveTask;
   accent: string;
   assigneeName?: string;
   onOpen: () => void;
   onDismiss: () => void;
+  /** True for a brief window right after this card lands in DONE — plays the
+   *  `cth-task-done` wobble (design/global.css). */
+  justCompleted?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -243,7 +283,11 @@ function TaskCard({ task, accent, assigneeName, onOpen, onDismiss }: {
           display: 'flex', alignItems: 'stretch', gap: 0, padding: 0,
           border: 'none', cursor: 'pointer', textAlign: 'left',
           background: 'var(--cth-paper-100)',
-          boxShadow: 'inset 0 0 0 1px var(--cth-ink-100)'
+          boxShadow: 'inset 0 0 0 1px var(--cth-ink-100)',
+          // steps(4) — 4 discrete stops, no interpolation (see the keyframe's
+          // own comment in design/global.css). Collapses to instant under
+          // prefers-reduced-motion via the app-wide rule in global.css.
+          animation: justCompleted ? `cth-task-done ${DONE_POP_MS}ms ${motion.easeSprite(4)}` : 'none'
         }}
       >
         <span style={{ width: 4, flexShrink: 0, background: accent, boxShadow: 'inset -1px 0 0 var(--cth-ink-700)' }} />
@@ -313,16 +357,17 @@ export function TaskDetail({ task, all, assigneeName, onMove, onAssign, onClose 
     .filter((t): t is HiveTask => !!t);
   const created = new Date(task.createdAt);
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed', inset: 0, zIndex: 280,
-        background: 'rgba(26, 19, 32, 0.6)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24
-      }}
+    <PixelModal
+      onClose={onClose}
+      title={t('kanban.taskTitle')}
+      width={720}
+      maxWidth="94vw"
+      backdropPadding={24}
+      backdropColor="rgba(26, 19, 32, 0.6)"
+      zIndex={280}
+      noPadding
+      panelStyle={{ minHeight: 0 }}
     >
-      <div onClick={(e) => e.stopPropagation()} style={{ width: 720, maxWidth: '94vw', maxHeight: '90vh', display: 'flex' }}>
-        <PixelPanel variant="dialog" title={t('kanban.taskTitle')} noPadding style={{ display: 'flex', flexDirection: 'column', width: '100%', minHeight: 0 }}>
           <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0, overflowY: 'auto' }}>
             {/* Title under a status-colored bar */}
             <div style={{ borderLeft: `4px solid ${col.accent}`, paddingLeft: 8 }}>
@@ -442,9 +487,7 @@ export function TaskDetail({ task, all, assigneeName, onMove, onAssign, onClose 
               <PixelButton variant="ghost" size="sm" onClick={onClose}>{t('common.close')}</PixelButton>
             </div>
           </div>
-        </PixelPanel>
-      </div>
-    </div>
+    </PixelModal>
   );
 }
 

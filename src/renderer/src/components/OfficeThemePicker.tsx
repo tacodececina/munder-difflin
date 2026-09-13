@@ -5,8 +5,16 @@ import { useStore } from '@/store/store';
 import { disposeTerminal } from './terminalPool';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
+import { PixelModal } from './PixelModal';
 import { Icon } from './Icon';
 import type { ThemeId } from '@/scene/office/themeRegistry';
+import { validateUserThemeBundle } from '@/scene/office/themeLoader';
+import {
+  useCustomThemes,
+  saveCustomTheme,
+  deleteCustomTheme,
+  type CustomThemeRecord,
+} from '@/scene/office/customThemes';
 
 // TV-show office themes (Phase 1 = the switch flow infra). Only `office` has a
 // real map+cast today; the five shows render via the loader's office fallback
@@ -16,9 +24,9 @@ import type { ThemeId } from '@/scene/office/themeRegistry';
 interface ThemeMeta { id: ThemeId; label: string; blurb: string; built: boolean; swatch: string; }
 const THEME_META: ThemeMeta[] = [
   { id: 'office',        label: 'The Office',         blurb: 'Dunder Mifflin — the original floor', built: true,  swatch: '#6b5a4a' },
-  { id: 'friends',       label: 'Friends',            blurb: 'Central Perk coffee house',           built: false, swatch: '#9a5a32' },
+  { id: 'friends',       label: 'Friends',            blurb: 'Central Perk coffee house',           built: true,  swatch: '#9a5a32' },
   { id: 'brooklyn99',    label: 'Brooklyn Nine-Nine', blurb: 'The 99th precinct bullpen',           built: true,  swatch: '#3a5a7a' },
-  { id: 'siliconvalley', label: 'Silicon Valley',     blurb: 'The Hacker Hostel',                   built: false, swatch: '#4a6a4a' },
+  { id: 'siliconvalley', label: 'Silicon Valley',     blurb: 'The Hacker Hostel',                   built: true,  swatch: '#4a6a4a' },
   { id: 'got',           label: 'Game of Thrones',    blurb: 'The Red Keep throne room',            built: false, swatch: '#6a2630' },
   { id: 'hogwarts',      label: 'Harry Potter',       blurb: 'Hogwarts great hall',                 built: false, swatch: '#39305a' },
 ];
@@ -33,6 +41,13 @@ export function OfficeThemePicker({ config }: { config: HarnessConfig }) {
   const [pending, setPending] = useState<ThemeId | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
+  // "Import theme…" flow (Phase 4: user-authored bundles). Kept local/simple —
+  // it never shares state with the built-in switch flow above except by
+  // calling the same `applyTheme` when a currently-active custom theme is
+  // deleted (see onDeleteCustomTheme).
+  const [importBusy, setImportBusy] = useState(false);
+  const [importErrors, setImportErrors] = useState<string[] | null>(null);
+  const customThemes = useCustomThemes();
 
   const archiveAgent = useStore((s) => s.archiveAgent);
   const setOfficeTheme = useStore((s) => s.setOfficeTheme);
@@ -90,6 +105,44 @@ export function OfficeThemePicker({ config }: { config: HarnessConfig }) {
   };
 
   const pendingMeta = pending ? THEME_META.find((t) => t.id === pending) : null;
+
+  /** "Import theme…" — reuses the SAME folder picker AddAgentModal already
+   *  uses (window.cth.chooseFolder), validates the chosen bundle (never
+   *  rendering anything unvalidated), and on success registers it via
+   *  customThemes.ts — the theme then simply appears as another card below,
+   *  switched to through the normal onSelect flow (no surprise auto-switch as
+   *  a side effect of importing). */
+  const onImportClick = async () => {
+    setNote('');
+    setImportErrors(null);
+    const res = await window.cth.chooseFolder();
+    if (!res.ok) {
+      if (res.error !== 'cancelled') setImportErrors([res.error]);
+      return;
+    }
+    setImportBusy(true);
+    try {
+      const validated = await validateUserThemeBundle(res.path);
+      if (!validated.ok) { setImportErrors(validated.errors); return; }
+      saveCustomTheme(validated.manifest.label, res.path);
+      setNote(t('officeTheme.import.success', { label: validated.manifest.label }));
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  /** Deleting the CURRENTLY ACTIVE custom theme routes through the existing
+   *  destructive `applyTheme('office')` first (archives non-god agents,
+   *  persists, re-seats) — the same contract every other theme switch already
+   *  has — WITHOUT a second confirm dialog: choosing "remove" on the theme the
+   *  user is already looking at is itself the explicit destructive action: a
+   *  second "are you sure" would just be friction. Deleting an inactive custom
+   *  theme is a plain, non-destructive registry removal. */
+  const onDeleteCustomTheme = async (ct: CustomThemeRecord) => {
+    setNote('');
+    if (ct.id === current) await applyTheme('office');
+    deleteCustomTheme(ct.id);
+  };
 
   return (
     <div>
@@ -162,6 +215,79 @@ export function OfficeThemePicker({ config }: { config: HarnessConfig }) {
               </button>
             );
           })}
+
+          {/* Imported custom bundles (Phase 4) — same card shape as the
+             built-in themes, plus a remove ("x") corner button. */}
+          {customThemes.map((ct) => {
+            const isCurrent = ct.id === current;
+            return (
+              <div key={ct.id} style={{ position: 'relative' }}>
+                <button
+                  onClick={() => onSelect(ct.id)}
+                  disabled={busy}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8, textAlign: 'left',
+                    padding: 8, width: '100%', cursor: busy ? 'default' : 'pointer',
+                    background: isCurrent ? 'var(--cth-paper-100)' : 'transparent',
+                    boxShadow: isCurrent
+                      ? 'inset 0 0 0 1.5px var(--cth-ink-500)'
+                      : 'inset 0 0 0 1px var(--cth-ink-300)',
+                    opacity: busy && !isCurrent ? 0.6 : 1,
+                  }}
+                >
+                  <span style={{
+                    width: 28, height: 28, flexShrink: 0, background: 'var(--cth-lilac, #8a6ab0)',
+                    boxShadow: 'inset 0 0 0 1.5px var(--cth-ink-500)',
+                  }} />
+                  <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-900)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {ct.label}
+                      </span>
+                      {isCurrent && (
+                        <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 7, color: 'var(--cth-mint)', textTransform: 'uppercase' }}>
+                          {t('officeTheme.current')}
+                        </span>
+                      )}
+                    </span>
+                    <span style={{ fontSize: 11, lineHeight: '14px', color: 'var(--cth-ink-500)' }}>
+                      {t('officeTheme.import.badge')}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  onClick={() => void onDeleteCustomTheme(ct)}
+                  disabled={busy}
+                  title={t('officeTheme.import.remove')}
+                  aria-label={t('officeTheme.import.remove')}
+                  style={{
+                    position: 'absolute', top: 4, right: 4, width: 18, height: 18,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+                    cursor: busy ? 'default' : 'pointer',
+                  }}
+                >
+                  <Icon name="x" />
+                </button>
+              </div>
+            );
+          })}
+
+          {/* "Import theme…" — folder picker + validation (Phase 4). */}
+          <button
+            onClick={() => void onImportClick()}
+            disabled={busy || importBusy}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              padding: 8, minHeight: 44, cursor: busy || importBusy ? 'default' : 'pointer',
+              background: 'transparent', boxShadow: 'inset 0 0 0 1px dashed var(--cth-ink-300)',
+              opacity: busy || importBusy ? 0.6 : 1,
+              color: 'var(--cth-ink-500)', fontSize: 12,
+            }}
+          >
+            <Icon name="plus" />
+            {importBusy ? t('officeTheme.import.validating') : t('officeTheme.import.action')}
+          </button>
         </div>
       )}
 
@@ -177,6 +303,28 @@ export function OfficeThemePicker({ config }: { config: HarnessConfig }) {
           onCancel={() => setPending(null)}
           onConfirm={() => void applyTheme(pending)}
         />
+      )}
+
+      {importErrors && (
+        <PixelModal title={t('officeTheme.import.errorsTitle')} onClose={() => setImportErrors(null)} width={520}>
+          <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-700)' }}>
+              {t('officeTheme.import.errorsIntro')}
+            </div>
+            <ul style={{ margin: 0, padding: '0 0 0 18px', display: 'flex', flexDirection: 'column', gap: 6, maxHeight: '40vh', overflowY: 'auto' }}>
+              {importErrors.map((e, i) => (
+                <li key={i} style={{ fontSize: 12, lineHeight: '18px', color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-mono)' }}>
+                  {e}
+                </li>
+              ))}
+            </ul>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <PixelButton variant="secondary" size="md" onClick={() => setImportErrors(null)}>
+                {t('common.close')}
+              </PixelButton>
+            </div>
+          </div>
+        </PixelModal>
       )}
     </div>
   );

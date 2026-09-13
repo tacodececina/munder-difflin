@@ -1224,8 +1224,10 @@ export function useHive(config: HarnessConfig | null): void {
           // re-isolate (that conflicts on the existing path/branch).
           isolate: false,
           // Reattach the agent's prior session so no context is lost on revive.
-          resume: true,
-          hive
+          // A REMOTE agent has no local transcript and no local hive, and must be
+          // revived on the machine it was running on — never silently down here.
+          resume: !a.remoteEnvironmentId,
+          ...(a.remoteEnvironmentId ? { remoteEnvironmentId: a.remoteEnvironmentId } : { hive })
         });
         if (res.ok) {
           reviving.current[deadId] = Date.now(); // re-stamp so the debounce covers the spawn

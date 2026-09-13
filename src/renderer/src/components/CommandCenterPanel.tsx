@@ -5,8 +5,10 @@ import { PixelBadge } from './PixelBadge';
 import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
 import { PtyTerminalView } from './PtyTerminalView';
+import { ErrorBoundary } from './ErrorBoundary';
 import { MessageQueueComposer } from './MessageQueueComposer';
 import { TasksKanban } from './TasksKanban';
+import { LegendPanel } from './LegendPanel';
 import { AskMeTab } from './AskMeTab';
 import { TriggersTab } from './triggers/TriggersTab';
 import { TriggerHistoryTab } from './triggers/TriggerHistoryTab';
@@ -16,6 +18,7 @@ import { acquireTerminal, disposeTerminal, resetTerminal } from './terminalPool'
 import { terminalInstanceKey } from './terminalRecovery';
 import { Icon } from './Icon';
 import { MemoryGraphPanel } from './MemoryGraphPanel';
+import { VisitorShield } from './VisitorShield';
 import { useFleetTelemetry } from '@/hooks/useTelemetry';
 import { COMMAND_GROUPS } from '@shared/claudeCommands';
 import { roleForHiveSpawn } from '@shared/agentRole';
@@ -46,7 +49,7 @@ import { useRtl } from '@/i18n/useDirection';
 // Both the AskMe (#human) tab and the Triggers tab live here. Triggers replaced
 // the old Schedules tab: schedules are now one of four trigger types, and the
 // whole surface lives in ./triggers (see src/shared/triggers.ts for the contract).
-type CCTab = 'terminal' | 'floor' | 'tasks' | 'human' | 'triggers' | 'trigger-history'
+type CCTab = 'terminal' | 'floor' | 'tasks' | 'legend' | 'human' | 'triggers' | 'trigger-history'
   | 'memory' | 'graph' | 'activity' | 'skills' | 'workers';
 
 /** Fallback denominator for the per-agent token meter when no floor token budget
@@ -69,6 +72,8 @@ const TABS: { key: CCTab; labelKey: string; icon: Parameters<typeof Icon>[0]['na
   { key: 'terminal', labelKey: 'commandCenter.tabs.terminal', icon: 'terminal' },
   { key: 'floor', labelKey: 'commandCenter.tabs.floor', icon: 'mcp' },
   { key: 'tasks', labelKey: 'commandCenter.tabs.tasks', icon: 'check' },
+  // Sits beside the kanban on purpose: it is the same ledger, read backwards.
+  { key: 'legend', labelKey: 'commandCenter.tabs.legend', icon: 'sparkle' },
   { key: 'human', labelKey: 'commandCenter.tabs.human', icon: 'bell' },
   { key: 'triggers', labelKey: 'commandCenter.tabs.triggers', icon: 'clock' },
   { key: 'trigger-history', labelKey: 'commandCenter.tabs.history', icon: 'ledger' },
@@ -289,29 +294,41 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
         ))}
       </div>
 
-      {/* Body */}
+      {/* Body.
+          Visitor mode seals the WHOLE body here, unlike AgentDetailPanel's
+          per-tab seals. This panel is the god's dashboard: every tab in it —
+          terminal, the hive activity log, the task board, memory, workers,
+          skills, triggers (which hold webhook secrets) — is operational, so
+          there is no per-tab decision left to make and one placeholder reads
+          better than twelve identical ones. The tab strip above stays live so
+          the operator's place is not lost when the seal lifts. */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        <VisitorShield surface="commandCenter" label={t('visitorMode.sealedCommandCenter')}>
         {tab === 'terminal' && (
           isFullscreenedHere ? (
             <Centered>{t('commandCenter.terminalFullscreen')}</Centered>
           ) : agent.ptyId ? (
             <>
               <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-                <PtyTerminalView
-                  key={terminalInstanceKey(agent.ptyId, agent.terminalGeneration)}
-                  ptyId={agent.ptyId}
-                  onStreamData={onPtyStream}
-                  onUserPrompt={(t) => {
-                    updateAgent(agent.id, { lastPrompt: t });
-                    if (t.trim().toLowerCase() === '/clear') {
-                      updateAgent(agent.id, { contextTokens: 0, contextLimit: undefined, progress: 0 });
-                    }
-                    void window.cth.historyAdd({ agentId: agent.id, cwd: agent.cwd, text: t });
-                  }}
-                  onToggleFullscreen={() => setFullscreen(fullscreen ? null : agent.id)}
-                  fullscreen={fullscreen}
-                  embedded={!fullscreen}
-                />
+                {/* Per-agent boundary — see AgentDetailPanel's copy of this same
+                    comment for why it's keyed and why it isn't one shared box. */}
+                <ErrorBoundary key={terminalInstanceKey(agent.ptyId, agent.terminalGeneration)}>
+                  <PtyTerminalView
+                    key={terminalInstanceKey(agent.ptyId, agent.terminalGeneration)}
+                    ptyId={agent.ptyId}
+                    onStreamData={onPtyStream}
+                    onUserPrompt={(t) => {
+                      updateAgent(agent.id, { lastPrompt: t });
+                      if (t.trim().toLowerCase() === '/clear') {
+                        updateAgent(agent.id, { contextTokens: 0, contextLimit: undefined, progress: 0 });
+                      }
+                      void window.cth.historyAdd({ agentId: agent.id, cwd: agent.cwd, text: t });
+                    }}
+                    onToggleFullscreen={() => setFullscreen(fullscreen ? null : agent.id)}
+                    fullscreen={fullscreen}
+                    embedded={!fullscreen}
+                  />
+                </ErrorBoundary>
               </div>
               <MessageQueueComposer agent={agent} />
             </>
@@ -321,6 +338,7 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
         )}
         {tab === 'floor' && <FloorTab seed={dispatchSeed} />}
         {tab === 'tasks' && <TasksKanban />}
+        {tab === 'legend' && <LegendPanel />}
         {tab === 'human' && <AskMeTab />}
         {tab === 'triggers' && <TriggersTab />}
         {tab === 'trigger-history' && <TriggerHistoryTab />}
@@ -336,6 +354,7 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
         {tab === 'activity' && <ActivityTab />}
         {tab === 'skills' && <SkillsTab agentCwd={agent.cwd} />}
         {tab === 'workers' && <WorkersTab />}
+        </VisitorShield>
       </div>
     </PixelPanel>
   );
@@ -503,13 +522,17 @@ function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
         provider,
         cols,
         rows,
-        hive,
-        resume,
-        resumeSessionId,
-        requireResume: resume
+        // A remote agent restarts on the machine it belongs to. Its hive and its
+        // transcript are not on this disk, so neither rides along.
+        ...(a.remoteEnvironmentId
+          ? { remoteEnvironmentId: a.remoteEnvironmentId }
+          : { hive, resume, resumeSessionId, requireResume: resume })
       });
       if (!res.ok) throw new Error(res.error ?? 'Restart failed.');
-      if (resume && res.resumed !== true) {
+      // Resume was not requested for a remote agent (there is no local transcript
+      // to reattach), so it cannot have been "refused" — only a local restart is
+      // held to this contract.
+      if (resume && !a.remoteEnvironmentId && res.resumed !== true) {
         throw new Error('Resume was refused; no replacement session was accepted.');
       }
       if (res.ok) {

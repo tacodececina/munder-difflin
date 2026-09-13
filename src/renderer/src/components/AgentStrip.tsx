@@ -6,6 +6,7 @@ import { Icon } from './Icon';
 import { useStore, type Agent } from '@/store/store';
 import { type HarnessConfig } from '@/store/config';
 import { useRestoreTeam } from '@/hooks/useRestoreTeam';
+import { useBreakpoint } from '@/hooks/useBreakpoint';
 import { useRtl } from '@/i18n/useDirection';
 
 export interface AgentStripProps {
@@ -17,6 +18,13 @@ export interface AgentStripProps {
 export function AgentStrip({ config }: AgentStripProps) {
   const { t } = useTranslation();
   const rtl = useRtl();
+  // Phase 2 compact band (see bp.compact, design/tokens.ts): not enough width
+  // for the scene AND a labelled roster AND a sidebar, so every card drops to
+  // portrait-only (see AgentCard's `compact` prop). Read directly here rather
+  // than threaded down from AppShell — useBreakpoint is a shared singleton
+  // listener, so this costs no extra `resize` subscription.
+  const { band } = useBreakpoint();
+  const compact = band === 'compact';
   const agents = useStore(s => s.agents);
   const restorableAgents = useStore(s => s.restorableAgents);
   const selectedId = useStore(s => s.selectedId);
@@ -82,18 +90,18 @@ export function AgentStrip({ config }: AgentStripProps) {
   }, []);
 
   return (
-    <div style={{
+    // Vertical padding + height are Phase 2's short-viewport rule (design/
+    // layout.css's `.cth-agent-strip` under `@media (max-height: 700px)`) —
+    // kept out of this inline style so the media query can actually win over
+    // it (an inline style always beats a class, so the two can't coexist on
+    // the same properties).
+    <div className="cth-agent-strip" style={{
       display: 'flex',
-      gap: 12,
-      padding: '14px 16px',
+      gap: compact ? 8 : 12,
       overflowX: 'auto',
       overflowY: 'hidden',
       borderTop: '1px solid var(--cth-ink-300)',
       background: 'var(--cth-cream-200)',
-      // Tall enough for the god card to stand proud of the row (it's taller and
-      // rides a drop shadow) plus the hover-lift on every card, without clipping.
-      height: 112,
-      minHeight: 112,
       alignItems: 'center'
     }}>
       {agents.map(a => (
@@ -154,6 +162,7 @@ export function AgentStrip({ config }: AgentStripProps) {
             }}
             note={a.note}
             onEditNote={a.isGod ? undefined : () => setNoteEditId(a.id)}
+            compact={compact}
           />
           {/* The note itself lives INSIDE the card (its own row above the gauge).
               This is the transient EDITOR: a fixed popover ABOVE the card —

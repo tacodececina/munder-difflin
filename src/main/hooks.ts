@@ -310,10 +310,14 @@ export class HookServer {
   }
 
   /** Fire a native desktop notification — gated on the user's `notifications`
-   *  setting. Only the OS toast is gated; the hive:hookEvent emit is always sent
-   *  so avatars/UI stay live regardless. Best-effort: never throw into the hook. */
+   *  setting, and on visitor mode: `body` is the hook payload's own `message`,
+   *  free text the model wrote about what it is blocked on, and an OS toast
+   *  paints it over the screen with nobody clicking anything. Only the OS toast
+   *  is gated; the hive:hookEvent emit is always sent so avatars/UI stay live
+   *  regardless. Best-effort: never throw into the hook. */
   private notify(title: string, body: string): void {
-    if (!this.getConfig().notifications) return;
+    const cfg = this.getConfig();
+    if (!cfg.notifications || cfg.visitorMode === true) return;
     try {
       if (!Notification.isSupported()) return;
       new Notification({ title, body }).show();

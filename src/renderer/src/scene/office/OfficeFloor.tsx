@@ -4,16 +4,21 @@ import { Application, Container, Graphics, Ticker, Texture } from 'pixi.js';
 // PixiJS uses new Function() internally, blocked by Electron CSP — this patches it.
 import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
+import { visitorSafeActivity } from '@/store/visitorMode';
 import { TiledMapRenderer } from './TiledMapRenderer';
 import { Camera } from './Camera';
 import { Character, paintCup } from './Character';
 import { DeskScreen } from './DeskScreen';
+import { DeskShelf } from './DeskShelf';
+import { countDoneByAssignee } from './deskHistory';
 import { WorldClock } from './WorldClock';
 import { MessageEnvelope, type MessageAct } from './MessageEnvelope';
 import { hexToNumber, DEFAULT_CHARACTER } from './cast';
 import { getCustomCharacter, isCustomCharacterId } from './customCast';
 import { pickSoloLine, pickExchange, cafeMoodFor, type BreakSpot, type CafeMood } from './cafeteriaLines';
 import { pickIdleCompanion, type CompanionCandidate } from './idleAffinity';
+import { FloorWeather } from './weather';
+import { WeatherOverlay } from './WeatherOverlay';
 import { colors } from '@/design/tokens';
 import { loadTheme, resolveThemeMap } from './themeLoader';
 import {
@@ -76,6 +81,10 @@ interface Runtime {
   brk?: CafeBreak;
   /** This desk's monitor overlay — lit while its agent is seated. */
   screen?: DeskScreen;
+  /** The trinkets this desk has EARNED — one rung per real closed task (see
+   *  deskHistory.ts). Present only for desks that have the standard PC stamp,
+   *  same condition as `screen`. */
+  shelf?: DeskShelf;
   /** Walking a fresh coffee from the break room home to the desk. */
   cupCarryHome?: boolean;
   err?: ErrandRun;
@@ -347,6 +356,37 @@ export function OfficeFloor() {
       camera.setMapSize(mapRenderer.width * mapRenderer.tileSize, mapRenderer.height * mapRenderer.tileSize);
       camera.setViewSize(app.screen.width, app.screen.height);
       camera.fitToScreen();
+
+      // ─── The weather → CIRCUIT BREAKER ─────────────────────────────────────
+      // The sky reports how many agents the guardrail currently has hold of:
+      // nobody = clear, one or two = overcast, three or more (or anyone actually
+      // stopped) = rain. The rule and its freshness handling live in weather.ts;
+      // this is only the wiring. It is a READOUT — the overlay is pointer-inert
+      // and touches no agent, no store and no message, so a stormy floor behaves
+      // exactly like a sunny one.
+      //
+      // Added to the STAGE rather than to `world`: the camera pans and zooms the
+      // world, and weather that slid around with it would read as a prop instead
+      // of as the light in the room. Added after `world`, so it draws on top.
+      const floorWeather = new FloorWeather();
+      const weatherOverlay = new WeatherOverlay(app.screen.width, app.screen.height);
+      app.stage.addChild(weatherOverlay.container);
+      // Cold start: the next push is up to one beat (30 s) away, and a floor that
+      // was already raining when the scene rebuilt (theme switch, GPU recovery)
+      // would show a clear sky until then. The agent directory already carries
+      // each agent's current breaker level, so seed from it.
+      void window.cth.hiveAgentDirectory?.().then((dir) => {
+        if (mountIdRef.current !== mountId) return;
+        const now = Date.now();
+        for (const a of dir?.agents ?? []) {
+          if (a.archived) continue;
+          floorWeather.record({ agentId: a.id, level: a.breaker, ts: now }, now);
+        }
+      }).catch(() => { /* directory unavailable — the sky just starts clear */ });
+      // Live: one BreakerState per live agent per beat, on the same channel the
+      // status pin and the cost meter already read.
+      const offBreaker = window.cth.onBreakerState?.((s) => floorWeather.record(s));
+      (app as any).__offBreaker = offBreaker;
 
       // ─── The boss's wall calendar → TRIGGERS ───────────────────────────────
       // A little tear-off month page hangs on the CEO office wall. Clicking it
@@ -1793,6 +1833,21 @@ export function OfficeFloor() {
         return god && runtimes.has(god.id) ? god.id : undefined;
       };
 
+      // ─── Desk history: what each agent has actually finished, on its desk ──
+      // The same poll that drives the wall boards also re-reads the closed-card
+      // count per assignee and hands it to that agent's DeskShelf (see
+      // deskHistory.ts for the ladder, DeskShelf.ts for the drawing). No extra
+      // IPC, no extra timer: the ledger is already on the wire every 5s, and a
+      // shelf whose rung did not change repaints nothing.
+      //
+      // Kept here rather than inside `visualTasks` on purpose — the board's
+      // copy is deliberately LAGGED (a card only flips once an avatar has
+      // walked the note over), while a desk should reflect the ledger itself.
+      let deskDone = new Map<string, number>();
+      const applyDeskHistory = (): void => {
+        for (const [id, rt] of runtimes) rt.shelf?.setDoneCount(deskDone.get(id) ?? 0);
+      };
+
       let lastLedger: LedgerTask[] = [];
       let firstPoll = true;
       const pollTaskBoard = async (): Promise<void> => {
@@ -1804,6 +1859,8 @@ export function OfficeFloor() {
             status: String(t?.status ?? 'todo'),
             assignee: typeof t?.assignee === 'string' && t.assignee ? t.assignee : undefined
           }));
+          deskDone = countDoneByAssignee(arr);
+          applyDeskHistory();
           // tasks waiting on the HUMAN feed the ASK ME board's note count
           const newAsk = arr.filter((t) =>
             String(t?.status) === 'blocked'
@@ -1914,6 +1971,22 @@ export function OfficeFloor() {
           charLayer.addChild(rt.screen.container);
           const ts2 = mapRenderer.tileSize;
           character.setCupSpot({ x: top.x * ts2 + 18, y: top.y * ts2 + 23 });
+          // The desk stamp that carries this monitor block also has one free
+          // tile of surface to its LEFT — verified true for every seat in all
+          // four shipped maps — and that tile is where an agent's earned
+          // trinkets accumulate. The emptiness is re-checked here rather than
+          // assumed, so a custom/imported theme that stamps its desks
+          // differently simply gets no shelf instead of trinkets drawn over
+          // whatever furniture it put there.
+          const shelfTile = { x: seatTile.x - 1, y: seatTile.y - 1 };
+          if (mapRenderer.gidAt('furniture-above', shelfTile.x, shelfTile.y) === 0) {
+            rt.shelf = new DeskShelf(shelfTile, ts2);
+            charLayer.addChild(rt.shelf.container);
+            // Seed from the last poll so a late-joining agent (or a theme
+            // switch, which rebuilds the whole scene) shows its history
+            // immediately instead of a bare desk until the next 5s tick.
+            rt.shelf.setDoneCount(deskDone.get(agent.id) ?? 0);
+          }
         }
         runtimes.set(agent.id, rt);
         applyState(agent, rt, true);
@@ -1938,11 +2011,37 @@ export function OfficeFloor() {
         }
         if (rt.seatIndex != null) seatClaims.delete(rt.seatIndex);
         rt.screen?.destroy();
+        rt.shelf?.destroy();   // the trinkets leave with the desk's owner
         rt.character.hide(0);
         // give the fade-out a moment, then destroy
         setTimeout(() => rt.character.destroy(), 700);
         runtimes.delete(id);
       };
+
+      /**
+       * VISITOR MODE — the one redaction that happens inside the scene.
+       *
+       * The floor is what visitor mode exists to keep showing, so nothing here
+       * is hidden. But `liveActivity` puts REAL work into the thought clouds:
+       * the agent's live action ("edit src/main/config.ts", "bash npm test") or
+       * the first words of the operator's own last prompt. That is the whole
+       * job in plain text, floating over the room at readable size.
+       *
+       * So while the mode is armed the clouds keep appearing — an empty cloud
+       * would read as a stalled agent — and say one generic word instead.
+       * The status glyphs, walking, sitting, breaks and the task board are all
+       * untouched: they carry pace and mood, which is the part worth watching.
+       *
+       * Read through `getState()` at call time rather than captured, because
+       * this closure is built once when the Pixi scene mounts and must not pin
+       * a stale value for the life of the floor.
+       */
+      const thought = (agent: Agent, fallback = ''): string =>
+        visitorSafeActivity(
+          liveActivity(agent, fallback),
+          t('visitorMode.activity'),
+          useStore.getState().visitorMode
+        );
 
       // Map an agent's store state onto its on-floor character.
       const applyState = (agent: Agent, rt: Runtime, force = false) => {
@@ -2018,7 +2117,7 @@ export function OfficeFloor() {
           case 'thinking':
             c.setStatusGlyph('none');
             c.sitAtDesk(true);
-            c.showThought(liveActivity(agent), agent.carrying);
+            c.showThought(thought(agent), agent.carrying);
             break;
           case 'waiting':
             // Parked at the desk awaiting god / another agent — not actively
@@ -2027,11 +2126,11 @@ export function OfficeFloor() {
             // the red "!" reserved for blocked-on-human.
             c.setStatusGlyph('waiting');
             c.sitAtDesk(false);
-            c.showThought(liveActivity(agent, t('office.activity.waiting')), agent.carrying);
+            c.showThought(thought(agent, t('office.activity.waiting')), agent.carrying);
             break;
           case 'blocked':
             c.setStatusGlyph('blocked');
-            c.showThought(liveActivity(agent, t('office.activity.needsYou')));
+            c.showThought(thought(agent, t('office.activity.needsYou')));
             c.walkToTile(rt.waitTile);
             break;
           case 'compacting':
@@ -2039,14 +2138,14 @@ export function OfficeFloor() {
             // so an agent compacting context reads as busy rather than frozen.
             c.setStatusGlyph('compacting');
             c.sitAtDesk(true);
-            c.showThought(liveActivity(agent, t('office.activity.compacting')));
+            c.showThought(thought(agent, t('office.activity.compacting')));
             break;
           case 'looping':
             // #5C — circuit-breaker armed (#6): hold position with the spinning
             // warning glyph so a runaway agent is visible on the floor.
             c.setStatusGlyph('looping');
             c.sitAtDesk(false);
-            c.showThought(liveActivity(agent, t('office.activity.looping')));
+            c.showThought(thought(agent, t('office.activity.looping')));
             break;
           case 'success':
             c.setStatusGlyph('success');
@@ -2068,14 +2167,14 @@ export function OfficeFloor() {
           default:
             c.setStatusGlyph('none');
             // The god runs the floor from its desk; everyone else wanders when idle.
-            if (agent.isGod) { c.sitAtDesk(true); c.showThought(liveActivity(agent, t('office.activity.runningFloor'))); }
+            if (agent.isGod) { c.sitAtDesk(true); c.showThought(thought(agent, t('office.activity.runningFloor'))); }
             else if (finishedWork) {
               // Task done → a quick cheer on the spot, then back to roaming.
               c.startWandering();
               c.cheer();
               c.showThought(t(CHEER_KEYS[Math.floor(Math.random() * CHEER_KEYS.length)]));
             }
-            else { c.startWandering(); c.showThought(liveActivity(agent, t('office.activity.idle'))); }
+            else { c.startWandering(); c.showThought(thought(agent, t('office.activity.idle'))); }
             break;
         }
       };
@@ -2096,8 +2195,21 @@ export function OfficeFloor() {
       syncAgents();
 
       let lastSelected: string | null = useStore.getState().selectedId;
+      // Visitor mode changes what the thought clouds are ALLOWED to say, not
+      // what the agents are doing — so nothing in `applyState`'s change test
+      // (status / action / carrying / prompt) moves when it flips, and without
+      // this the clouds would keep showing real work until each agent happened
+      // to change state on its own. Force-reapply every avatar on the edge.
+      let lastVisitor = useStore.getState().visitorMode;
       const unsubscribe = useStore.subscribe((s, prev) => {
         if (s.agents !== prev.agents) syncAgents();
+        if (s.visitorMode !== lastVisitor) {
+          lastVisitor = s.visitorMode;
+          for (const [id, rt] of runtimes) {
+            const a = s.agents.find((x) => x.id === id);
+            if (a) applyState(a, rt, true);
+          }
+        }
         if (s.selectedId !== lastSelected) {
           lastSelected = s.selectedId;
           const rt = s.selectedId ? runtimes.get(s.selectedId) : undefined;
@@ -2189,6 +2301,21 @@ export function OfficeFloor() {
         }
       };
 
+      // Re-read the sky about once a second (the source only changes every 30 s
+      // beat) and let the overlay animate toward it every frame.
+      let weatherAcc = 0;
+      const updateWeather = (dt: number) => {
+        weatherAcc += dt;
+        if (weatherAcc >= 1) {
+          weatherAcc = 0;
+          // Only agents actually on the floor get a vote: an archived or killed
+          // agent stops being pushed, and its last reading must not keep raining.
+          const present = new Set(useStore.getState().agents.map((a) => a.id));
+          weatherOverlay.setWeather(floorWeather.weather(Date.now(), present));
+        }
+        weatherOverlay.update(dt);
+      };
+
       const onTick = (ticker: Ticker) => {
         const dt = ticker.deltaMS / 1000;
         camera.update(dt);
@@ -2208,6 +2335,7 @@ export function OfficeFloor() {
         updateBoardMoves(dt);
         updateRelFx(dt);
         worldClock.update(dt);
+        updateWeather(dt);
         resolveBubbleOverlaps();
         for (let i = envelopes.length - 1; i >= 0; i--) {
           if (envelopes[i].update(dt)) {
@@ -2227,6 +2355,7 @@ export function OfficeFloor() {
           if (width === 0 || height === 0) continue;
           app.renderer?.resize(width, height);
           camera.setViewSize(width, height);
+          weatherOverlay.setViewSize(width, height);
         }
       });
       resize.observe(host);
@@ -2277,6 +2406,7 @@ export function OfficeFloor() {
         (a as any).__resize?.disconnect?.();
         try { (a as any).__unsub?.(); } catch { /* noop */ }
         try { (a as any).__offMessage?.(); } catch { /* noop */ }
+        try { (a as any).__offBreaker?.(); } catch { /* noop */ }
         try { clearInterval((a as any).__taskBoardPoll); } catch { /* noop */ }
         try { clearInterval((a as any).__relPoll); } catch { /* noop */ }
         try { (a as any).__unsubChatterConfig?.(); } catch { /* noop */ }

@@ -165,11 +165,11 @@
     "reportProblem": "report a problem",
     "fullChangelog": "full changelog →",
     "announcement": "Announcement",
-    "proLaunch": "v0.5.0 launches with Munder Difflin Pro.",
+    "proLaunch": "v0.5.0 launches with The Hive Pro.",
     "proCommunityFree": "Community stays free, stays open, and keeps getting updates.",
     "proParagraph": "Pro ships with new features and integrations, with more posted throughout the year, and it stays ahead of Community, for power users who want the full potential of coding agents and agent harnesses. The Pro roadmap also includes a mobile app.",
     "foundersWallTitle": "On the Founders' Wall?",
-    "foundersWallBody": "A month of Munder Difflin Pro free, then 50% off the annual plan. For the first 100 people on the wall.",
+    "foundersWallBody": "A month of The Hive Pro free, then 50% off the annual plan. For the first 100 people on the wall.",
     "seeTheWall": "see the wall",
     "joinDiscord": "join Discord"
   },
@@ -191,7 +191,16 @@
     "stillWorkingPlural": "⚠ {{count}} agents are still working.",
     "cantUndo": "This can't be undone.",
     "switching": "switching…",
-    "deleteSwitch": "delete {{count}} & switch"
+    "deleteSwitch": "delete {{count}} & switch",
+    "import": {
+      "action": "Import theme…",
+      "validating": "validating…",
+      "badge": "imported",
+      "remove": "Remove imported theme",
+      "errorsTitle": "COULDN'T IMPORT THIS THEME",
+      "errorsIntro": "Fix the following and try again:",
+      "success": "Imported \"{{label}}\" — select it above to switch."
+    }
   },
   "settings": {
     "title": "SETTINGS",
@@ -230,6 +239,8 @@
       "keepAwakeDesc": "Blocks display sleep so schedules and terminals keep firing on time. Costs battery — best on AC.",
       "simpleMode": "Explain things simply",
       "simpleModeDesc": "Agents brief you in plain language instead of engineering shorthand.",
+      "visitorMode": "Visitor mode",
+      "visitorModeDesc": "For when someone outside the team can see this screen. Seals the terminal, hive messages, tool traces, git, the IDE, memory and the Command Center behind a placeholder, and drops file names out of the office's thought bubbles. The floor itself keeps running. Off by default — nothing turns it on by itself.",
       "notifications": "Notifications",
       "desktopNotifications": "Desktop notifications",
       "desktopNotificationsDesc": "Native toasts when an agent finishes or needs your input.",
@@ -240,6 +251,8 @@
       "autoUpdateDesc": "Check GitHub releases and download updates in the background; you choose when to restart. Never restarts on its own.",
       "telemetry": "Anonymous usage stats",
       "telemetryDesc": "A handful of anonymous events (app opened, agent spawned, feature used) — never prompts, code, paths, or agent output. Full list in TELEMETRY.md.",
+      "officeChatter": "Office chatter (experimental)",
+      "officeChatterDesc": "Break-room conversations written live by the model from each agent's personality, relationship history, and current state — instead of canned lines. Uses short hidden Claude sessions (rate-limited to a few per hour). A golden star marks generated exchanges on the floor.",
       "language": "Language",
       "languageDesc": "Choose the language for the app interface. English is the default.",
       "dangerZone": "DANGER ZONE",
@@ -390,6 +403,7 @@
       "terminal": "terminal",
       "floor": "monitor",
       "tasks": "tasks",
+      "legend": "legend",
       "human": "ask me",
       "triggers": "triggers",
       "history": "history",
@@ -505,6 +519,8 @@
     "name": "Name",
     "namePlaceholder": "Ada",
     "character": "Character",
+    "createCharacter": "+ create character",
+    "createCharacterTitle": "Build a custom character from scratch",
     "color": "Color",
     "project": "Project",
     "pickProject": "Pick a project, or add a new one:",
@@ -516,6 +532,27 @@
     "saveAsProject": "save as project",
     "saveAsProjectTitle": "Save this folder to your projects so it's a one-click pick next time",
     "gitIsolation": "Git isolation (own worktree)",
+    "externalHive": "Externally managed (no local hive)",
+    "externalHiveTitle": "This agent's memory and message routing are handled by an external tool (e.g. Hermes), not by this app's own hive. Disables local memory/mailbox and GOD routing for this agent.",
+    "runsOn": "Where does this run?",
+    "runsOnLocal": "This machine (local)",
+    "runsOnRemoteHint": "Runs on {{name}} ({{host}}:{{port}}). Every path below is a path on that machine.",
+    "pairRemote": "+ pair a remote environment",
+    "pairHint": "Start the remote daemon on the target machine — it prints a 6-character pairing code. Enter it here within 2 minutes.",
+    "pairName": "Name",
+    "pairNamePlaceholder": "studio-mac",
+    "pairHost": "Host or IP",
+    "pairHostPlaceholder": "100.x.y.z (Tailscale address)",
+    "pairPort": "Port",
+    "pairCode": "Pairing code",
+    "pairCodePlaceholder": "ABC123",
+    "pairSubmit": "pair",
+    "pairing": "pairing…",
+    "unpairRemote": "Forget {{name}}. Nothing on that machine is touched — only this app's ability to reach it.",
+    "remotePath": "Folder on the remote machine",
+    "remotePathPlaceholder": "/home/you/project — a path on the remote machine",
+    "remoteNoBrowse": "Type this by hand: the folder picker only browses this computer.",
+    "errPairFields": "Name, host, port and pairing code are all required.",
     "resumeSession": "Resume session ID (optional)",
     "resumePlaceholder": "paste a Claude session id to continue its conversation",
     "folderFromSession": "folder set from session: {{path}}",
@@ -574,11 +611,140 @@
     "errFolder": "Pick a folder first",
     "errCommand": "Command is required",
     "hireProgress": "hire {{current}} of {{total}}",
-    "skipHire": "skip hire"
+    "skipHire": "skip hire",
+    "teamTemplatesDesc": "Hiring templates pre-wire a small team in one step — pick one, then review and spawn each teammate just like an imported hire.",
+    "showTeamTemplates": "hire a team…",
+    "hideTeamTemplates": "hide team templates",
+    "useTeamTemplate": "use this team",
+    "teamTemplates": {
+      "shipIt": {
+        "label": "Ship it squad",
+        "description": "Architect + Implementer + Reviewer — a small feature team."
+      },
+      "docsQa": {
+        "label": "Docs & QA pair",
+        "description": "Writer + QA — keeps docs honest and ships get tested."
+      }
+    }
+  },
+  "characterBuilder": {
+    "title": "CREATE CHARACTER",
+    "nameLabel": "Name",
+    "namePlaceholder": "Your character's name",
+    "fallbackName": "Custom",
+    "tabs": {
+      "face": "Face",
+      "hair": "Hair",
+      "clothing": "Clothing",
+      "accessory": "Accessories"
+    },
+    "portraitPreview": "Portrait",
+    "walkPreview": "Walking preview",
+    "randomize": "random candidate",
+    "save": "save character",
+    "skin": "Skin",
+    "browLabel": "Eyebrows",
+    "mouthLabel": "Mouth",
+    "facialHair": "Facial hair",
+    "facialNone": "None",
+    "blush": "Blush",
+    "lashes": "Bigger eyes (lashes)",
+    "glasses": "Glasses",
+    "glassesNone": "None",
+    "heavy": "Heavier build",
+    "hairStyle": "Style",
+    "hairColor": "Hair color",
+    "hairPart": "Part",
+    "hairPartLeft": "Left",
+    "hairPartRight": "Right",
+    "hairRecede": "Receding hairline",
+    "hairLength": "Length",
+    "hairVolume": "Volume",
+    "clothCut": "Cut",
+    "primaryColor": "Primary color",
+    "secondaryColor": "Secondary color",
+    "useSecondaryColor": "Use a secondary color",
+    "wearTie": "Wear a tie",
+    "overridePants": "Override pants color",
+    "accessory": "Accessory",
+    "accessoryNone": "None",
+    "accessoryColor": "Accessory color",
+    "browOptions": {
+      "flat": "Flat",
+      "angry": "Angry",
+      "raised": "Raised",
+      "soft": "Soft"
+    },
+    "mouthOptions": {
+      "neutral": "Neutral",
+      "smile": "Smile",
+      "frown": "Frown",
+      "grin": "Grin"
+    },
+    "facialOptions": {
+      "mustache": "Mustache",
+      "mustacheSm": "Thin mustache",
+      "stubble": "Stubble",
+      "goatee": "Goatee",
+      "fullbeard": "Full beard"
+    },
+    "glassesOptions": {
+      "round": "Round",
+      "square": "Square",
+      "sun": "Sunglasses"
+    },
+    "hairStyleNames": {
+      "styleShort": "Short",
+      "styleFloppy": "Floppy",
+      "styleFrame": "Frame",
+      "styleBun": "Bun",
+      "styleCurly": "Curly",
+      "styleMessy": "Messy",
+      "styleRecede": "Receding",
+      "styleSpiky": "Spiky",
+      "styleBald": "Bald"
+    },
+    "clothNames": {
+      "suit": "Suit",
+      "dressshirt": "Dress shirt",
+      "polo": "Polo",
+      "blouse": "Blouse",
+      "cardigan": "Cardigan",
+      "sweater": "Sweater",
+      "tshirt": "T-shirt",
+      "hoodie": "Hoodie",
+      "blazer": "Blazer"
+    },
+    "skinNames": {
+      "light": "Light",
+      "tan": "Tan",
+      "brown": "Brown",
+      "dark": "Dark"
+    },
+    "accessoryOptions": {
+      "cap": "Cap",
+      "headphones": "Headphones",
+      "earrings": "Earrings",
+      "scarf": "Scarf",
+      "lanyard": "Lanyard",
+      "watch": "Watch"
+    }
+  },
+  "dundies": {
+    "title": "THE DUNDIES",
+    "subtitle": "Before the floor clears out, here's the wrap-up for today.",
+    "loadingTasks": "Tallying the board…",
+    "tasksClosed": "{{count}} tasks closed today",
+    "tasksOpen": "{{count}} still open",
+    "activeTimeHeading": "Time on the clock",
+    "noAgents": "Nobody clocked in today — a quiet one.",
+    "joke": "No trophies, no confetti — just a job well done. See everyone tomorrow.",
+    "notYet": "not yet — back to work",
+    "startClosing": "sounds good — start closing time"
   },
   "onboarding": {
     "titles": {
-      "persona": "WELCOME TO MUNDER DIFFLIN",
+      "persona": "WELCOME TO THE HIVE",
       "welcome": "MEET YOUR OFFICE",
       "home": "STEP 1 OF 4 · HARNESS HOME",
       "homePlain": "STEP 1 OF 4 · A HOME FOR THE APP",
@@ -591,7 +757,7 @@
     },
     "persona": {
       "headline": "A CLONE OF YOU, WORKING 24/7",
-      "body": "Munder Difflin turns the CLI agent you already use into a clone of you — one that runs an office of long-running agents and keeps working while you're away. It manages everything around them: context, memory, tasks, triggers, environment, files, and integrations.",
+      "body": "The Hive turns the CLI agent you already use into a clone of you — one that runs an office of long-running agents and keeps working while you're away. It manages everything around them: context, memory, tasks, triggers, environment, files, and integrations.",
       "bodyLocal": " Everything runs on this machine.",
       "ask": "FIRST — WHO ARE YOU? (we'll tailor the setup)",
       "technicalTitle": "I'M TECHNICAL",
@@ -690,7 +856,7 @@
       "openAtLogin": "OPEN AT LOGIN",
       "openAtLoginDesc": "Relaunch the harness after a reboot so scheduled missions resume on their own. No prompt — applies immediately.",
       "shareStats": "SHARE ANONYMOUS USAGE STATS",
-      "shareStatsDesc": "A handful of anonymous events (app opened, agent spawned, feature used) that help improve Munder Difflin — never prompts, code, file paths, or agent output. Full list in TELEMETRY.md; change anytime in Settings.",
+      "shareStatsDesc": "A handful of anonymous events (app opened, agent spawned, feature used) that help improve The Hive — never prompts, code, file paths, or agent output. Full list in TELEMETRY.md; change anytime in Settings.",
       "stayAwake": "STAY AWAKE ON POWER (MANUAL)",
       "stayAwakeDesc": "macOS only lets you set this one yourself. In Battery → Options, turn on \"Prevent automatic sleeping when the display is off\" (on power adapter) so timers keep firing with the display asleep. Without a sleep-preventing setting the Mac still truly sleeps — work survives and catches up on wake.",
       "openBattery": "open Battery settings",
@@ -826,7 +992,7 @@
     "localEndpoint": "LOCAL ENDPOINT · DEFAULT MODEL (PER ENGINE)",
     "defaultModelPlaceholder": "default model (provider/model)",
     "runningOpenModels": "Running open models? Step-by-step guides:",
-    "runOnOpenModels": "run Munder Difflin on open models",
+    "runOnOpenModels": "run The Hive on open models",
     "setUpMacMini": "set it up on a Mac Mini",
     "autoModeCaveat": "⚠ In auto mode these engines run with full filesystem + shell access (no sandbox) — like Claude's bypass mode. Turn auto mode off (General) to make them ask first. Live end-to-end verification with real model calls is pending your keys / a local LLM."
   },
@@ -876,7 +1042,7 @@
     "downloadingHeadline": "Downloading v{{version}}",
     "downloadingDetail": "{{percent}}% done. You can keep working; the restart is yours to trigger.",
     "downloadedHeadline": "v{{version}} is ready to install",
-    "downloadedDetail": "Restart Munder Difflin to finish updating from v{{v}}.",
+    "downloadedDetail": "Restart The Hive to finish updating from v{{v}}.",
     "restartBtn": "Restart to update",
     "manualDetail": "This install can't update itself — download it from the release page.",
     "manualDetailReason": "This install can't update itself ({{reason}}) — download it from the release page.",
@@ -903,7 +1069,7 @@
     "webhooks": "WEBHOOKS",
     "webhooksBlurb": "Let an outside system post work in.",
     "organisation": "ORGANISATION",
-    "organisationBlurb": "Let a teammate's Munder Difflin message yours."
+    "organisationBlurb": "Let a teammate's The Hive message yours."
   },
   "orgSection": {
     "acceptMessages": "Accept messages from your organisation",
@@ -1291,6 +1457,20 @@
     "assign": "assign",
     "priority": "Priority {{level}}/5"
   },
+  "legend": {
+    "count": "{{count}} legends",
+    "longest": "longest run ×{{count}}",
+    "hint": "written from closed work — nothing here is invented",
+    "empty": "NOTHING ON THE WALL YET",
+    "emptyHint": "The floor writes its own legend. Close a real task and it lands here, with who closed it and when.",
+    "by": "closed by {{name}}",
+    "unassigned": "closed by nobody in particular",
+    "undated": "closed before the log was watching",
+    "first": "FIRST",
+    "firstTitle": "the first task this floor ever closed",
+    "streak": "×{{count}} RUN",
+    "streakTitle": "{{name}} closed {{count}} in a row"
+  },
   "queueComposer": {
     "recording": "● recording — click stop to transcribe",
     "transcribing": "transcribing…",
@@ -1400,5 +1580,34 @@
     "viewSource": "view source",
     "loading": "loading image…",
     "decodeFailed": "could not decode this image — the file may be corrupt or misnamed"
+  },
+  "errorBoundary": {
+    "title": "Something went wrong",
+    "description": "This part of The Hive hit an unexpected error and stopped rendering. The rest of the app should still work — you can try again below.",
+    "showDetails": "show technical details",
+    "copyError": "copy error",
+    "copied": "copied!",
+    "retry": "retry"
+  },
+  "appShell": {
+    "closeDetail": "Close panel",
+    "openDetail": "Open agent panel"
+  },
+  "visitorMode": {
+    "badge": "VISITOR MODE",
+    "badgeTip": "Visitor mode is on — operational panels are hidden. Turn it off in Settings → General.",
+    "sealed": "Hidden for visitors",
+    "sealedGeneric": "This panel is hidden while visitor mode is on.",
+    "sealedHint": "Turn visitor mode off in Settings → General to bring it back.",
+    "sealedTerminal": "Terminal output is hidden while visitor mode is on.",
+    "sealedThreads": "Internal hive messages are hidden while visitor mode is on.",
+    "sealedTraces": "Tool traces are hidden while visitor mode is on.",
+    "sealedGit": "Repository activity is hidden while visitor mode is on.",
+    "sealedCommandCenter": "The Command Center is hidden while visitor mode is on.",
+    "sealedIde": "The IDE is hidden while visitor mode is on.",
+    "sealedBriefing": "This agent's briefing is hidden while visitor mode is on.",
+    "activity": "working",
+    "pathHidden": "Folder hidden while visitor mode is on",
+    "errorHidden": "That failed — details are hidden while visitor mode is on."
   }
 }
