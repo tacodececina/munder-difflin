@@ -25,7 +25,8 @@ const {
   sceneFrameBufs, sceneFrameBufsFromRecipe,
   hashRecipe,
   SKIN_KEYS, HAIR_STYLES, CLOTH_KINDS, BROW_OPTIONS, MOUTH_OPTIONS, FACIAL_OPTIONS,
-  ACCESSORY_OPTIONS, ACCESSORY_DEFAULT_COLOR, GLASSES_OPTIONS
+  ACCESSORY_OPTIONS, ACCESSORY_DEFAULT_COLOR, GLASSES_OPTIONS,
+  quarterFrameBufsFromRecipe, recipeForFixedCharacter
 } = loadTs('src/renderer/src/scene/office/portraitArt.ts');
 
 // ─── minimal fake DOM: just enough canvas/2D-context surface for blitPortrait ─
@@ -328,6 +329,144 @@ test('no accessory field (undefined) leaves rendering equivalent to omitting it 
   const a = sceneFrameBufsFromRecipe(withoutField);
   const b = sceneFrameBufsFromRecipe(withUndefined);
   assert.equal(a.front[0], b.front[0], 'identical recipes (with vs. without an explicit undefined accessory) must share the cached buffer');
+});
+
+// ─── accessories on the TURNED poses ─────────────────────────────────────────
+// The ¾ prototype in portraitArt.ts first shipped its accessories by replaying
+// the FRONT overlay on the turned figure. That overlay is anchored on the front
+// head box (ears at x=3 and x=14) and on the canvas centre line, neither of
+// which the ¾ pose has, so parts of it landed outside the silhouette and the
+// outline pass drew a border around the mistake. These lock in the re-anchored
+// ¾ overlays — cheap, because the whole thing is deterministic buffer math.
+const ACCESSORY_RGBA = (buf, x, y) => {
+  const i = (y * SCENE_W + x) * 4;
+  return [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]].join(',');
+};
+
+test('turned poses render every accessory cleanly, on every fixed cast member', () => {
+  for (const name of FIXED_CAST) {
+    for (const facing of ['quarter', 'quarterBody']) {
+      for (const acc of ACCESSORY_OPTIONS) {
+        const recipe = { ...recipeForFixedCharacter(name), accessory: acc };
+        const frames = quarterFrameBufsFromRecipe(recipe, facing);
+        assert.equal(frames.length, 3, `${name}/${facing}/${acc}: expected 3 walk phases`);
+        for (const [i, buf] of frames.entries()) {
+          assertHealthyBuf(buf, SCENE_W, SCENE_H, `${name} ${facing} ${acc}[${i}]`);
+        }
+      }
+    }
+  }
+});
+
+test('no accessory paints ink detached from the turned figure it is worn on', () => {
+  // The failure this catches: an overlay anchored on the wrong geometry drops a
+  // pixel into empty space beside the sprite, where outlinePass faithfully
+  // draws a border around it and it reads as a chip of dirt. "Attached" = the
+  // added ink reaches the plain figure's ink through orthogonal steps.
+  const ink = (buf, x, y) =>
+    x >= 0 && y >= 0 && x < SCENE_W && y < SCENE_H && buf[(y * SCENE_W + x) * 4 + 3] !== 0;
+  for (const name of FIXED_CAST) {
+    for (const facing of ['quarter', 'quarterBody']) {
+      const plain = quarterFrameBufsFromRecipe(recipeForFixedCharacter(name), facing)[0];
+      for (const acc of ACCESSORY_OPTIONS) {
+        const worn = quarterFrameBufsFromRecipe({ ...recipeForFixedCharacter(name), accessory: acc }, facing)[0];
+        const added = [];
+        for (let y = 0; y < SCENE_H; y++) {
+          for (let x = 0; x < SCENE_W; x++) if (!ink(plain, x, y) && ink(worn, x, y)) added.push([x, y]);
+        }
+        const key = (x, y) => y * SCENE_W + x;
+        const pending = new Set(added.map(([x, y]) => key(x, y)));
+        const stack = [];
+        for (const [x, y] of added) {
+          const touchesBody = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => ink(plain, x + dx, y + dy));
+          if (touchesBody) { pending.delete(key(x, y)); stack.push([x, y]); }
+        }
+        while (stack.length) {
+          const [x, y] = stack.pop();
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            if (pending.delete(key(x + dx, y + dy))) stack.push([x + dx, y + dy]);
+          }
+        }
+        assert.equal(pending.size, 0,
+          `${name}/${facing}/${acc}: ${pending.size} accessory pixel(s) float detached from the figure`);
+      }
+    }
+  }
+});
+
+test('¾ earrings hang one stud off the one ear a turned head shows', () => {
+  // The concrete bug: the front pair's second stud landed at x=14,y=12, one
+  // column past where QUARTER_SKULL's row 12 ends — outside the head.
+  for (const name of FIXED_CAST) {
+    const plain = quarterFrameBufsFromRecipe(recipeForFixedCharacter(name), 'quarter')[0];
+    const worn = quarterFrameBufsFromRecipe({ ...recipeForFixedCharacter(name), accessory: 'earrings' }, 'quarter')[0];
+    assert.equal(ACCESSORY_RGBA(worn, 14, 12), ACCESSORY_RGBA(plain, 14, 12),
+      `${name}: earrings must not touch x=14,y=12 — that is past the ¾ skull's edge`);
+    assert.notEqual(ACCESSORY_RGBA(worn, 4, 12), ACCESSORY_RGBA(plain, 4, 12),
+      `${name}: the ¾ stud belongs under the one visible ear, at x=4,y=12`);
+  }
+});
+
+test("'quarterBody' keeps the FRONT head verbatim, accessories included", () => {
+  // That is the entire point of the facing: turn the body, risk nothing of the
+  // identity the hair mass carries. Rows 0-16 are head-only (the ¾ torso starts
+  // at row 18 and the front head owns the neck at row 17), so they must match
+  // the plain front pose pixel for pixel, with or without headwear.
+  for (const name of FIXED_CAST) {
+    for (const acc of [undefined, 'cap', 'headphones', 'earrings']) {
+      const recipe = { ...recipeForFixedCharacter(name), accessory: acc };
+      const front = sceneFrameBufsFromRecipe(recipe).front[0];
+      const body = quarterFrameBufsFromRecipe(recipe, 'quarterBody')[0];
+      for (let y = 0; y <= 16; y++) {
+        for (let x = 0; x < SCENE_W; x++) {
+          assert.equal(ACCESSORY_RGBA(body, x, y), ACCESSORY_RGBA(front, x, y),
+            `${name}/${acc ?? 'no accessory'}: head pixel (${x},${y}) drifted from the front pose`);
+        }
+      }
+    }
+  }
+});
+
+test('¾ body accessories follow the torso when `heavy` widens it', () => {
+  // The lanyard and the watch hang on the torso, and drawQuarterTorso moves its
+  // centre-front seam and its near-arm column for a heavy build. A fixed-column
+  // overlay would sit a column inside a heavy figure's sleeve.
+  const base = { ...recipeForFixedCharacter('michael'), accessory: 'watch' };
+  const slimWatch = quarterFrameBufsFromRecipe({ ...base, heavy: false }, 'quarter')[0];
+  const wideWatch = quarterFrameBufsFromRecipe({ ...base, heavy: true }, 'quarter')[0];
+  const plainWide = quarterFrameBufsFromRecipe({ ...recipeForFixedCharacter('michael'), heavy: true }, 'quarter')[0];
+  assert.notEqual(ACCESSORY_RGBA(slimWatch, 4, 23), ACCESSORY_RGBA(
+    quarterFrameBufsFromRecipe({ ...recipeForFixedCharacter('michael'), heavy: false }, 'quarter')[0], 4, 23),
+    'slim build: the watch belongs on the near arm at x=4');
+  assert.notEqual(ACCESSORY_RGBA(wideWatch, 3, 23), ACCESSORY_RGBA(plainWide, 3, 23),
+    'heavy build: the watch must move out to the wider near-arm column x=3');
+});
+
+// ─── the turned-pose cache ───────────────────────────────────────────────────
+test("quarterFrameBufsFromRecipe hands 'front'/'back' straight to the scene cache", () => {
+  // Facing covers all four directions, so the untuned two are reachable here.
+  // They must not be composed a second time under a second key — same buffer
+  // objects, or the two caches drift and the same figure is stored twice.
+  const recipe = recipeForFixedCharacter('toby');
+  const scene = sceneFrameBufsFromRecipe(recipe);
+  assert.deepEqual(quarterFrameBufsFromRecipe(recipe, 'front'), scene.front);
+  assert.equal(quarterFrameBufsFromRecipe(recipe, 'front')[0], scene.front[0]);
+  assert.equal(quarterFrameBufsFromRecipe(recipe, 'back')[2], scene.back[2]);
+});
+
+test('the ¾ cache is bounded — a long recipe sweep does not grow it forever', () => {
+  // Three 2.3 KB frames live behind every key, and the turned pose exists to be
+  // swept (preview sheets, look proposals). Evicting is observable: the very
+  // first recipe of a sweep longer than the bound has to be composed again, so
+  // it comes back as a different buffer object with identical contents.
+  const seed = { ...recipeForFixedCharacter('creed'), c1: [0, 0, 0] };
+  const first = quarterFrameBufsFromRecipe(seed, 'quarter')[0];
+  for (let i = 1; i <= 200; i++) {
+    quarterFrameBufsFromRecipe({ ...recipeForFixedCharacter('creed'), c1: [i, i, i] }, 'quarter');
+  }
+  const again = quarterFrameBufsFromRecipe(seed, 'quarter')[0];
+  assert.notEqual(again, first, 'the cache never evicted: 200 distinct recipes all stayed resident');
+  assert.deepEqual(Array.from(again), Array.from(first), 're-composing must be deterministic');
 });
 
 // ─── the big seeded-random sweep ──────────────────────────────────────────────

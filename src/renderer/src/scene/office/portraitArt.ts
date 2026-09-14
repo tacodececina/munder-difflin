@@ -653,6 +653,504 @@ function drawSceneBody(buf: Buf, r: Recipe, phase: number, back: boolean): void 
   drawSceneLegs(buf, defaultPants(r), phase);
 }
 
+// ─── ¾ orientation (prototype) ───────────────────────────────────────────────
+// WHY this block exists: the scene sprite's only orientation axis was `back`, so
+// every figure either stared straight at the camera or straight away from it.
+// On the orthogonal floor that is invisible; on the isometric floor it is the
+// whole problem — the ground runs on diagonals while the bodies stay square to
+// the screen, so the cast reads as decals standing on a slanted picture instead
+// of as people standing in a room. A ¾ turn puts the figure on the floor's own
+// axes. This is a deliberately small first cut: ONE facing, drawn explicitly,
+// so a human can judge whether 18×32 has the pixels for the idea at all before
+// fifteen characters are rewritten around it.
+//
+// Everything below draws the body turned toward screen-RIGHT. Screen-left is a
+// free horizontal mirror (`mirrorSceneBuf`). What that flip costs is worth
+// stating plainly rather than waving at: it relocates the hair part, and it
+// also REVERSES THE LIGHT — the mirrored figure is lit from the top-right,
+// including the glasses glint, while every other sprite in this file is lit
+// from the top-left. That is the standard mirrored-pixel-art trade (a second
+// hand-drawn facing is the only way out of it), and it is survivable here
+// because nothing in the scene casts a matching shadow and no character carries
+// an asymmetric prop — no scabbard, no single pauldron, no badge on one hip —
+// so the flip yields a differently-lit figure, never a wrong one. It is not,
+// however, free of consequence, and `quarterBody` inherits one more wrinkle:
+// its head is the FRONT head, so a character walking left shows a mirrored hair
+// part that jumps sides the moment they face the camera.
+//
+// The turn cues, ordered by how much of the read each one carries:
+//   1. the FEET overhang toward the facing side (survives 1×, costs 2px),
+//   2. the near arm separates from the chest as its own cluster, held apart by
+//      a 1px occlusion column — the highest-value pixels in the whole pose,
+//   3. the centre-front seam (tie / placket / buttons) slides off centre,
+//      splitting the chest into a wide lit front plane and a narrow dark side
+//      plane, which is what gives the torso depth instead of width,
+//   4. the legs narrow and overlap instead of standing side by side,
+//   5. the nose breaks the head's far silhouette edge,
+//   6. the eyes crowd toward the facing side, the far one foreshortened.
+// 1–4 are mass-scale and read at 1×; 5–6 are one or two pixels each and only
+// pay off from 2× up. Ordered on purpose: if the pose has to be cut back, the
+// face detail is what goes, never the feet or the arm.
+//
+// Light stays top-left, as everywhere else in this file — and on a right-facing
+// ¾ figure that conveniently falls on the near side: near arm and near cheek
+// lit, far shoulder and everything past the centre-front seam in shadow. No
+// pixel here contradicts the light the front/back poses are drawn to — as
+// drawn. The screen-left half of the set, being `mirrorSceneBuf` of these
+// frames, is lit from the top-right instead; see that function.
+
+/** Skull columns of the ¾ head; the nose breaks out one column past QX1. */
+const QX0 = 5, QX1 = 13, QNOSE = 14;
+
+/** ¾ skull silhouette as [row, x0, x1]. Same rows (4–16) as the front head, so
+ *  the sprite keeps an identical pixel height in every direction — a figure
+ *  that grows when it turns visibly bounces in the scene. It is one column
+ *  narrower than the front head (a turned head shows less width) and shifted a
+ *  column toward the facing side to leave room for the cranium behind it.
+ *  The jaw tapers from the back on a clean 1px-per-row diagonal down to a chin
+ *  that sits under the CENTRE-FRONT line rather than under the middle of the
+ *  head: that asymmetry is most of what says "turned" before any feature is
+ *  drawn. */
+const QUARTER_SKULL: [number, number, number][] = [
+  [4, 7, 11], [5, 6, 12], [6, 5, 13], [7, 5, 13], [8, 5, 13], [9, 5, 13], [10, 5, 13],
+  [11, 5, 13], [12, 5, 13], [13, 6, 13], [14, 7, 13], [15, 8, 13], [16, 10, 13],
+];
+
+/** ¾ head skin: skull, nose, ear and the form shading — the analogue of
+ *  drawHead() + drawHeavyFace() for the turned pose. */
+function drawQuarterHeadSkin(buf: Buf, r: Recipe): void {
+  const s = SKIN[r.skin];
+  for (const [y, a, b] of QUARTER_SKULL) rect(buf, a, y, b, y, s.base);
+  if (r.heavy) {
+    // Heavier build: pad the jaw outward on both edges and hang a second roll
+    // under the chin, the same idea as drawHeavyFace but following the ¾ jaw.
+    for (let y = 12; y <= 15; y++) set(buf, QX0 - 1, y, s.base);
+    for (const x of [7, 8, 9]) set(buf, x, 16, s.base);
+    for (const x of [9, 10, 11, 12, 13]) set(buf, x, 17, s.base);
+    set(buf, 10, 17, s.sh); set(buf, 11, 17, s.sh);
+  }
+  // Form. One light, top-left: the cheekbone on the near side of the centre
+  // front is the sweet spot, everything past the centre front (x≥12) is the
+  // side plane turning away, and x=5 is the skull rolling off toward the back.
+  // Note this is offset toward the light rather than centred in the shape —
+  // a highlight in the middle of the face is pillow shading and reads as a
+  // balloon, which is precisely the failure this pose is trying to escape.
+  for (const [x, y] of [[7, 10], [8, 10], [7, 11]] as const) set(buf, x, y, s.hi);
+  for (let y = 7; y <= 15; y++) set(buf, QX1, y, s.sh);
+  // Only rows 11-12 on the back edge: the skull has already tapered away from
+  // x=QX0 by row 13, and painting the column any further down puts skin
+  // OUTSIDE the silhouette, where the outline pass faithfully draws a border
+  // around the mistake and it reads as a wart on the jaw.
+  for (let y = 11; y <= 12; y++) set(buf, QX0, y, s.sh);
+  // The underside of the jaw faces the floor: the whole bottom row is shadow.
+  // Leaving the chin's front corner at base value left one bright pixel hanging
+  // off the darkest part of the head — a classic orphan, and it read as a chip.
+  for (const [x, y] of [[12, 14], [12, 15]] as const) set(buf, x, y, s.sh);
+  for (let x = 10; x <= 13; x++) set(buf, x, 16, s.sh);
+  // Nose: ONE pixel breaking the far edge of the silhouette, with the nostril
+  // shadow tucked under it. One is the whole budget — two rows read as a beak
+  // on a 13px head — and this is drawn after the shading so the shadow pass
+  // cannot swallow it.
+  set(buf, QNOSE, 11, s.base);
+  set(buf, QX1, 12, s.line);
+  // Near ear. Drawn before the hair, which leaves a notch for it, so short
+  // styles read as tucked behind the ear instead of pasted over it.
+  set(buf, QX0 - 1, 10, s.base); set(buf, QX0 - 1, 11, s.sh);
+  // Neck — shifted toward the facing side, but less than the chin: a neck
+  // turns with the shoulders, not with the head.
+  rect(buf, 8, 17, 11, 18, s.sh);
+  rect(buf, 8, 17, 10, 17, s.base);
+}
+
+/** ¾ face: eyes, brows, mouth — the analogue of drawFace() for the turned pose.
+ *  The nose lives in drawQuarterHeadSkin() because in ¾ it is a silhouette
+ *  event, not a shading one. */
+function drawQuarterFace(buf: Buf, r: Recipe): void {
+  const s = SKIN[r.skin];
+  const white: RGB = [250, 248, 244], pup: RGB = [46, 38, 42];
+  // The near eye keeps its white; the far one is squeezed to the pupil alone,
+  // crowded against the profile edge. Two equal-width eyes is what made the
+  // first cut of this pose still read as staring at the camera with a nose
+  // stuck on the side — the asymmetry has to be total at this size, not
+  // gradual, because one pixel of difference is below the eye's noticing
+  // threshold while an eye that is *missing its white* is not.
+  rect(buf, 6, 9, 8, 9, white); set(buf, 8, 9, pup);
+  set(buf, 12, 9, pup);
+  if (r.lashes) {
+    const lash: RGB = [54, 40, 48], glint: RGB = [252, 250, 248];
+    for (const x of [5, 6, 7, 8, 12]) set(buf, x, 8, lash);
+    set(buf, 6, 9, glint);
+  }
+  // Brows. "Inner" means toward the centre of the face, which in ¾ is the near
+  // eye's RIGHT end and the far eye's LEFT end — so an angry brow drops on
+  // opposite sides of the two eyes, not mirror-symmetrically.
+  const brow = r.brow ?? 'flat';
+  if (brow === 'flat') { for (const x of [6, 7, 8, 11, 12]) set(buf, x, 7, s.line); }
+  else if (brow === 'angry') {
+    set(buf, 6, 7, s.line); set(buf, 7, 7, s.line); set(buf, 8, 8, s.line);
+    set(buf, 11, 8, s.line); set(buf, 12, 7, s.line);
+  } else if (brow === 'raised') { for (const x of [6, 7, 8, 11, 12]) set(buf, x, 6, s.line); }
+  else { for (const x of [7, 12]) set(buf, x, 7, s.line); for (const x of [6, 8, 11]) set(buf, x, 7, s.sh); }
+  // Mouth, sitting just BEHIND the centre-front line: a mouth wraps around the
+  // face, so in ¾ only the near half of it is visible and it is shorter than
+  // the front view's.
+  const mc: RGB = [158, 86, 80];
+  const mouth = r.mouth ?? 'neutral';
+  const mouths: Record<Mouth, [number, number][]> = {
+    neutral: [[10, 14], [11, 14], [12, 14]],
+    smile: [[10, 14], [11, 14], [12, 14], [9, 13], [13, 13]],
+    frown: [[10, 15], [11, 15], [12, 15], [9, 14], [13, 14]],
+    grin: [[10, 13], [11, 13], [12, 13], [10, 14], [11, 14], [12, 14], [9, 13], [13, 13]],
+  };
+  for (const [x, y] of mouths[mouth]) set(buf, x, y, mc);
+  if (r.blush) { set(buf, 6, 12, [235, 150, 140], 140); set(buf, 12, 12, [235, 150, 140], 140); }
+}
+
+/** ¾ facial hair — the front shapes re-anchored onto the turned jaw. Cheaper
+ *  than a generic transform and it lets each shape follow the ¾ jaw's diagonal
+ *  instead of floating off the chin. */
+function drawQuarterFacial(buf: Buf, kind: Facial, color: RGB): void {
+  const [, base, sh] = shades(color);
+  if (kind === 'mustache') {
+    for (const x of [9, 10, 11, 12]) set(buf, x, 13, base);
+    set(buf, 9, 12, base); set(buf, 12, 12, base);
+  } else if (kind === 'mustacheSm') {
+    for (const x of [10, 11]) set(buf, x, 13, base);
+  } else if (kind === 'stubble') {
+    for (const [x, y] of [[6, 13], [6, 14], [7, 14], [8, 15], [9, 15], [10, 15], [11, 15], [12, 14], [13, 13], [12, 15]] as const)
+      set(buf, x, y, sh, 150);
+  } else if (kind === 'goatee') {
+    for (const x of [10, 11]) { set(buf, x, 14, base); set(buf, x, 15, base); }
+    for (const x of [9, 10, 11, 12]) set(buf, x, 13, base);
+  } else if (kind === 'fullbeard') {
+    for (const x of [6, 7, 12, 13]) set(buf, x, 14, base);
+    for (const x of [7, 8, 9, 12, 13]) set(buf, x, 15, base);
+    for (const x of [9, 10, 11, 12]) set(buf, x, 16, base);
+    set(buf, 10, 15, sh); set(buf, 11, 15, sh);
+  }
+}
+
+/** ¾ hair: one style-agnostic mass, not nine ported styles.
+ *
+ *  The deliberate scope cut of this step. The cranium BEHIND the face is the
+ *  volume a front view never has to draw, and leaving it out is exactly what
+ *  makes a turned head look like a flat card — so the mass has to exist, but
+ *  which of the nine silhouettes it wears can wait until the pose is approved.
+ *  What does carry through per character is the hair COLOR and the length of
+ *  the long styles, which is what the back view already settles for too. */
+function drawQuarterHair(buf: Buf, r: Recipe): void {
+  const s = SKIN[r.skin];
+  if (r.hair === 'styleBald') {
+    // Bald: a skin dome with a top-left sheen and only a low fringe ring
+    // wrapping the back of the skull, same logic as styleBald/drawHeadBackBald.
+    const [shi, sbase, ssh] = shades(s.base, 1.1, 0.82);
+    for (const [y, a, b] of [[2, 7, 11], [3, 6, 12], [4, 5, 13]] as [number, number, number][])
+      rect(buf, a, y, b, y, sbase);
+    for (const [x, y] of [[7, 2], [8, 2], [6, 3], [7, 3]] as const) set(buf, x, y, shi);
+    set(buf, 12, 3, ssh); set(buf, 13, 4, ssh);
+    const [, hbase, hsh] = shades(r.hairc);
+    for (let y = 9; y <= 12; y++) { set(buf, 3, y, hbase); set(buf, 4, y, hbase); }
+    for (const [x, y] of [[3, 9], [3, 12], [4, 12]] as const) set(buf, x, y, hsh);
+    for (const y of [10, 11]) set(buf, QX1, y, hbase);
+    return;
+  }
+  const [hi, base, sh] = shades(r.hairc);
+  // Crown over the skull, then the CRANIUM: the mass behind the face, bulging
+  // one column past the crown and falling away to the nape. This lobe is the
+  // whole reason a ¾ head does not read as a front head with the face slid
+  // sideways — it is depth the front pose has no way to show. Rows 10–11 stop
+  // short of x=4 so the ear drawn earlier stays visible in front of it.
+  const rows: [number, number, number][] = [
+    [2, 6, 11], [3, 5, 12], [4, 4, 13], [5, 4, 13],
+    [6, 3, 6], [7, 3, 5], [8, 3, 5], [9, 3, 5], [10, 3, 3], [11, 3, 3], [12, 3, 4],
+  ];
+  for (const [y, a, b] of rows) rect(buf, a, y, b, y, base);
+  if (r.hair !== 'styleRecede') {
+    // A forelock sweeping across the forehead and breaking toward the far side.
+    // Asymmetry is doing real work here: a fringe that falls evenly over both
+    // brows re-centres the face and quietly undoes the turn. It stops at x=12
+    // on purpose — one column further and it buries the far brow, which is the
+    // only thing keeping the foreshortened eye from reading as a smudge.
+    for (let x = 7; x <= 12; x++) set(buf, x, 6, base);
+    set(buf, 13, 7, base);
+  }
+  // Long styles drape down the back, exactly as drawHeadBack() handles them.
+  const len = r.hair === 'styleFrame' ? (r.hairargs?.length ?? 17)
+            : r.hair === 'styleMessy' ? (r.hairargs?.length ?? 9) : 0;
+  for (let y = 12; y <= len; y++) { set(buf, 3, y, base); set(buf, 4, y, base); }
+  // Value break between the fringe and the cranium: the crown and the top of
+  // the lobe face up-left into the light, the underside of the lobe turns away.
+  // Without it the two masses fuse and the head reads as one big hairstyle.
+  for (const [x, y] of [[6, 2], [7, 2], [5, 3], [6, 3], [3, 6], [4, 6]] as const) set(buf, x, y, hi);
+  for (let y = 10; y <= 12; y++) set(buf, 3, y, sh);
+  set(buf, 5, 9, sh); set(buf, 4, 12, sh);
+}
+
+/** ¾ glasses. One frame shape for all three kinds — a 3px near lens, a 2px far
+ *  lens squeezed against the profile, and a temple arm running back toward the
+ *  ear, which is the part a front view can never show and the part that most
+ *  says "these are on a head that turned". */
+function drawQuarterGlasses(buf: Buf, kind: GlassesKind): void {
+  const frame: RGB = [60, 54, 62];
+  const glint: RGB = [236, 240, 246];
+  for (const x of [6, 7, 8]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
+  for (const x of [11, 12]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
+  set(buf, 5, 9, frame); set(buf, 9, 9, frame); set(buf, 10, 9, frame); set(buf, 13, 9, frame);
+  set(buf, 4, 9, frame); // temple arm toward the ear
+  if (kind === 'sun') {
+    const lens: RGB = [30, 28, 34];
+    for (const x of [6, 7, 8]) set(buf, x, 9, lens);
+    for (const x of [11, 12]) set(buf, x, 9, lens);
+  }
+  set(buf, 6, 8, glint); set(buf, 11, 8, glint);
+}
+
+/** The ¾ head group — same order as drawHeadGroup(): skin → face → facial hair
+ *  → hair → glasses, so a later layer can always cover an earlier one. */
+function drawQuarterHeadGroup(buf: Buf, r: Recipe): void {
+  drawQuarterHeadSkin(buf, r);
+  drawQuarterFace(buf, r);
+  if (r.facial) drawQuarterFacial(buf, r.facial, r.hairc);
+  drawQuarterHair(buf, r);
+  if (r.glasses) drawQuarterGlasses(buf, r.glasses);
+}
+
+/** ¾ torso. Three values across the chest instead of the front pose's two:
+ *  a wide lit FRONT plane, a narrow dark SIDE plane past the centre-front seam,
+ *  and a darker step again for the far arm behind it. That value hierarchy is
+ *  what makes the torso read as having depth rather than just being narrower. */
+function drawQuarterTorso(buf: Buf, r: Recipe): void {
+  const [hi, base, sh] = shades(r.c1);
+  const deep = shades(r.c1, 1.22, 0.5)[2]; // far arm + occlusion, one step past `sh`
+  const wide = r.heavy ?? false;
+  const NEAR = wide ? 3 : 4;   // outer column of the near (screen-left) arm
+  const SEAM = wide ? 11 : 10; // centre-front: where the chest turns away
+  const FAR = wide ? 14 : 13;  // far arm, mostly hidden behind the chest
+  rect(buf, NEAR + 1, 18, FAR, 18, base);
+  rect(buf, NEAR, 19, FAR + 1, 19, base);
+  rect(buf, NEAR, 20, FAR, 24, base);
+  // Near arm: a lit outer edge, then the occlusion column that holds it off the
+  // chest. Two pixels of highlight, not a full-height stripe — a stripe running
+  // parallel to the silhouette is banding, and banding flattens exactly the
+  // form this arm is here to describe.
+  const rim = shades(r.c1, 1.09, 1)[0]; // gentler than `hi`: a full-strength
+  set(buf, NEAR, 20, rim); set(buf, NEAR, 21, rim); // highlight on a 2px sleeve
+  set(buf, NEAR, 22, rim);                          // bleaches the garment out
+  for (let y = 20; y <= 24; y++) set(buf, NEAR + 2, y, deep);
+  set(buf, NEAR + 2, 19, sh);
+  // Side plane + far arm.
+  for (let y = 19; y <= 24; y++) { set(buf, SEAM + 2, y, sh); set(buf, FAR, y, deep); }
+  set(buf, FAR + 1, 19, sh);
+  // The shadow the head casts onto the chest. One row, and it is what stops the
+  // head looking pasted on top of the shoulders.
+  for (let x = 8; x <= 11; x++) set(buf, x, 19, sh);
+  const skin = SKIN[r.skin];
+  const tie = r.tie;
+  // Garment details, re-anchored on the centre-front seam. A tie or placket
+  // running down SEAM..SEAM+1 with its far column in the darker shade reads as
+  // fabric wrapping around the body — the single most legible turn cue on the
+  // torso, which is why the suits and shirts get it first.
+  if (r.cloth === 'suit') {
+    const white: RGB = [238, 238, 236];
+    for (const [x, y] of [[SEAM, 18], [SEAM + 1, 18], [SEAM - 1, 19], [SEAM, 19], [SEAM + 1, 19], [SEAM, 20], [SEAM + 1, 20]] as const)
+      set(buf, x, y, white);
+    for (const [x, y] of [[SEAM - 2, 19], [SEAM - 1, 20], [SEAM + 2, 19]] as const) set(buf, x, y, sh);
+    if (tie) {
+      const [tieHi, tieBase, tieSh] = shades(tie);
+      for (let y = 20; y <= 24; y++) { set(buf, SEAM, y, tieBase); set(buf, SEAM + 1, y, tieSh); }
+      set(buf, SEAM, 20, tieHi);
+    }
+  } else if (r.cloth === 'dressshirt') {
+    for (const [x, y] of [[SEAM - 2, 18], [SEAM - 1, 18], [SEAM + 2, 18], [SEAM - 1, 19]] as const) set(buf, x, y, sh);
+    if (tie) {
+      const [, tieBase, tieSh] = shades(tie);
+      for (let y = 19; y <= 24; y++) { set(buf, SEAM, y, tieBase); set(buf, SEAM + 1, y, tieSh); }
+    } else for (let y = 20; y <= 24; y += 2) set(buf, SEAM, y, sh);
+  } else if (r.cloth === 'polo') {
+    for (const [x, y] of [[SEAM - 2, 18], [SEAM - 1, 18], [SEAM + 1, 18], [SEAM + 2, 18]] as const) set(buf, x, y, hi);
+    set(buf, SEAM, 20, sh); set(buf, SEAM, 22, sh);
+  } else if (r.cloth === 'blouse') {
+    for (const [x, y] of [[SEAM - 1, 18], [SEAM, 18], [SEAM + 1, 18], [SEAM, 19]] as const) set(buf, x, y, skin.sh);
+    for (let x = NEAR + 3; x <= SEAM + 1; x++) if (eq(rgbAt(buf, x, 20), base)) set(buf, x, 20, hi);
+  } else if (r.cloth === 'cardigan') {
+    const inner: RGB = r.c2 ? shades(r.c2)[1] : [235, 233, 226];
+    for (let y = 18; y <= 24; y++) { set(buf, SEAM, y, inner); set(buf, SEAM + 1, y, shades(inner)[2]); }
+    for (const [x, y] of [[SEAM - 2, 18], [SEAM - 1, 18], [SEAM + 2, 18]] as const) set(buf, x, y, sh);
+  } else if (r.cloth === 'sweater') {
+    for (let x = SEAM - 2; x <= SEAM + 2; x++) set(buf, x, 18, sh);
+  } else if (r.cloth === 'tshirt') {
+    for (let x = SEAM - 1; x <= SEAM + 2; x++) set(buf, x, 18, sh);
+    set(buf, SEAM, 19, hi); set(buf, SEAM + 1, 19, hi);
+    set(buf, NEAR + 1, 22, hi); set(buf, SEAM + 2, 21, hi); // short-sleeve hems
+  } else if (r.cloth === 'hoodie') {
+    for (const [x, y] of [[NEAR + 2, 19], [SEAM + 3, 19]] as const) set(buf, x, y, sh);
+    for (const x of [SEAM - 2, SEAM - 1, SEAM + 1, SEAM + 2]) set(buf, x, 18, sh);
+    const string: RGB = r.c2 ? shades(r.c2)[0] : [235, 233, 226];
+    set(buf, SEAM, 20, string); set(buf, SEAM, 21, string);
+    set(buf, SEAM + 2, 20, string); set(buf, SEAM + 2, 21, string);
+    for (let x = NEAR + 3; x <= SEAM + 2; x++) set(buf, x, 24, sh);
+  } else if (r.cloth === 'blazer') {
+    for (const [x, y] of [[SEAM - 1, 18], [SEAM - 2, 19]] as const) set(buf, x, y, hi);
+    for (const [x, y] of [[SEAM + 1, 18], [SEAM + 2, 19]] as const) set(buf, x, y, hi);
+    set(buf, SEAM, 18, sh);
+    for (const [x, y] of [[SEAM - 1, 20], [SEAM + 1, 20]] as const) set(buf, x, y, sh);
+    const button: RGB = r.c2 ? shades(r.c2)[2] : sh;
+    set(buf, SEAM, 22, button);
+  }
+}
+
+/** ¾ legs.
+ *
+ *  The first cut of this drew both legs as one 6-wide block split by a dark
+ *  column, on the theory that a turned stance foreshortens the gap. At 18×32
+ *  that was simply wrong: the gap between the legs is NEGATIVE SPACE, and
+ *  negative space is what makes a lower body read as two legs instead of a
+ *  skirt. A dark column is not a hole. So the gap stays a real hole — the legs
+ *  just sit one column closer together than the front pose's.
+ *
+ *  What carries the turn instead is the STAGGER: the far foot lands a row
+ *  higher than the near one. Higher on screen is further away on an isometric
+ *  floor, so the two feet stop sharing a line and the figure stands IN the
+ *  room. The sprite's bottom row is unchanged, so it still does not grow or
+ *  bounce when it turns. And both toes overhang toward the facing side — two
+ *  pixels, and the only cue in this whole pose that still works at 1×. */
+function drawQuarterLegs(buf: Buf, pants: RGB, phase: number): void {
+  const [, base, sh] = shades(pants);
+  const nearLow = phase !== 1, farLow = phase !== 2;
+  const nearBottom = nearLow ? 30 : 29, farBottom = farLow ? 29 : 28;
+  rect(buf, 9, 25, 11, farBottom, sh);      // far leg, behind and darker
+  rect(buf, 5, 25, 7, nearBottom, base);    // near leg, in front
+  set(buf, 7, 25, sh); set(buf, 7, 26, sh); // inner edge, turning away
+  // Far shoe first so the near one overlaps it; toes overhang to the right.
+  rect(buf, 9, farBottom + 1, 12, farBottom + 1, SHOE);
+  rect(buf, 5, nearBottom + 1, 9, nearBottom + 1, SHOE);
+}
+
+// ─── ¾ accessories ───────────────────────────────────────────────────────────
+// The front overlays in drawAccessory() are anchored on the FRONT head box
+// (HX0-1..HX1+1, ears at x=3 and x=14) and on the front torso's centre line.
+// The ¾ head is one column narrower and shifted a column toward the facing
+// side, and the ¾ torso's centre-front seam is off centre — so replaying the
+// front overlay on a turned figure does not merely look approximate, it paints
+// OUTSIDE the silhouette: `drawEarrings`' right stud lands at x=14,y=12 where
+// QUARTER_SKULL's row 12 already stopped at x=13, and the outline pass then
+// dutifully draws a border around the mistake. These are the same six
+// accessories re-anchored on the turned geometry.
+//
+// The split is by what each thing is worn ON, not by which facing is drawn:
+//   • cap / headphones / earrings hang on the HEAD, so they follow whichever
+//     head the pose uses — the ¾ head for 'quarter', the verbatim front head
+//     for 'quarterBody' (which is the whole point of that facing).
+//   • the scarf straddles both — it wraps the neck the head group draws AND
+//     covers the collar cut-out the torso leaves — so it takes both anchors.
+//   • lanyard and watch hang on the TORSO, which is the ¾ torso in BOTH
+//     turned facings, so they always take the turned anchors.
+
+/** ¾ cap: the crown re-cut to the ¾ hair mass's contour, and a brim that points
+ *  where the face points. The brim is the only part of this overlay that
+ *  changes the SILHOUETTE rather than the interior — it breaks out one column
+ *  past the head's front edge — which is the only kind of cue that has any
+ *  chance at small scale. One column is not much of a chance; it is what an
+ *  18px-wide canvas affords. */
+function drawQuarterCap(buf: Buf, color: RGB): void {
+  const [hi, base] = shades(color);
+  for (let x = 6; x <= 11; x++) set(buf, x, 1, base);
+  rect(buf, 5, 2, 12, 2, base);
+  rect(buf, 4, 3, 13, 5, base);
+  for (const x of [6, 7, 8]) set(buf, x, 1, hi);
+  // Brim on row 5, clear of the brows (rows 6-7) exactly as drawCapFront's is.
+  const [, , brimSh] = shades(color, 1.22, 0.6);
+  for (let x = 8; x <= 14; x++) set(buf, x, 5, brimSh);
+}
+
+/** ¾ headphones: band over the crown, down the BACK of the skull, into a single
+ *  cushion over the one ear a turned head shows. The front pose's second
+ *  cushion is deliberately gone — a cup on the far side of a head turned to
+ *  screen-right is behind the skull. The borrowed overlay drew it anyway, at
+ *  x=14-15 over rows 8-11, where the ¾ skull has already ended at x=13: a
+ *  cushion-sized block hanging off the cheek on the side the head turned away
+ *  from, which is roughly the opposite of a turn cue. */
+function drawQuarterHeadphones(buf: Buf, color: RGB): void {
+  const [hi, base, sh] = shades(color);
+  for (let x = 6; x <= 11; x++) set(buf, x, 1, base);
+  set(buf, 5, 2, base); set(buf, 12, 2, base);
+  set(buf, 4, 3, base); set(buf, 13, 3, base); // far side tucks behind the head
+  set(buf, 3, 4, base); set(buf, 3, 5, base);
+  for (let y = 6; y <= 8; y++) set(buf, 2, y, base);
+  rect(buf, 2, 9, 4, 11, base);
+  set(buf, 2, 9, hi); set(buf, 2, 10, hi);
+  for (const x of [2, 3, 4]) set(buf, x, 11, sh);
+  for (const x of [7, 8, 9]) set(buf, x, 1, hi);
+}
+
+/** ¾ earrings: ONE stud, under the one visible ear (drawQuarterHeadSkin puts it
+ *  at x=QX0-1, rows 10-11). The front pair's second stud is what hung a lone
+ *  gold pixel off the far side of the ¾ jaw. */
+function drawQuarterEarrings(buf: Buf, color: RGB): void {
+  const [hi] = shades(color);
+  set(buf, QX0 - 1, 12, hi);
+}
+
+/** Scarf for the turned poses. Unlike the other five this one straddles the two
+ *  halves of the figure, so it takes BOTH anchors: `neck` is the head group's
+ *  neck column (8 for the ¾ head, 7 for the front head `'quarterBody'` keeps)
+ *  and `seam` is drawQuarterTorso's centre front.
+ *
+ *  The lower rows have to track the seam rather than sit at fixed columns
+ *  because a scarf's job is to cover the collar cut-out the garment leaves at
+ *  the neck, and the ¾ torso anchors that cut-out on the seam — which moves
+ *  when `heavy` widens the body. Miss it and a blouse's bare-skin neckline
+ *  pokes out beside the scarf as a stray skin pixel. With `neck`=7 the wrap
+ *  lands on the front head's neck exactly where drawScarf's does; the rows
+ *  below it still follow the turned torso, which is why `'quarterBody'` cannot
+ *  simply reuse drawScarf. */
+function drawQuarterScarf(buf: Buf, color: RGB, neck: number, seam: number): void {
+  const [hi, base, sh] = shades(color);
+  for (let x = neck - 1; x <= neck + 4; x++) set(buf, x, 17, base);
+  set(buf, neck - 1, 17, sh); set(buf, neck + 4, 17, sh);
+  for (let x = neck; x <= seam + 1; x++) set(buf, x, 18, base);
+  set(buf, seam, 19, hi);
+}
+
+/** ¾ lanyard: strap + badge re-anchored on the torso's centre-front seam rather
+ *  than on the canvas centre, so it travels with the chest when `heavy` widens
+ *  the body. The badge's far column steps down a shade: a flat white rectangle
+ *  on a turned chest is the one thing that can undo the torso's depth. */
+function drawQuarterLanyard(buf: Buf, color: RGB, seam: number): void {
+  const [hi, base] = shades(color);
+  const x0 = seam - 3, x1 = seam;
+  for (const y of [18, 19, 20]) { set(buf, x0, y, base); set(buf, x1, y, base); }
+  const card: RGB = [244, 242, 238];
+  rect(buf, x0, 21, x1, 24, card);
+  rect(buf, x0 + 1, 22, x1 - 1, 23, hi);
+  const cardSh = shades(card)[2];
+  for (let y = 21; y <= 24; y++) set(buf, x1, y, cardSh);
+}
+
+/** ¾ watch: the wrist accent on the NEAR arm's outer column, which the ¾ torso
+ *  moves when `heavy` widens the body — the front version's fixed x=4 would sit
+ *  a column inside a heavy figure's sleeve. */
+function drawQuarterWatch(buf: Buf, color: RGB, near: number): void {
+  const [hi] = shades(color);
+  set(buf, near, 23, hi); set(buf, near, 24, hi);
+}
+
+/** Dispatch for the turned poses' accessory overlay — the ¾ counterpart of
+ *  drawAccessory(). `quarterHead` is false for `'quarterBody'`, whose head is
+ *  the front head verbatim. */
+function drawQuarterAccessory(buf: Buf, kind: AccessoryKind, color: RGB, heavy: boolean, quarterHead: boolean): void {
+  const seam = heavy ? 11 : 10; // must track drawQuarterTorso's SEAM / NEAR
+  const near = heavy ? 3 : 4;
+  switch (kind) {
+    case 'cap': if (quarterHead) drawQuarterCap(buf, color); else drawCapFront(buf, color); return;
+    case 'headphones': if (quarterHead) drawQuarterHeadphones(buf, color); else drawHeadphones(buf, color); return;
+    case 'earrings': if (quarterHead) drawQuarterEarrings(buf, color); else drawEarrings(buf, color); return;
+    case 'scarf': drawQuarterScarf(buf, color, quarterHead ? 8 : 7, seam); return;
+    case 'lanyard': drawQuarterLanyard(buf, color, seam); return;
+    case 'watch': drawQuarterWatch(buf, color, near); return;
+  }
+}
+
 // ─── outline pass ────────────────────────────────────────────────────────────
 function outlinePass(buf: Buf): void {
   const pts: [number, number][] = [];
@@ -782,16 +1280,77 @@ function compose(r: Recipe): Buf {
   return buf;
 }
 
-/** Full-body 18×32 scene sprite. `back=false` reuses the portrait's exact face. */
-function composeScene(r: Recipe, phase: number, back: boolean): Buf {
+/** Which way the scene sprite faces. `'quarter'` is turned toward screen-right;
+ *  screen-left is `mirrorSceneBuf` of the same frame.
+ *
+ *  `'quarterBody'` turns the BODY only and keeps the front head verbatim. It is
+ *  not a half-finished `'quarter'` — it is the cheaper answer to a real problem
+ *  this prototype uncovered: at 18×32 the hair mass is most of a character's
+ *  identity, and any ¾ head has to redraw that mass, so a figure that turns
+ *  risks reading as a different person rather than as the same person turning.
+ *  Turning the body alone buys most of the isometric grounding (stance, arm
+ *  separation, staggered feet) at zero identity risk, which is the trade
+ *  Stardew-scale sprites usually make. Both exist so a human can compare them
+ *  side by side before fifteen characters are committed to either. */
+export type Facing = 'front' | 'back' | 'quarter' | 'quarterBody';
+
+/** Full-body 18×32 scene sprite. `'front'` reuses the portrait's exact face. */
+function composeSceneFacing(r: Recipe, phase: number, facing: Facing): Buf {
   CUR_W = SCENE_W; CUR_H = SCENE_H;
   const buf = new Uint8ClampedArray(SCENE_W * SCENE_H * 4);
-  drawSceneBody(buf, r, phase, back);
-  if (back) drawHeadBack(buf, r);
-  else drawHeadGroup(buf, r);
-  if (r.accessory) drawAccessory(buf, r.accessory, r.accessoryColor ?? ACCESSORY_DEFAULT_COLOR[r.accessory], back);
+  const turned = facing === 'quarter' || facing === 'quarterBody';
+  if (turned) {
+    drawQuarterTorso(buf, r);
+    drawQuarterLegs(buf, defaultPants(r), phase);
+    if (facing === 'quarter') drawQuarterHeadGroup(buf, r);
+    else drawHeadGroup(buf, r);
+  } else {
+    const back = facing === 'back';
+    drawSceneBody(buf, r, phase, back);
+    if (back) drawHeadBack(buf, r);
+    else drawHeadGroup(buf, r);
+  }
+  if (r.accessory) {
+    const color = r.accessoryColor ?? ACCESSORY_DEFAULT_COLOR[r.accessory];
+    // The turned poses get their own overlays (drawQuarterAccessory): the front
+    // set is anchored on the front head box and the canvas centre line, and on
+    // the narrower, offset ¾ geometry some of it lands outside the silhouette.
+    if (turned) drawQuarterAccessory(buf, r.accessory, color, r.heavy ?? false, facing === 'quarter');
+    else drawAccessory(buf, r.accessory, color, facing === 'back');
+  }
   outlinePass(buf);
   return buf;
+}
+
+/** Back-compatible shim: the front/back pair every existing caller asks for,
+ *  composed through the exact same code path as before the ¾ pose existed. */
+function composeScene(r: Recipe, phase: number, back: boolean): Buf {
+  return composeSceneFacing(r, phase, back ? 'back' : 'front');
+}
+
+/** Horizontal mirror of a scene frame. The ¾ pose is drawn facing screen-right
+ *  only; this is how the left-facing half of the set is obtained.
+ *
+ *  Free, but not identity-preserving, and the two things it changes are worth
+ *  knowing before wiring it into the scene:
+ *    • the LIGHT reverses. Every sprite in this file is drawn lit from the
+ *      top-left; a mirrored frame is lit from the top-right, glasses glint
+ *      included. This is the usual price of mirrored pixel art and the only
+ *      alternative is drawing a second facing by hand.
+ *    • the hair part swaps sides, so a character reads as having restyled their
+ *      hair when they turn around.
+ *  What it does NOT do is produce a wrong figure: no character in this cast
+ *  carries an asymmetric prop (no scabbard, no single pauldron, no badge on one
+ *  hip), so there is nothing for the flip to put on the wrong side. */
+export function mirrorSceneBuf(buf: Buf): Buf {
+  const out = new Uint8ClampedArray(buf.length);
+  for (let y = 0; y < SCENE_H; y++) {
+    for (let x = 0; x < SCENE_W; x++) {
+      const s = (y * SCENE_W + x) * 4, d = (y * SCENE_W + (SCENE_W - 1 - x)) * 4;
+      out[d] = buf[s]; out[d + 1] = buf[s + 1]; out[d + 2] = buf[s + 2]; out[d + 3] = buf[s + 3];
+    }
+  }
+  return out;
 }
 
 // ─── public render ───────────────────────────────────────────────────────────
@@ -855,6 +1414,62 @@ export function sceneFrameBufs(name: OfficeCharacterName): SceneFrames {
  *  than a fixed cast name. Cached by a hash of the recipe's contents. */
 export function sceneFrameBufsFromRecipe(recipe: Recipe): SceneFrames {
   return getSceneForRecipe(hashRecipe(recipe), recipe);
+}
+
+// ¾ frames live in their own cache rather than as a third field on SceneFrames,
+// so nothing that only ever wanted front/back pays to compose them. Nothing in
+// the app requests them yet: this is the prototype's entry point, used by
+// tools/quarter-pose-preview.cjs for a human to judge.
+//
+// Unlike bufCache/sceneCache this one is BOUNDED. Those two are keyed by a
+// small closed set in practice (fifteen cast names plus however many custom
+// characters a user has actually built), whereas the turned pose exists to be
+// swept — a preview sheet or a look-proposal loop can walk hundreds of recipes
+// in one session, and there are three 2.3 KB frames behind every key. The
+// eviction is plain insertion-order FIFO, which is what a Map gives for free
+// and is the right shape for a sweep; if this ever ends up on a hot path with
+// a working set larger than the bound, promote it to LRU (re-insert on hit).
+const quarterCache = new Map<string, Buf[]>();
+const QUARTER_CACHE_MAX = 128;
+
+/** Walk-phase frames (stand, step-L, step-R) of a turned pose, facing
+ *  screen-right. Mirror with `mirrorSceneBuf` for the left-facing half.
+ *
+ *  `facing` also accepts the untuned `'front'`/`'back'`, since `Facing` covers
+ *  all four. Those are forwarded to the front/back cache instead of being
+ *  composed into this one: a caller sweeping all four directions would
+ *  otherwise pay twice for the two that are not turned, and hold a second copy
+ *  of them under a second key for as long as this cache kept them. */
+export function quarterFrameBufsFromRecipe(recipe: Recipe, facing: Facing = 'quarter'): Buf[] {
+  if (facing === 'front' || facing === 'back') {
+    const frames = sceneFrameBufsFromRecipe(recipe);
+    return facing === 'back' ? frames.back : frames.front;
+  }
+  const key = `${facing}:${hashRecipe(recipe)}`;
+  let frames = quarterCache.get(key);
+  if (!frames) {
+    frames = [0, 1, 2].map((phase) => composeSceneFacing(recipe, phase, facing));
+    if (quarterCache.size >= QUARTER_CACHE_MAX) {
+      const oldest = quarterCache.keys().next().value;
+      if (oldest !== undefined) quarterCache.delete(oldest);
+    }
+    quarterCache.set(key, frames);
+  }
+  return frames;
+}
+
+/** `quarterFrameBufsFromRecipe` for one of the fifteen fixed cast members.
+ *
+ *  The untuned facings go through `sceneFrameBufs` by NAME rather than through
+ *  the recipe path, because the scene cache keys a fixed character by its name
+ *  and a recipe by its hash: routing a name through the hash would compose and
+ *  store a second identical copy of frames the app is already holding. */
+export function quarterFrameBufs(name: OfficeCharacterName, facing: Facing = 'quarter'): Buf[] {
+  if (facing === 'front' || facing === 'back') {
+    const frames = sceneFrameBufs(name);
+    return facing === 'back' ? frames.back : frames.front;
+  }
+  return quarterFrameBufsFromRecipe(RECIPES[name] ?? RECIPES.jim, facing);
 }
 
 /** Stage `buf` (a PORTRAIT_W×PORTRAIT_H RGBA buffer) at 1× on an offscreen

@@ -15,6 +15,14 @@
 // occlusion reads correctly.
 //
 //   node tools/iso-scene-preview.cjs [outDir]
+//   ISO_WALKER_POSE=quarterBody node tools/iso-scene-preview.cjs   (what-if)
+//
+// ISO_WALKER_POSE re-poses the two WALKERS (the standing, non-seated agents)
+// with one of portraitArt's turned orientations, so the question "would a
+// turned body actually help on a diagonal floor?" can be looked at BEFORE any
+// of it is wired into cast.ts. It is a preview-only override: nothing in the
+// app reads it, and the default ('front') reproduces the previous image
+// byte-for-byte, so this file's normal output is unchanged.
 //
 // Writes iso-scene.png (1x) and iso-scene@3x.png. Defaults to
 // <os.tmpdir()>/munder-difflin-iso-preview.
@@ -29,7 +37,14 @@ const { buildIsoAtlas, ISO_ATLAS_CELL, ISO_ATLAS_COLUMNS } =
   loadTs('src/renderer/src/scene/office/isoTileArt.ts');
 const { TILE_PALETTES } = loadTs('src/renderer/src/scene/office/tileArt.ts');
 const { createIsometricProjection } = loadTs('src/renderer/src/scene/office/projection.ts');
-const { sceneFrameBufs, SCENE_W, SCENE_H } = loadTs('src/renderer/src/scene/office/portraitArt.ts');
+const { sceneFrameBufs, quarterFrameBufs, SCENE_W, SCENE_H } =
+  loadTs('src/renderer/src/scene/office/portraitArt.ts');
+
+// Preview-only pose override for the standing walkers — see the header note.
+// Anything other than a turned orientation falls back to the front frames, so
+// a typo degrades to the previous picture rather than to a crash.
+const WALKER_POSE = process.env.ISO_WALKER_POSE || 'front';
+const TURNED = WALKER_POSE === 'quarter' || WALKER_POSE === 'quarterBody';
 
 const MAP = JSON.parse(fs.readFileSync(
   path.resolve(__dirname, '..', 'src/renderer/src/assets/maps/isometric.tmj'), 'utf8'));
@@ -203,8 +218,13 @@ for (const obj of [...spawn.objects, ...WALKERS.map((w) => ({
   const tx = Math.floor(obj.x / MAP.tilewidth);
   const ty = Math.floor(obj.y / MAP.tileheight);
   const seated = obj.name !== 'entrance' && !obj.name.startsWith('walker-');
-  const { front, back } = sceneFrameBufs(CAST[castIdx++ % CAST.length]);
-  const buf = (seated ? back : front)[0];
+  const who = CAST[castIdx++ % CAST.length];
+  const { front, back } = sceneFrameBufs(who);
+  // Seated agents keep their back view (they face their monitor); only the
+  // standing walkers are candidates for a turned pose.
+  const buf = seated ? back[0]
+    : TURNED ? quarterFrameBufs(who, WALKER_POSE)[0]
+    : front[0];
   const w = Math.round(SCENE_W * CHAR_SCALE), h = Math.round(SCENE_H * CHAR_SCALE);
   // Nearest-neighbour upscale by CHAR_SCALE, matching the container scale.
   const big = new Uint8ClampedArray(w * h * 4);
@@ -232,4 +252,4 @@ fs.mkdirSync(outDir, { recursive: true });
 fs.writeFileSync(path.join(outDir, 'iso-scene.png'), encodePng(canvas.width, canvas.height, canvas.data));
 const big = scale(canvas, 3);
 fs.writeFileSync(path.join(outDir, 'iso-scene@3x.png'), encodePng(big.width, big.height, big.data));
-console.log(`wrote ${outDir}/iso-scene.png (${canvas.width}x${canvas.height}) + @3x, palette=${paletteKey}`);
+console.log(`wrote ${outDir}/iso-scene.png (${canvas.width}x${canvas.height}) + @3x, palette=${paletteKey}, walkers=${WALKER_POSE}`);
