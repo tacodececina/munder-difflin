@@ -29,8 +29,8 @@ export type ToolKind =
   | 'Read' | 'Edit' | 'Write' | 'Bash' | 'WebFetch' | 'WebSearch'
   | 'Grep' | 'Glob' | 'TodoWrite' | 'MCP';
 
-export type StationKind =
-  | 'shelf' | 'terminal' | 'web' | 'board' | 'mailbox' | 'mcp' | 'desk';
+export type { StationKind } from '@shared/toolStation';
+import type { StationKind } from '@shared/toolStation';
 
 export interface BlockReason {
   summary: string;                 // short headline shown on banner
@@ -345,6 +345,8 @@ interface State {
   setSoftwareEconomyEnabled: (on: boolean) => void;
   /** Mirror of config.floorInspectionEnabled. The floor creates no interaction
    *  registry, hit-testing listener, or inspector bridge while this is false. */
+  stationActivityEnabled: boolean;
+  setStationActivityEnabled: (on: boolean) => void;
   floorInspectionEnabled: boolean;
   setFloorInspectionEnabled: (on: boolean) => void;
   /** Mirror of config.webhookTriggers — the inbound HTTP endpoints. Webhooks are
@@ -1004,6 +1006,8 @@ export const useStore = create<State>((set, get) => ({
   setVisitorMode: (on) => set({ visitorMode: on }),
   softwareEconomyEnabled: false,
   setSoftwareEconomyEnabled: (on) => set({ softwareEconomyEnabled: on }),
+  stationActivityEnabled: false,
+  setStationActivityEnabled: (on) => set({ stationActivityEnabled: on }),
   floorInspectionEnabled: false,
   setFloorInspectionEnabled: (on) => set({ floorInspectionEnabled: on }),
   webhookTriggers: [],

@@ -57,6 +57,15 @@ export const OFFICE_BINDINGS = {
     // map and the instrument move together.
     opsScreen: { x: 5, y: 1 }, planBoard: { x: 36, y: 1 },
   },
+  // Stand next to this map's existing furniture, clear of permanent seats.
+  // Mailbox has no authored prop here and deliberately has no destination.
+  stationSpots: [
+    { kind: 'shelf', stand: { x: 42, y: 22 }, facing: 'right' },
+    { kind: 'terminal', stand: { x: 38, y: 20 }, facing: 'up' },
+    { kind: 'mcp', stand: { x: 42, y: 20 }, facing: 'up' },
+    { kind: 'web', stand: { x: 12, y: 5 }, facing: 'up' },
+    { kind: 'board', stand: { x: 39, y: 4 }, facing: 'up' },
+  ],
   errandSpots: [
     { kind: 'water', stand: { x: 2, y: 27 }, facing: 'up', fx: { x: 2, y: 26 }, duration: 4.5, godOnly: true },
     { kind: 'smoke', stand: { x: 32, y: 3 }, facing: 'up', fx: { x: 32, y: 1 }, duration: 18, godOnly: true },
@@ -68,4 +77,4 @@ export const OFFICE_BINDINGS = {
     { kind: 'shelf', stand: { x: 44, y: 34 }, facing: 'up', fx: { x: 44, y: 33 }, duration: 4 },
     { kind: 'bin', stand: { x: 29, y: 33 }, facing: 'right', fx: { x: 30, y: 33 }, duration: 2.6 },
   ],
-} satisfies Pick<ThemeConfig, 'primarySeatNames' | 'cafeSeatNames' | 'cafeStands' | 'coffee' | 'anchors' | 'errandSpots'>;
+} satisfies Pick<ThemeConfig, 'primarySeatNames' | 'cafeSeatNames' | 'cafeStands' | 'coffee' | 'anchors' | 'errandSpots' | 'stationSpots'>;

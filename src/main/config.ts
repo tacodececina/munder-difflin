@@ -349,6 +349,8 @@ export interface HarnessConfig {
   softwareEconomyEnabled?: boolean;
   /** Opt-in read-only click inspection for the office floor. Default OFF. */
   floorInspectionEnabled?: boolean;
+  /** Verifiable tool station visits. Default off. */
+  stationActivityEnabled?: boolean;
   /** Auto-update from GitHub releases (v0.3.4). Default ON. Packaged builds
    *  check on boot + every ~6h, download in the background, and show a
    *  "restart to update" toast — installation is always user-initiated. OFF
@@ -681,6 +683,7 @@ const DEFAULTS: HarnessConfig = {
   visitorMode: false,
   softwareEconomyEnabled: false,
   floorInspectionEnabled: false,
+  stationActivityEnabled: false,
   autoUpdate: true,
   telemetryEnabled: true,
   multiWindow: true,

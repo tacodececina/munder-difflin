@@ -13,6 +13,7 @@
 // (uncommitted human WIP) — the office theme references its existing exports.
 
 import type { Texture } from 'pixi.js';
+import type { StationKind } from '@shared/toolStation';
 import { TECH_ATLAS_META, TECH_PALETTE_KEY } from './techOfficeArt';
 import { OFFICE_BINDINGS } from './officeLayout';
 import { colors } from '@/design/tokens';
@@ -52,6 +53,14 @@ export type ThemeId =
 
 export interface Tile { x: number; y: number; }
 export type Facing = 'up' | 'down' | 'left' | 'right';
+
+/** An authored place to represent ongoing tool activity. The source determines
+ * when work ends; a station has no animation duration or operational role. */
+export interface StationSpot {
+  kind: Exclude<StationKind, 'desk'>;
+  stand: Tile;
+  facing: Facing;
+}
 
 /** Kinds of small idle errands around the office (incl. plant watering).
  *  'smoke' is the boss special: cigar at the open window, god only. */
@@ -241,6 +250,9 @@ export interface ThemeConfig {
   coffee: CoffeeConfig;
   anchors: AnchorConfig;
   errandSpots: ErrandSpot[];
+  /** Optional destinations belonging to this map. Absent kinds stay at the
+   * agent's own desk; never inherit another theme's station coordinates. */
+  stationSpots?: StationSpot[];
   monitor: MonitorConfig;
   palette: PaletteConfig;
   cast: ThemeCast;
@@ -719,6 +731,7 @@ export const FRIENDS_THEME: ThemeConfig = {
 export const GOT_THEME: ThemeConfig = {
   ...OFFICE_THEME,
   id: 'got',
+  stationSpots: undefined,
   // Phase 10: keep the UNPATCHED atlas copy, not office's — this placeholder
   // stays byte-for-byte the old office floor/walls, per this phase's "office
   // theme only" scope, even though `...OFFICE_THEME` above would otherwise
@@ -743,6 +756,7 @@ export const GOT_THEME: ThemeConfig = {
 export const HOGWARTS_THEME: ThemeConfig = {
   ...OFFICE_THEME,
   id: 'hogwarts',
+  stationSpots: undefined,
   // Phase 10: same reasoning as GOT_THEME above — keep the unpatched atlas.
   tilesets: BASE_TILESETS,
   palette: {

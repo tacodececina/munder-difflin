@@ -4,8 +4,8 @@
 // the dotted-path cases that the first version's dot-free fixtures could not
 // catch.
 //
-// POSIX-only: projectDir() resolves against os.homedir(), which these cases
-// redirect via $HOME — a knob Windows does not honour.
+// Historical POSIX fixtures exercise that platform's legacy-key branch on
+// every test host. A separate native-host case retains real Windows behavior.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -16,24 +16,60 @@ const loadTs = require('./load-ts.cjs');
 
 const { projectDir } = loadTs('src/main/transcript.ts');
 
-/** projectDir() resolves against os.homedir(), which POSIX reads from $HOME — so
- *  each case gets a throwaway home and never touches the real ~/.claude. */
-function withHome(run) {
+/** Redirect both native homedir knobs: changing process.platform does not
+ * change the operating system implementation of os.homedir(). Pass null to
+ * retain the real platform, including Windows' distinct legacy-key contract. */
+function withHome(run, platform = 'linux') {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-transcript-'));
-  const prev = process.env.HOME;
-  process.env.HOME = home;
+  const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
   try {
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    if (platform !== null) Object.defineProperty(process, 'platform', { ...platformDescriptor, value: platform });
+    assert.equal(os.homedir(), home, 'projectDir must only inspect the fixture home');
     return run(home, (key) => {
       const dir = path.join(home, '.claude/projects', key);
       fs.mkdirSync(dir, { recursive: true });
       return dir;
     });
   } finally {
-    if (prev === undefined) delete process.env.HOME;
-    else process.env.HOME = prev;
+    Object.defineProperty(process, 'platform', platformDescriptor);
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     fs.rmSync(home, { recursive: true, force: true });
   }
 }
+
+test('native platform uses the isolated home and its own current key', () => {
+  const nativePlatform = process.platform;
+  withHome((home, mkProject) => {
+    assert.equal(process.platform, nativePlatform);
+    assert.equal(os.homedir(), home);
+    const cwd = 'C:\\Users\\me\\app.v1';
+    const current = path.join(home, '.claude/projects', 'C--Users-me-app-v1');
+    mkProject('C-Users-me-app.v1'); // never the legacy key for a Windows cwd
+    assert.equal(projectDir(cwd), current);
+    mkProject('C--Users-me-app-v1');
+    assert.equal(projectDir(cwd), current);
+    if (nativePlatform === 'win32') {
+      // Windows has no legacy POSIX alias, even when the supplied cwd happens
+      // to contain forward slashes. Do not invent that equivalence in fixtures.
+      mkProject('Users-me-app');
+      assert.equal(projectDir('/Users/me/app'), path.join(home, '.claude/projects', '-Users-me-app'));
+    }
+  }, null);
+});
+
+test('fixture restores exact environment and platform even when a case throws', () => {
+  const environment = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  assert.throws(() => withHome(() => { throw new Error('fixture failure'); }), /fixture failure/);
+  assert.deepEqual({ HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE }, environment);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(process, 'platform'), descriptor);
+});
 
 test('an unseen cwd resolves to the CURRENT key, leading slash dashed', () => {
   withHome(() => {

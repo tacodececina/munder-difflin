@@ -1175,9 +1175,11 @@ export class HiveManager {
         SubagentStop: [entry()],
         PreToolUse: [entry('*')],
         PostToolUse: [entry('*')],
+        PostToolUseFailure: [entry('*')],
         UserPromptSubmit: [entry()],
         Notification: [entry()],
         SessionStart: [entry()],
+        SessionEnd: [entry()],
         // #5C: surface mid-`/compact` so an agent boxing up its context reads as
         // 'compacting' on the floor instead of looking frozen.
         PreCompact: [entry()],
@@ -2475,9 +2477,13 @@ export class HiveManager {
       const hooks = {
         PreToolUse: [tool('.*')],
         PostToolUse: [tool('.*')],
+        PostToolUseFailure: [tool('.*')],
         Stop: [tool()],
+        StopFailure: [tool()],
+        StopCancelled: [tool()],
         SubagentStop: [tool('.*')],
         SessionStart: [tool('.*')],
+        SessionEnd: [tool('.*')],
         UserPromptSubmit: [tool()],
         PreCompact: [tool('.*')],
         PostCompact: [tool('.*')]
@@ -3362,6 +3368,8 @@ function ctxSize(model) {
 // Fire-and-forget emit of a shim-shaped payload to the hive socket. Never throws.
 function emit(payload) {
   if (!SOCK) return;
+  // These observations come from model responses, not native tool lifecycle hooks.
+  payload.provenance = 'proxy';
   try {
     const c = net.createConnection(SOCK, function () { c.end(JSON.stringify(payload) + '\\n'); });
     c.on('error', function () {});
@@ -3423,7 +3431,7 @@ function parseAndEmit(bodyStr, isSse) {
         output += o.usage.output_tokens || 0;
         sawUsage = true;
       } else if (o.type === 'content_block_start' && o.content_block && o.content_block.type === 'tool_use') {
-        toolCalls.push({ name: o.content_block.name, input: o.content_block.input || {} });
+        toolCalls.push({ id: o.content_block.id, name: o.content_block.name, input: o.content_block.input || {} });
       } else if (o.usage && !o.type) {
         // non-streaming full message body
         const u = o.usage;
@@ -3436,7 +3444,7 @@ function parseAndEmit(bodyStr, isSse) {
       if (Array.isArray(o.content)) {
         for (let j = 0; j < o.content.length; j++) {
           const blk = o.content[j];
-          if (blk && blk.type === 'tool_use') toolCalls.push({ name: blk.name, input: blk.input || {} });
+          if (blk && blk.type === 'tool_use') toolCalls.push({ id: blk.id, name: blk.name, input: blk.input || {} });
         }
       }
     } else {
@@ -3454,7 +3462,7 @@ function parseAndEmit(bodyStr, isSse) {
         if (ch.message && Array.isArray(ch.message.tool_calls)) {
           for (let t = 0; t < ch.message.tool_calls.length; t++) {
             const tc = ch.message.tool_calls[t];
-            if (tc && tc.function) toolCalls.push({ name: tc.function.name, input: safeArgs(tc.function.arguments) });
+            if (tc && tc.function) toolCalls.push({ id: tc.id, name: tc.function.name, input: safeArgs(tc.function.arguments) });
           }
         }
         if (ch.delta && Array.isArray(ch.delta.tool_calls)) {
@@ -3463,6 +3471,7 @@ function parseAndEmit(bodyStr, isSse) {
             if (!tc) continue;
             const k = (tc.index != null ? tc.index : t);
             if (!oaiTools[k]) oaiTools[k] = { name: null, args: '' };
+            if (typeof tc.id === 'string' && tc.id) oaiTools[k].id = tc.id;
             if (tc.function) {
               if (tc.function.name) oaiTools[k].name = tc.function.name;
               if (tc.function.arguments) oaiTools[k].args += tc.function.arguments;
@@ -3475,7 +3484,7 @@ function parseAndEmit(bodyStr, isSse) {
   const keys = Object.keys(oaiTools);
   for (let i = 0; i < keys.length; i++) {
     const t = oaiTools[keys[i]];
-    if (t.name) toolCalls.push({ name: t.name, input: safeArgs(t.args) });
+    if (t.name) toolCalls.push({ id: t.id, name: t.name, input: safeArgs(t.args) });
   }
 
   if (sawUsage) {
@@ -3485,7 +3494,8 @@ function parseAndEmit(bodyStr, isSse) {
   if (toolCalls.length) {
     cancelStop(); // a tool call means the turn continues
     for (let i = 0; i < toolCalls.length; i++) {
-      emit({ hook_event_name: 'PostToolUse', agent_id: AGENT_ID, session_id: SESSION, tool_name: toolCalls[i].name, tool_input: toolCalls[i].input });
+      // Preserve the operational event name; visual evidence is only a request.
+      emit({ hook_event_name: 'PostToolUse', toolPhase: 'requested', agent_id: AGENT_ID, session_id: SESSION, tool_use_id: toolCalls[i].id, tool_name: toolCalls[i].name, tool_input: toolCalls[i].input });
     }
   } else {
     armStop();
@@ -3628,6 +3638,7 @@ process.stdin.on('end', () => {
     permission_denied: 'PermissionDenied',
     stop: 'Stop',
     stop_failure: 'StopFailure',
+    stop_cancelled: 'StopCancelled',
     session_start: 'SessionStart',
     session_end: 'SessionEnd',
     user_prompt_submit: 'UserPromptSubmit',
@@ -3641,6 +3652,7 @@ process.stdin.on('end', () => {
     hook_event_name: names[grok.hookEventName] || grok.hookEventName || 'Unknown',
     agent_id: agentId,
     session_id: grok.sessionId,
+    tool_use_id: grok.toolUseId,
     cwd: grok.cwd || grok.workspaceRoot,
     tool_name: grok.toolName,
     tool_input: grok.toolInput,

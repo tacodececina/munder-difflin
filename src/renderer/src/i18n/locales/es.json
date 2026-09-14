@@ -238,6 +238,8 @@
       "softwareEconomyDesc": "Cuando Chromium usa un renderizador de CPU como SwiftShader, detiene las animaciones ambientales continuas y actualiza el piso cuando hay cambios, con una cadencia baja. Desactivado por defecto.",
       "floorInspection": "Inspeccionar el piso al hacer clic",
       "floorInspectionDesc": "Muestra un inspector de solo lectura con lecturas reales del piso, escritorios, salas y enlaces. Desactivado por defecto.",
+      "stationActivity": "Estaciones de actividad de herramientas",
+      "stationActivityDesc": "Muestra solicitudes y resultados observados. Las solicitudes sostenidas con identificaci\u00f3n verificable pueden visitar una estaci\u00f3n. Desactivado por defecto.",
       "homeFolder": "Carpeta base",
       "environment": "Entorno",
       "keepAwake": "Mantener la Mac despierta mientras los agentes trabajan",
@@ -901,6 +903,7 @@
     "errEngineNotInstalled": "{{label}} no está instalado. Instálalo y presiona \"revisar de nuevo\", o elige otro motor."
   },
   "office": {
+    "stationActivity": {"requested": "Solicitud: {{tool}}", "denied": "Rechazada: {{tool}}", "completed": "Finaliz\u00f3: {{tool}}", "failed": "Fall\u00f3: {{tool}}", "observed": "Visto en terminal: {{tool}}"},
     "clockOut": {
       "title": "¿TERMINAR LA JORNADA?",
       "agentsNone": "AHORA MISMO NO HAY AGENTES CORRIENDO",

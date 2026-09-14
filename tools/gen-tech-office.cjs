@@ -173,7 +173,7 @@ if (require.main === module) {
   try {
     const map = buildOfficeMap();
     const report = process.argv.includes('--check') ? validateOfficeMap(map) : writeOfficeMap(map);
-    console.log(`${process.argv.includes('--check') ? 'Validated' : 'Wrote'} office: ${map.width}x${map.height}; ${report.seats} desks; ${report.reachable} reachable tiles; all 8 contracts pass.`);
+    console.log(`${process.argv.includes('--check') ? 'Validated' : 'Wrote'} office: ${map.width}x${map.height}; ${report.seats} desks; ${report.stations} stations; ${report.reachable} reachable tiles; all 8 contracts pass.`);
   } catch (err) {
     console.error(`OFFICE VALIDATION FAILED — map NOT written:\n${err.message}`);
     process.exitCode = 1;

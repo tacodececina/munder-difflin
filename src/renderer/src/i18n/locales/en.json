@@ -238,6 +238,8 @@
       "softwareEconomyDesc": "When Chromium uses a CPU renderer such as SwiftShader, stop continuous ambient animation and redraw the floor on changes at a low cadence. Off by default.",
       "floorInspection": "Inspect the floor by clicking",
       "floorInspectionDesc": "Show a read-only inspector for real floor readings, desks, rooms and links. Off by default.",
+      "stationActivity": "Tool activity stations",
+      "stationActivityDesc": "Show observed tool requests and outcomes. Sustained, correlated requests may visit a station. Off by default.",
       "homeFolder": "Home folder",
       "environment": "Environment",
       "keepAwake": "Keep Mac awake while agents run",
@@ -901,6 +903,7 @@
     "errEngineNotInstalled": "{{label}} is not installed. Install it and press \"check again\", or pick another engine."
   },
   "office": {
+    "stationActivity": {"requested": "Requested: {{tool}}", "denied": "Denied: {{tool}}", "completed": "Finished: {{tool}}", "failed": "Failed: {{tool}}", "observed": "Seen in terminal: {{tool}}"},
     "clockOut": {
       "title": "END THE DAY?",
       "agentsNone": "NO AGENTS ARE RUNNING RIGHT NOW",

@@ -130,6 +130,7 @@ export function buildThemeConfigFromBundle(
     coffee: manifest.coffee,
     anchors: manifest.anchors,
     errandSpots: manifest.errandSpots,
+    stationSpots: manifest.stationSpots,
     monitor: manifest.monitor,
     palette: {
       background: parseHexColor(manifest.palette.background) ?? OFFICE_THEME.palette.background,

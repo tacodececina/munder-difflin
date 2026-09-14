@@ -26,6 +26,7 @@ import {
 } from './git';
 import { HiveManager, type AgentMeta, type HiveMessage, type HiveTask } from './hive';
 import { HookServer } from './hooks';
+import { validateHookEvent, type HookEvent } from '../shared/hookEvents';
 import { CircuitBreaker, type BreakerInput } from './breaker';
 import type { UsageProvider } from './usage';
 import { MemoryManager } from './memory';
@@ -866,6 +867,12 @@ function teardownPty(id: string): void {
   const agentId = ptyToAgent.get(id);
   if (agentId) {
     ptyToAgent.delete(id);
+    // Explicit kill suppresses node-pty's later exit callback. Publish the real
+    // teardown boundary for visual activity, including god and regular agents.
+    try {
+      const event: HookEvent = { agentId, event: 'PtyDisconnected', provenance: 'runtime', receivedAt: Date.now() };
+      if (validateHookEvent(event)) liveWebContents()?.send('hive:hookEvent', event);
+    } catch { /* visual observers must never interrupt process teardown */ }
     // Drop watchdog state so a dead agent can't get nudged or leak its grace.
     try { workerWake.forget(agentId, id); } catch { /* best-effort */ }
     // Drop breaker state so a dead agent can't leak/zombie a tripped level.

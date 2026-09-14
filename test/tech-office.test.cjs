@@ -14,6 +14,25 @@ const layer = (m, n) => m.layers.find(l => l.name === n);
 const put = (m, n, x, y, gid) => { layer(m, n).data[y * m.width + x] = gid; };
 const spawn = (m, n) => layer(m, 'spawn-points').objects.find(o => o.name === n);
 
+test('office station stands reach their own props without borrowing a permanent seat', () => {
+  const { OFFICE_BINDINGS } = loadTs('src/renderer/src/scene/office/officeLayout.ts');
+  const { buildWalkable, parseSpawnPoints } = loadTs('src/renderer/src/scene/office/tiledCollision.ts');
+  const { findPath } = loadTs('src/renderer/src/scene/office/pathfinding.ts');
+  const map = buildOfficeMap(), walk = buildWalkable(map), spawns = parseSpawnPoints(map);
+  const props = JSON.parse(map.properties.find(p => p.name === 'propPlacements').value);
+  const stationProps = { shelf: 'shelf', terminal: 'server', mcp: 'network', web: 'screen', board: 'whiteboard' };
+  assert.equal(OFFICE_BINDINGS.stationSpots?.length, 5);
+  for (const spot of OFFICE_BINDINGS.stationSpots) {
+    assert.ok(findPath(walk, spawns.get('entrance'), spot.stand), spot.kind);
+    assert.equal(layer(map, 'collision').data[spot.stand.y * map.width + spot.stand.x], 0);
+    assert.ok(![...spawns.values()].some(s => s.x === spot.stand.x && s.y === spot.stand.y));
+    const delta = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[spot.facing];
+    const target = { x: spot.stand.x + delta[0], y: spot.stand.y + delta[1] };
+    assert.ok(props.some(p => p.key === stationProps[spot.kind] && target.x >= p.x && target.y >= p.y
+      && target.x < p.x + TECH_PIECES[p.key].w && target.y < p.y + TECH_PIECES[p.key].h), `${spot.kind} faces its prop`);
+  }
+});
+
 test('composed map is deterministic, preserves 19 desks and is connected', () => {
   const map = buildOfficeMap(), report = validateOfficeMap(map);
   assert.equal(report.seats, 19);
@@ -44,6 +63,8 @@ for (const [name, mutate, expected] of [
   ['#8 zone outside map', m => { layer(m, 'zones').objects[0].x = 100000; }, /#8/],
   ['disconnected desk', m => { for (const [x, y] of [[15, 25], [15, 27], [14, 26], [16, 26]]) put(m, 'collision', x, y, 1); }, /unreachable spawn/],
   ['disconnected coffee destination', m => put(m, 'collision', 36, 33, 1), /unreachable coffee.sinkStand/],
+  ['blocked station destination', m => put(m, 'collision', 42, 22, 1), /unreachable station shelf/],
+  ['disconnected station destination', m => { for (const [x, y] of [[42, 21], [42, 23], [41, 22]]) put(m, 'collision', x, y, 1); }, /unreachable station shelf/],
   ['atlas mismatch', m => { m.tilesets[0].columns = 8; }, /atlas metadata/],
   ['unpainted gid', m => put(m, 'floor', 10, 10, 12), /invalid gid/],
   ['out-of-bounds spawn', m => { spawn(m, 'pc-1').x = -16; }, /invalid spawn/],

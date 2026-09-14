@@ -22,6 +22,7 @@ import type {
   Facing,
   ErrandKind,
   ErrandSpot,
+  StationSpot,
   CoffeeConfig,
   AnchorConfig,
   MonitorConfig,
@@ -79,6 +80,8 @@ export interface ThemeBundleManifest {
   coffee: CoffeeConfig;
   anchors: AnchorConfig;
   errandSpots: ErrandSpot[];
+  /** Optional, map-owned destinations; old bundles keep agents at desks. */
+  stationSpots?: StationSpot[];
   monitor: MonitorConfig;
   palette: ThemeBundlePalette;
 }
@@ -114,6 +117,7 @@ function isTile(v: unknown): v is Tile {
 const FACINGS: Facing[] = ['up', 'down', 'left', 'right'];
 const ERRAND_KINDS: ErrandKind[] = ['water', 'window', 'dispenser', 'fridge', 'shelf', 'bin', 'smoke'];
 const STAND_KINDS = ['coffee', 'vending'];
+const STATION_KINDS: StationSpot['kind'][] = ['shelf', 'terminal', 'web', 'board', 'mailbox', 'mcp'];
 
 /** Hex color string ("#1a1320" or "1a1320") → 0xRRGGBB number, or null. */
 export function parseHexColor(s: unknown): number | null {
@@ -238,6 +242,20 @@ export function validateManifestShape(raw: unknown): BundleValidation {
     }
   }
 
+  if (raw.stationSpots !== undefined) {
+    if (!Array.isArray(raw.stationSpots)) {
+      errors.push(err('stationSpots', 'theme.json "stationSpots" must be an array when provided.'));
+    } else {
+      raw.stationSpots.forEach((spot, i) => {
+        if (!isRecord(spot) || !STATION_KINDS.includes(spot.kind as StationSpot['kind'])
+          || !isTile(spot.stand) || !Number.isInteger(spot.stand.x) || !Number.isInteger(spot.stand.y)
+          || !FACINGS.includes(spot.facing as Facing)) {
+          errors.push(err('stationSpot', `stationSpots[${i}] must set a valid "kind" (${STATION_KINDS.join('|')}), an integer "stand" ({x,y}) and a "facing" (${FACINGS.join('|')}).`));
+        }
+      });
+    }
+  }
+
   if (!Array.isArray(raw.errandSpots)) {
     errors.push(err('errandSpots', 'theme.json "errandSpots" must be an array.'));
   } else {
@@ -325,6 +343,7 @@ export function validateBundleAgainstMap(manifest: ThemeBundleManifest, mapRawTe
     checkWalkable('coffee.sinkStand', manifest.coffee.sinkStand);
   }
   (manifest.errandSpots ?? []).forEach((e, i) => checkWalkable(`errandSpots[${i}].stand`, e.stand));
+  (manifest.stationSpots ?? []).forEach((spot, i) => checkWalkable(`stationSpots[${i}].stand`, spot.stand));
 
   // ─── tileset gid coherence (structural, not per-tile) ─────────────────
   // The map's own embedded tileset[0] anchors the gid space; each declared

@@ -186,6 +186,7 @@ function AppInner() {
       useStore.getState().setVisitorMode(withTriggers.visitorMode === true);
       useStore.getState().setSoftwareEconomyEnabled(c.softwareEconomyEnabled === true);
       useStore.getState().setFloorInspectionEnabled(c.floorInspectionEnabled === true);
+      useStore.getState().setStationActivityEnabled(c.stationActivityEnabled === true);
     });
     // Mirror BYOK OpenAI key presence (boolean only; the key never leaves main) so the
     // Realtime Michael voice toggle can gate on it. Lives in the secret broker, not
@@ -276,6 +277,7 @@ function AppInner() {
     useStore.getState().setVisitorMode((c as HarnessConfig).visitorMode === true);
     useStore.getState().setSoftwareEconomyEnabled((c as HarnessConfig).softwareEconomyEnabled === true);
     useStore.getState().setFloorInspectionEnabled((c as HarnessConfig).floorInspectionEnabled === true);
+    useStore.getState().setStationActivityEnabled((c as HarnessConfig).stationActivityEnabled === true);
   }), []);
 
   // Quit warning subscription

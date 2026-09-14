@@ -41,6 +41,51 @@ function cloneManifest() {
   return JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, 'theme.json'), 'utf8'));
 }
 
+test('station spots are optional and empty station lists remain empty', () => {
+  const legacy = cloneManifest();
+  assert.equal(validateThemeBundle(legacy, VALID_MAP_RAW_TEXT).ok, true);
+  assert.equal(legacy.stationSpots, undefined);
+  legacy.stationSpots = [];
+  assert.equal(validateThemeBundle(legacy, VALID_MAP_RAW_TEXT).ok, true);
+  assert.deepEqual(legacy.stationSpots, []);
+});
+
+test('authored station kinds and facings validate on the bundle own map', () => {
+  const manifest = cloneManifest();
+  manifest.stationSpots = ['shelf', 'terminal', 'web', 'board', 'mailbox', 'mcp'].map((kind, i) => ({
+    kind, stand: { x: i + 1, y: 3 }, facing: ['up', 'down', 'left', 'right'][i % 4],
+  }));
+  assert.equal(validateThemeBundle(manifest, VALID_MAP_RAW_TEXT).ok, true);
+});
+
+for (const [label, value] of [
+  ['null list', null], ['object list', {}], ['null spot', [null]],
+  ['unknown kind', [{ kind: 'printer', stand: { x: 1, y: 3 }, facing: 'up' }]],
+  ['desk kind', [{ kind: 'desk', stand: { x: 1, y: 3 }, facing: 'up' }]],
+  ['missing stand', [{ kind: 'shelf', facing: 'up' }]],
+  ['fractional coordinate', [{ kind: 'shelf', stand: { x: 1.5, y: 3 }, facing: 'up' }]],
+  ['NaN coordinate', [{ kind: 'shelf', stand: { x: 1, y: NaN }, facing: 'up' }]],
+  ['infinite coordinate', [{ kind: 'shelf', stand: { x: Infinity, y: 3 }, facing: 'up' }]],
+  ['invalid facing', [{ kind: 'shelf', stand: { x: 1, y: 3 }, facing: 'north' }]],
+]) {
+  test(`station schema rejects ${label}`, () => {
+    const manifest = cloneManifest(); manifest.stationSpots = value;
+    const result = validateManifestShape(manifest);
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some(e => e.code === 'stationSpots' || e.code === 'stationSpot'));
+  });
+}
+
+for (const [stand, code] of [[{ x: 0, y: 0 }, 'tileNotWalkable'], [{ x: 99, y: 1 }, 'tileOutOfBounds'], [{ x: -1, y: 1 }, 'tileOutOfBounds']]) {
+  test(`station map validation rejects ${JSON.stringify(stand)}`, () => {
+    const manifest = cloneManifest();
+    manifest.stationSpots = [{ kind: 'shelf', stand, facing: 'up' }];
+    const result = validateThemeBundle(manifest, VALID_MAP_RAW_TEXT);
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some(e => e.code === code && e.message.includes('stationSpots[0].stand')));
+  });
+}
+
 // ─── the happy path ──────────────────────────────────────────────────────────
 
 test('a valid bundle (test/fixtures/theme-bundle-valid) passes both validation passes cleanly', () => {

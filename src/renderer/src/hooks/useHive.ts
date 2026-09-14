@@ -1,5 +1,6 @@
+import { stationForTool } from '@shared/toolStation';
 import { useEffect, useRef } from 'react';
-import { useStore, type Agent, type QueuedMessage, type StationKind, type ToolKind } from '@/store/store';
+import { useStore, type Agent, type QueuedMessage, type ToolKind } from '@/store/store';
 import {
   buildSpawnCommand,
   ASSISTANT_MODEL,
@@ -191,38 +192,6 @@ function terminalWorkOrderPrompt(msg: {
     '- Work in your current cwd.',
     '- When done, report changes, validation, blockers, and next step in this terminal.'
   ].join('\n');
-}
-
-/** Tool name → where the avatar walks + what it carries. */
-const TOOL_STATION: Record<string, { station: StationKind; carry?: ToolKind }> = {
-  Read: { station: 'shelf', carry: 'Read' },
-  Edit: { station: 'desk', carry: 'Edit' },
-  Write: { station: 'desk', carry: 'Write' },
-  Bash: { station: 'terminal', carry: 'Bash' },
-  Grep: { station: 'shelf', carry: 'Grep' },
-  Glob: { station: 'shelf', carry: 'Glob' },
-  WebFetch: { station: 'web', carry: 'WebFetch' },
-  WebSearch: { station: 'web', carry: 'WebSearch' },
-  TodoWrite: { station: 'board', carry: 'TodoWrite' },
-  // #5A — delegating to a sub-agent reads as "handing off at the outbox".
-  Task: { station: 'mailbox', carry: 'TodoWrite' }
-};
-
-/** Resolve a tool name to its station/glyph. Falls back: any `mcp__*` tool →
- *  the MCP station (previously these silently sat at the desk, #5A gap); anything
- *  else → the desk. */
-function stationForTool(tool: string): { station: StationKind; carry?: ToolKind } {
-  if (TOOL_STATION[tool]) return TOOL_STATION[tool];
-  if (tool.startsWith('mcp__')) return { station: 'mcp', carry: 'MCP' };
-  // Heuristic fallback for non-Claude tool names (Antigravity sends run_command,
-  // ListDir, write_file, … — its hook names differ from Claude's exact tags).
-  // Match write/edit BEFORE read so "write_file" → desk, not shelf.
-  const t = tool.toLowerCase();
-  if (/command|bash|shell|exec|terminal|run_/.test(t)) return { station: 'terminal', carry: 'Bash' };
-  if (/web|fetch|browser|http|url/.test(t)) return { station: 'web', carry: 'WebFetch' };
-  if (/write|edit|create|patch|replace|apply/.test(t)) return { station: 'desk', carry: 'Write' };
-  if (/read|list|view|dir|glob|grep|search|find|file|cat|\bls\b/.test(t)) return { station: 'shelf', carry: 'Read' };
-  return { station: 'desk' };
 }
 
 /** At/above this window size an agent counts as "large context" and is judged

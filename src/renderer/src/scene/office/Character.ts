@@ -3,6 +3,7 @@ import { CharacterSprite, type Direction, type AnimState } from './CharacterSpri
 import { findPath } from './pathfinding';
 import type { TiledMapRenderer } from './TiledMapRenderer';
 import { ThoughtBubble } from './ThoughtBubble';
+import type { MovementDirector } from './movementDirector';
 
 // Adapted from shahar061/the-office (office/characters/Character.ts).
 // Differences: keyed by our dynamic agentId (not a fixed role); seat tile +
@@ -12,6 +13,7 @@ import { ThoughtBubble } from './ThoughtBubble';
 
 export type CharacterAnimation = 'idle' | 'walk' | 'type' | 'read';
 export type StatusGlyph = 'none' | 'blocked' | 'waiting' | 'success' | 'compacting' | 'looping';
+export type MovementFailure = 'cancelled' | 'unreachable';
 
 function lerp(a: number, b: number, t: number): number {
   const tt = Math.min(Math.max(t, 0), 1);
@@ -107,6 +109,9 @@ export class Character {
   private idleLoopTimer = 0;
   private direction: Direction = 'down';
   private arrivalCallback: (() => void) | null = null;
+  private failureCallback: ((reason: MovementFailure) => void) | null = null;
+  private movementDirector: MovementDirector | null = null;
+  private movementGeneration = 0;
 
   public isVisible = false;
   private fadeDirection: 'in' | 'out' | null = null;
@@ -188,7 +193,46 @@ export class Character {
   getPixelPosition(): { x: number; y: number } { return { x: this.px, y: this.py }; }
 
   getTilePosition(): { x: number; y: number } {
-    return this.mapRenderer.projection.footToTile(this.px, this.py);
+    return this.movementDirector?.position(this.agentId)
+      ?? this.mapRenderer.projection.footToTile(this.px, this.py);
+  }
+
+  /** Attach before show. Registration picks a free spawn without changing the
+   * assigned home seat. Existing scenes may attach when the flag is enabled. */
+  setMovementDirector(director: MovementDirector | null): boolean {
+    if (director === this.movementDirector) return true;
+    this.cancelMovement();
+    this.movementDirector?.release(this.agentId);
+    this.movementDirector = null;
+    if (!director) return true;
+    const tile = director.register(this.agentId, this.getTilePosition());
+    if (!tile) return false;
+    this.movementDirector = director;
+    const pixel = this.mapRenderer.projection.tileFootToWorld(tile.x, tile.y);
+    this.px = pixel.x;
+    this.py = pixel.y;
+    this.path = [];
+    this.state = 'idle';
+    this.sprite.setPosition(this.px, this.py);
+    return true;
+  }
+
+  /** Invalidate the action immediately, but finish a reserved physical step so
+   * neither its origin nor its edge becomes available underneath the sprite. */
+  cancelMovement(): void {
+    this.movementGeneration++;
+    const failure = this.failureCallback;
+    this.arrivalCallback = null;
+    this.failureCallback = null;
+    this.pendingSit = false;
+    this.pendingWork = null;
+    this.idleLoop = false;
+    this.wandering = false;
+    this.movementDirector?.cancel(this.agentId);
+    const step = this.movementDirector?.nextStep(this.agentId);
+    this.path = step ? [step] : [];
+    this.state = step ? 'walk' : 'idle';
+    failure?.('cancelled');
   }
 
   /** Apply the floor's explicit software-economy visual policy. Real work and
@@ -213,28 +257,50 @@ export class Character {
       || this.smokeT >= 0;
   }
 
-  moveTo(tile: { x: number; y: number }): void {
-    const path = findPath(this.mapRenderer, this.getTilePosition(), tile);
-    if (path && path.length > 0) {
+  moveTo(tile: { x: number; y: number }, onArrive?: () => void,
+    onFailure?: (reason: MovementFailure) => void): void {
+    const generation = ++this.movementGeneration;
+    const cancelled = this.failureCallback;
+    this.arrivalCallback = null;
+    this.failureCallback = null;
+    this.path = [];
+    cancelled?.('cancelled');
+    if (generation !== this.movementGeneration) {
+      onFailure?.('cancelled');
+      return;
+    }
+    const accepted = this.movementDirector?.request(this.agentId, tile);
+    const first = this.movementDirector?.nextStep(this.agentId);
+    const path = this.movementDirector
+      ? (accepted ? (first ? [first] : []) : null)
+      : findPath(this.mapRenderer, this.getTilePosition(), tile);
+    this.arrivalCallback = onArrive ?? null;
+    this.failureCallback = onFailure ?? null;
+    if (path && (path.length > 0 || this.movementDirector?.status(this.agentId) === 'moving')) {
       this.sitting = false; // stand up before walking (clears the sit offset)
       this.sprite.setSeatedCrop(0); // show legs again while standing/walking
       this.path = path;
       this.state = 'walk';
       this.sprite.setAnimation('walk', this.direction);
+    } else {
+      this.path = first ? [first] : [];
+      this.state = first ? 'walk' : 'idle';
+      this.pendingSit = false;
+      this.pendingWork = null;
+      this.arrivalCallback = null;
+      this.failureCallback = null;
+      if (path) onArrive?.();
+      else onFailure?.('unreachable');
     }
   }
 
-  walkToAndThen(tile: { x: number; y: number }, callback: () => void): void {
+  walkToAndThen(tile: { x: number; y: number }, callback: () => void,
+    onFailure?: (reason: MovementFailure) => void): void {
     this.idleLoop = false; // a directed walk-and-do (e.g. a café break) owns the avatar
-    this.arrivalCallback = callback;
-    this.moveTo(tile);
-    if (this.state !== 'walk') {
-      // No path produced. If we're already on the tile, fire the callback now;
-      // otherwise it's unreachable — drop it so we don't "arrive" somewhere else.
-      this.arrivalCallback = null;
-      const t = this.getTilePosition();
-      if (t.x === tile.x && t.y === tile.y) callback();
-    }
+    this.wandering = false;
+    this.pendingSit = false;
+    this.pendingWork = null;
+    this.moveTo(tile, callback, onFailure);
   }
 
   /** Sit at the assigned desk, facing the monitor. Walks there first if away.
@@ -251,7 +317,11 @@ export class Character {
     this.glowOn = working;
     this.wandering = false;
     const t = this.getTilePosition();
-    if (t.x === this.deskTile.x && t.y === this.deskTile.y) {
+    if (t.x === this.deskTile.x && t.y === this.deskTile.y
+      && !this.movementDirector?.hasStep(this.agentId)) {
+      const idleLoop = this.idleLoop;
+      this.cancelMovement();
+      this.idleLoop = idleLoop;
       this.applySit();
     } else {
       this.pendingSit = true;
@@ -316,13 +386,13 @@ export class Character {
   }
 
   setIdle(): void {
+    this.cancelMovement();
     this.idleLoop = false;
-    this.state = 'idle';
+    this.state = this.path.length ? 'walk' : 'idle';
     this.pendingWork = null;
     this.pendingSit = false;
     this.sitting = false;
     this.wandering = false;
-    this.path = [];
     this.glowOn = false;
     this.sprite.setSeatedCrop(0);
     this.sprite.setAnimation('idle', this.direction);
@@ -337,6 +407,7 @@ export class Character {
       return;
     }
     if (this.idleLoop && this.wandering) return; // already in the linger phase
+    this.cancelMovement();
     // (Re)enter the idle loop at its linger phase, then begin roaming.
     this.idleLoop = true;
     this.idleLoopPhase = 'linger';
@@ -622,15 +693,9 @@ export class Character {
     // and a tall map tile between them sorts correctly against both (see
     // ./tileOcclusion).
     //
-    // WHAT THIS DOES NOT FIX, on purpose: two agents standing on the SAME tile
-    // are drawn in the same place, and no painter's order rescues that. The
-    // cause is one line up the stack — the pathfinder reads the map grid only,
-    // so avatars do not block each other (see `updateWander` below, whose
-    // social-lean branch already has to skip a colleague's own tile for exactly
-    // this reason). Repairing it properly means either agent-vs-agent collision in
-    // the path search or reserving destination tiles, both of which change how
-    // the floor MOVES — new ways to get stuck in a crowded office — and neither
-    // belongs in a rendering-order change. Left as a known, separate problem.
+    // Painter's order cannot separate two bodies on the same tile. When the
+    // stations flag attaches movementDirector, it owns that exclusion; legacy
+    // scenes without the director still use only the static walkability grid.
     const depth = this.mapRenderer.projection.depthAtWorldY(this.py);
     this.sprite.container.zIndex = depth;
     this.thoughtBubble.setPosition(this.px, this.py);
@@ -855,7 +920,27 @@ export class Character {
   }
 
   private updateWalk(dt: number): void {
+    if (this.movementDirector) {
+      const step = this.movementDirector.nextStep(this.agentId);
+      if (step) {
+        if (this.path.length !== 1 || this.path[0] !== step) this.path = [step];
+      } else if (this.path.length) this.path = [];
+      if (!step && this.movementDirector.status(this.agentId) === 'moving') return;
+      if (!step && this.movementDirector.status(this.agentId) === 'unreachable') {
+        const failure = this.failureCallback;
+        this.arrivalCallback = null;
+        this.failureCallback = null;
+        this.pendingSit = false;
+        this.pendingWork = null;
+        this.setIdle();
+        failure?.('unreachable');
+        return;
+      }
+    }
     if (this.path.length === 0) {
+      const arrived = this.arrivalCallback;
+      this.arrivalCallback = null;
+      this.failureCallback = null;
       if (this.pendingSit) {
         this.applySit();
       } else if (this.pendingWork) {
@@ -871,11 +956,7 @@ export class Character {
       } else {
         this.setIdle();
       }
-      if (this.arrivalCallback) {
-        const cb = this.arrivalCallback;
-        this.arrivalCallback = null;
-        cb();
-      }
+      arrived?.();
       return;
     }
 
@@ -889,6 +970,7 @@ export class Character {
       this.px = targetPx;
       this.py = targetPy;
       this.path.shift();
+      this.movementDirector?.arriveStep(this.agentId, target);
       return;
     }
 
@@ -984,6 +1066,9 @@ export class Character {
   }
 
   destroy(): void {
+    this.cancelMovement();
+    this.movementDirector?.release(this.agentId);
+    this.movementDirector = null;
     if (this.hideTimer) { clearTimeout(this.hideTimer); this.hideTimer = null; }
     this.thoughtBubble.destroy();
     this.sprite.destroy();

@@ -1,25 +1,11 @@
+import { stationForTool } from '@shared/toolStation';
+import { observeParserTool } from '@/scene/office/toolActivityChannel';
 import { useCallback, useEffect, useRef } from 'react';
-import { useStore, type ToolKind, type StationKind } from '@/store/store';
+import { useStore } from '@/store/store';
 import { createAnsiStripper } from '@/components/ansiText';
 
 // Tool call lines look like: `● Read SPEC.md`, `● Bash npm test`, `● Edit src/foo.ts`
 const TOOL_RE = /●\s+([A-Za-z][A-Za-z_]*)(?:\s+(.+))?/g;
-
-const TOOL_TO_STATION: Record<string, StationKind> = {
-  Read: 'shelf', Edit: 'shelf', Write: 'shelf', MultiEdit: 'shelf',
-  Grep: 'shelf', Glob: 'shelf',
-  Bash: 'terminal', BashOutput: 'terminal',
-  WebFetch: 'web', WebSearch: 'web',
-  TodoWrite: 'board', TaskCreate: 'board', TaskUpdate: 'board'
-};
-
-const TOOLKIND_BY_NAME: Record<string, ToolKind> = {
-  Read: 'Read', Edit: 'Edit', Write: 'Write',
-  Bash: 'Bash',
-  WebFetch: 'WebFetch', WebSearch: 'WebSearch',
-  Grep: 'Grep', Glob: 'Glob',
-  TodoWrite: 'TodoWrite'
-};
 
 // "Blocked" = Claude is genuinely waiting on the user. Match only real prompts
 // (the approval menu / a yes-no question). Do NOT match the bare word
@@ -115,8 +101,11 @@ export function usePtyParser(agentId: string) {
     }
 
     if (lastTool) {
-      const station = TOOL_TO_STATION[lastTool] ?? 'desk';
-      const carrying = TOOLKIND_BY_NAME[lastTool] ?? undefined;
+      const { station, carry: carrying } = stationForTool(lastTool);
+      if (useStore.getState().stationActivityEnabled) observeParserTool({
+        agentId, event: 'TerminalToolObserved', tool: lastTool, provenance: 'parser',
+        receivedAt: Date.now(), toolPhase: 'requested'
+      });
       // Collapse space runs: translated cursor-forwards (see ansiText) can
       // stand for several columns, and the bubble shouldn't show the gaps.
       const summary = (lastArg ? `${lastTool.toLowerCase()} ${lastArg}` : lastTool.toLowerCase())

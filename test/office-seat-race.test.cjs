@@ -68,7 +68,7 @@ test('syncAgents will not start a build for an agent already being built', () =>
     'syncAgents builds on !runtimes alone again — the double-spawn is back');
   // …and it still applies state to agents that ARE built. A guard that also
   // skipped applyState would freeze every avatar.
-  assert.match(syncAgents, /else applyState\(agent, rt\);/);
+  assert.match(syncAgents, /else\s*\{[^}]*applyState\(agent, rt\);/);
 });
 
 test('the id is marked before anything can yield, and cleared in a finally', () => {
@@ -106,10 +106,11 @@ test('the hazard the guard exists for is still present', () => {
   assert.ok(await_ < register, 'runtime registered before the await — re-read this test');
 });
 
-test('only the floor teardown paths release a seat, and they own a runtime', () => {
-  // Sanity on the seat ledger as a whole: every other seatClaims.delete sits in
+test('only teardown or an abandoned spawn releases its own seat', () => {
+  // The two spawn exits (removed agent or no free transit tile) release the
+  // seat they just claimed. Every other seatClaims.delete sits in
   // removeCharacter-style code that has a live runtime to read `seatIndex` from,
   // so no path can free someone else's desk.
   const releases = [...src.matchAll(/seatClaims\.delete\(([^)]*)\)/g)].map((m) => m[1]);
-  assert.deepEqual(releases.sort(), ['rt.seatIndex', 'seatIndex']);
+  assert.deepEqual(releases.sort(), ['rt.seatIndex', 'seatIndex', 'seatIndex']);
 });

@@ -18,12 +18,15 @@ import type { HarnessConfig } from './config';
 import type { ControlRegistry } from './control';
 import type { CircuitBreaker } from './breaker';
 import { estimateCostUsd } from './pricing';
-import { validateHookEvent } from '../shared/hookEvents';
+import { validateHookEvent, type HookEvent } from '../shared/hookEvents';
 
 interface HookPayload {
   hook_event_name?: string;
   agent_id?: string | null;
   session_id?: string;
+  tool_use_id?: string;
+  /** Internal proxy bridge marker: its tool events observe model requests. */
+  provenance?: 'proxy';
   transcript_path?: string;
   /** Status-line payloads only: the session's live context accounting. */
   context_window?: { total_input_tokens?: number; context_window_size?: number };
@@ -121,6 +124,7 @@ export class HookServer {
   }
 
   private handle(p: HookPayload): unknown {
+    const receivedAt = Date.now();
     const agentId = p.agent_id ?? undefined;
     const event = p.hook_event_name ?? 'Unknown';
     this.onEvent?.(agentId, event, p.message);
@@ -162,7 +166,7 @@ export class HookServer {
     // drain below): stop the agent CLEANLY at this hook boundary rather than
     // killing the PTY. session_id is in the payload for a later --resume.
     if (agentId && this.control?.shouldHalt(agentId)) {
-      this.emit(agentId, event, p);
+      this.emit(agentId, event, p, receivedAt, event === 'PreToolUse');
       return { continue: false, stopReason: 'Halted by the operator from the floor.' };
     }
 
@@ -219,13 +223,13 @@ export class HookServer {
 
     if ((event === 'Stop' || event === 'SubagentStop') && agentId) {
       // Respect any upstream Stop hook that already re-entered this boundary.
-      if (p.stop_hook_active) { this.emit(agentId, event, p); return {}; }
+      if (p.stop_hook_active) { this.emit(agentId, event, p, receivedAt); return {}; }
       // Never turn unread hive mail into a forced continuation at Stop. That old
       // path bypassed terminal-draft/HITL safety and could spend credits while a
       // user was answering a question. Inbox files remain durable; the renderer
       // wakes the agent later through its guarded idle-only delivery path.
       this.notify(agentId ?? 'Agent', 'finished — idle');
-      this.emit(agentId, event, p);
+      this.emit(agentId, event, p, receivedAt);
       return {};
     }
 
@@ -237,7 +241,7 @@ export class HookServer {
       const d = this.control.toolDecision(agentId, p.tool_name ?? '');
       if (d.deny) {
         this.emitControl(agentId, p.tool_name, d.reason);
-        this.emit(agentId, event, p);
+        this.emit(agentId, event, p, receivedAt, true);
         return {
           hookSpecificOutput: {
             hookEventName: 'PreToolUse',
@@ -283,7 +287,7 @@ export class HookServer {
       : null;
 
     if (steer || roster || goal) {
-      this.emit(agentId, event, p);
+      this.emit(agentId, event, p, receivedAt);
       return {
         hookSpecificOutput: {
           hookEventName: event,
@@ -305,7 +309,7 @@ export class HookServer {
     }
 
     // Forward everything else to the renderer so avatars reflect real activity.
-    this.emit(agentId, event, p);
+    this.emit(agentId, event, p, receivedAt);
     return {};
   }
 
@@ -330,15 +334,27 @@ export class HookServer {
     this.getWebContents()?.send('control:approvalRequest', { agentId, tool, reason });
   }
 
-  private emit(agentId: string | undefined, event: string, p: HookPayload, blocked = false): void {
-    const payload = {
+  private emit(agentId: string | undefined, event: string, p: HookPayload, receivedAt: number, blocked = false): void {
+    let toolPhase: HookEvent['toolPhase'];
+    if (event === 'PreToolUse') toolPhase = blocked ? 'denied' : 'requested';
+    else if (event === 'PostToolUse') toolPhase = p.provenance === 'proxy' ? 'requested' : 'completed';
+    else if (event === 'PostToolUseFailure') toolPhase = 'failed';
+    else if (event === 'PermissionDenied') toolPhase = 'denied';
+    const payload: HookEvent = {
       agentId,
       event,
       tool: p.tool_name,
       notificationType: p.notification_type,
       source: p.source,
       message: p.message,
-      blocked
+      blocked,
+      provenance: p.provenance === 'proxy' ? 'proxy' : 'hook',
+      receivedAt,
+      // Proxy session_id is our per-launch bookkeeping key, not a provider
+      // session. Keep it out of the renderer's real-correlation contract.
+      sessionId: p.provenance !== 'proxy' && typeof p.session_id === 'string' && p.session_id.trim() ? p.session_id : undefined,
+      invocationId: typeof p.tool_use_id === 'string' && p.tool_use_id.trim() ? p.tool_use_id : undefined,
+      toolPhase
     };
     if (!validateHookEvent(payload)) {
       console.warn('[hive] rejected invalid hook event:', event);

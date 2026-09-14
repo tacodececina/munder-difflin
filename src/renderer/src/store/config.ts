@@ -111,6 +111,8 @@ export interface HarnessConfig {
   softwareEconomyEnabled?: boolean;
   /** Opt-in read-only click inspection for the office floor. Default OFF. */
   floorInspectionEnabled?: boolean;
+  /** Verifiable tool station visits. Default off. */
+  stationActivityEnabled?: boolean;
   /** Auto-update from GitHub releases (default ON; Settings → General). */
   autoUpdate?: boolean;
   /** Anonymous product analytics (default ON, opt-out; see TELEMETRY.md).

@@ -90,6 +90,11 @@ function validateOfficeMap(map) {
     check(reached(e.stand), `unreachable errand ${e.kind} at ${e.stand.x},${e.stand.y}`);
     check(Math.abs(e.stand.x - e.fx.x) + Math.abs(e.stand.y - e.fx.y) <= 2, `errand ${e.kind} detached from prop`);
   }
+  for (const spot of B.stationSpots ?? []) {
+    check(reached(spot.stand), `unreachable station ${spot.kind} at ${spot.stand.x},${spot.stand.y}`);
+    check(at('collision', spot.stand.x, spot.stand.y) === 0, `station ${spot.kind} must have an empty collision tile`);
+    check(![...spawns.values()].some(s => s.x === spot.stand.x && s.y === spot.stand.y), `station ${spot.kind} overlaps a permanent spawn`);
+  }
   // #8: enumerate required names to detect missing/misspelled zones too.
   const zones = parseZones(map);
   check(zones.size === L.zones.objects.length, '#8 duplicate zone name');
@@ -106,6 +111,6 @@ function validateOfficeMap(map) {
     dest.add(target);
   }
   fail();
-  return { seats: B.primarySeatNames.length, reachable: queue.length, waiting: ring.length };
+  return { seats: B.primarySeatNames.length, reachable: queue.length, waiting: ring.length, stations: B.stationSpots?.length ?? 0 };
 }
 module.exports = { validateOfficeMap };

@@ -134,6 +134,66 @@ test('the claude hook + statusLine commands run through the launcher', async (t)
   for (const cmd of commands) assert.equal(usesLauncher(cmd, launcher), true, cmd);
 });
 
+test('Claude settings subscribe to failed tools and session end through the real hook shim', async (t) => {
+  const home = tmpHome();
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const hive = new HiveManager(() => home);
+  await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
+  const settings = JSON.parse(fs.readFileSync(path.join(home, 'hive/agents/a1/settings.json'), 'utf8'));
+  for (const event of ['PostToolUseFailure', 'SessionEnd']) {
+    assert.ok(settings.hooks[event]?.length, `${event} must be registered at the provider`);
+    assert.equal(settings.hooks[event][0].hooks[0].command, settings.hooks.PostToolUse[0].hooks[0].command);
+  }
+  assert.equal(settings.hooks.PostToolUseFailure[0].matcher, '*');
+});
+
+test('Grok settings subscribe to its supported failed-tool and session-end events', (t) => {
+  const { home, harness } = isolatedHomes(t);
+  const hive = new HiveManager(() => harness);
+  hive.ensureHive();
+  hive.installGrokHooks();
+  const { hooks } = JSON.parse(fs.readFileSync(path.join(home, '.grok/hooks/munder-hive.json'), 'utf8'));
+  for (const event of ['PostToolUseFailure', 'SessionEnd', 'StopFailure', 'StopCancelled']) {
+    assert.ok(hooks[event]?.length, `${event} must be registered at the provider`);
+    assert.equal(hooks[event][0].hooks[0].command, hooks.PostToolUse[0].hooks[0].command);
+  }
+  assert.equal(hooks.PostToolUseFailure[0].matcher, '.*');
+});
+
+test('Grok shim preserves failed-tool IDs and normalizes interrupted turn boundaries', async (t) => {
+  const { harness } = isolatedHomes(t);
+  const hive = new HiveManager(() => harness);
+  hive.ensureHive();
+  hive.installGrokHooks();
+  const vm = require('node:vm');
+  const { EventEmitter } = require('node:events');
+  for (const [sourceEvent, normalized] of [['post_tool_use_failure', 'PostToolUseFailure'],
+    ['stop_failure', 'StopFailure'], ['stop_cancelled', 'StopCancelled']]) {
+    const stdin = new EventEmitter();
+    stdin.setEncoding = () => {};
+    const sent = [];
+    const sandbox = {
+      process: { env: { HIVE_SOCK: 'fixture', AGENT_ID: 'a1' }, stdin },
+      setTimeout: () => ({ unref() {} }),
+      require(name) {
+        assert.equal(name, 'net');
+        return { createConnection(_sock, connected) {
+          queueMicrotask(connected);
+          return { on() {}, setEncoding() {}, write(line) { sent.push(JSON.parse(line)); } };
+        } };
+      }
+    };
+    vm.runInNewContext(fs.readFileSync(path.join(harness, 'hive/bin/grok-hook.cjs'), 'utf8'), sandbox);
+    stdin.emit('data', JSON.stringify({ hookEventName: sourceEvent, sessionId: 's1', toolUseId: 'call-1', toolName: 'Bash' }));
+    stdin.emit('end');
+    await Promise.resolve();
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].hook_event_name, normalized);
+    assert.equal(sent[0].session_id, 's1');
+    assert.equal(sent[0].tool_use_id, 'call-1');
+  }
+});
+
 test('every hook installer routes through the launcher — none left on bare node', async (t) => {
   const home = tmpHome();
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
