@@ -42,6 +42,7 @@ export interface TiledObject {
   y: number;
   width?: number;
   height?: number;
+  properties?: { name: string; type?: string; value: unknown }[];
 }
 
 export interface TiledTilesetRef {

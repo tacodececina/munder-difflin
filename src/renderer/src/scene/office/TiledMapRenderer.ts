@@ -16,6 +16,7 @@ import {
   type Point,
 } from './tiledCollision';
 import { createIsometricProjection, createOrthogonalProjection, type Projection, type WorldSize } from './projection';
+import { readDeskVisualOffsets, monitorVisualOffsets, monitorDisplayGid } from './deskVisuals';
 
 // Trimmed port of shahar061/the-office (office/engine/TiledMapRenderer.ts):
 // renders floor/walls/furniture tile layers and parses collision, spawn-points
@@ -52,6 +53,7 @@ export class TiledMapRenderer {
   private walkabilityGrid: boolean[][] = [];
   private spawnPoints: Map<string, Point> = new Map();
   private zones: Map<string, ZoneRect> = new Map();
+  private deskOffsets: Map<string, number> = new Map();
   private characterContainer: Container;
   private rootContainer: Container;
 
@@ -86,6 +88,7 @@ export class TiledMapRenderer {
     this.spawnPoints = parseSpawnPoints(mapData);
     markWalkableSpawnPoints(this.walkabilityGrid, this.spawnPoints, this.width, this.height, WALKABLE_SPAWN_PREFIXES);
     this.zones = parseZones(mapData);
+    this.deskOffsets = readDeskVisualOffsets(mapData);
     this.buildTileLayers();
   }
 
@@ -114,6 +117,7 @@ export class TiledMapRenderer {
   getAllSpawnPoints(): Map<string, Point> { return this.spawnPoints; }
   getZone(name: string): ZoneRect | undefined { return this.zones.get(name); }
   getAllZones(): Map<string, ZoneRect> { return this.zones; }
+  getDeskVisualOffset(seat: Point): number { return this.deskOffsets.get(`${seat.x},${seat.y}`) ?? 0; }
 
   /** The (flip-stripped) gid painted at a tile of a layer, 0 when empty.
    *  Lets the scene locate furniture by art — e.g. each desk's monitor block. */
@@ -167,6 +171,7 @@ export class TiledMapRenderer {
     // leaving ~hundreds of floor sprites out of the sort keeps the per-frame
     // zIndex pass cheap.
     const sortTiles = this.projection.sortsTilesWithCharacters;
+    const monitorOffsets = monitorVisualOffsets(this.mapData);
 
     for (const layerName of TILE_LAYERS) {
       const layer = this.findLayer(layerName, 'tilelayer');
@@ -183,7 +188,8 @@ export class TiledMapRenderer {
             const flippedH = (raw & FLIPPED_H_FLAG) !== 0;
             const flippedV = (raw & FLIPPED_V_FLAG) !== 0;
             const flippedD = (raw & FLIPPED_D_FLAG) !== 0;
-            const tileId = raw & TILE_ID_MASK;
+            const displayOffset = layerName === 'furniture-above' ? monitorOffsets.get(`${x},${y}`) ?? 0 : 0;
+            const tileId = monitorDisplayGid(raw & TILE_ID_MASK, displayOffset);
 
             const resolved = this.resolveTileset(tileId);
             if (!resolved) continue;
@@ -236,6 +242,13 @@ export class TiledMapRenderer {
             }
 
             if (sorted) sprite.zIndex = this.projection.tileDepth(x, y);
+            if (displayOffset) {
+              const from = this.projection.tileToWorld(x, y);
+              const to = this.projection.tileToWorld(x, y + displayOffset);
+              sprite.x += to.x - from.x;
+              sprite.y += to.y - from.y;
+              if (sorted) sprite.zIndex = this.projection.tileDepth(x, y + displayOffset);
+            }
             container.addChild(sprite);
           }
         }

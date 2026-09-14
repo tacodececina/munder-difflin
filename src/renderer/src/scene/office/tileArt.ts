@@ -62,6 +62,12 @@ export interface TilePalette {
 }
 
 export const TILE_PALETTES: Record<string, TilePalette> = {
+  // Dedicated to the redesigned orthogonal office. Keeping `office` below
+  // intact also keeps the isometric prototype's warm palette intact.
+  'office-tech': {
+    floor: { base: [39, 49, 58], mortar: [22, 29, 36], fleck: [168, 139, 100] },
+    wall: { base: [79, 96, 108], line: [103, 188, 184] },
+  },
   office: {
     // Warm oak-plank floor instead of the source pack's flat sage-green tile.
     floor: { base: [176, 148, 110], mortar: [116, 94, 68], fleck: [203, 178, 136] },

@@ -59,7 +59,11 @@ export class WorldClock {
 
     const at = projection.tileToWorld(topLeft.x, topLeft.y);
     this.container.position.set(at.x, at.y);
-    this.container.zIndex = projection.rowDepth(3);
+    // `+2` = the shared wall-prop depth rule (see the calendar in
+    // OfficeFloor.tsx): a hanging prop spills a row below its own tile, so it
+    // sorts against that row. Was a literal `rowDepth(3)`, correct only while
+    // every theme's worldClock anchor sat on row 1.
+    this.container.zIndex = projection.rowDepth(topLeft.y + 2);
     this.container.eventMode = 'none';
     this.render();
   }

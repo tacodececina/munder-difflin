@@ -13,6 +13,8 @@
 // (uncommitted human WIP) — the office theme references its existing exports.
 
 import type { Texture } from 'pixi.js';
+import { TECH_ATLAS_META, TECH_PALETTE_KEY } from './techOfficeArt';
+import { OFFICE_BINDINGS } from './officeLayout';
 import { colors } from '@/design/tokens';
 import {
   CAST_BY_NAME,
@@ -71,15 +73,11 @@ export interface ErrandSpot {
  *  the atlas whose metadata already lives inline in the map's own `tilesets[0]`
  *  (the loader keeps the map's copy and only patches the appended atlases). */
 export interface TilesetEntry {
-  /** Where the atlas image comes from. Empty when `procedural` is set — an
-   *  isometric atlas has no source PNG to load, it is generated. */
+  /** Where the atlas image comes from. Empty for a generated RGBA atlas. */
   url: string;
-  /** Generate this atlas in code instead of decoding `url`. Today the only
-   *  generator is isoTileArt.ts's `buildIsoAtlas` (`kind: 'iso'`), whose output
-   *  is a deterministic function of `tilePaletteKey` — so an isometric theme
-   *  inherits its show's exact floor/wall colours with no new art files. See
-   *  OfficeFloor.tsx's loadTilesetTexture for the (tiny) branch this takes. */
-  procedural?: { kind: 'iso' };
+  /** Generate from isoTileArt or techOfficeArt instead of decoding `url`.
+   * Both return deterministic RGBA buffers derived from tilePaletteKey. */
+  procedural?: { kind: 'iso' | 'tech-office' };
   embedded?: boolean;
   firstgid?: number;
   image?: string;
@@ -132,14 +130,40 @@ export interface CoffeeConfig {
 }
 
 /** Clickable prop anchors (tile coords). calendar → TRIGGERS, boards → TASKS,
- *  clock → CLOSING TIME. worldClock is a non-interactive decoration (China +
- *  Mexico City live time), placed on a free stretch of the theme's own top
- *  wall, clear of the other anchors above. */
+ *  clock → CLOSING TIME, askBoard → ASK ME. worldClock and coffeeSteam are
+ *  non-interactive decorations — the world clock (China + Mexico City live
+ *  time) goes on a free stretch of the theme's own top wall, clear of the
+ *  other anchors above; coffeeSteam is the counter machine's TOP tile, which
+ *  the brewing steam puffs out of.
+ *
+ *  Every field here is a TILE the theme owns. askBoard and coffeeSteam were
+ *  literal `tileToWorld(14, 10)` / `tileToWorld(26, 17)` calls inside
+ *  OfficeFloor.tsx until they moved here — office.tmj coordinates baked into
+ *  the renderer, which put both props in absurd places on any other floor
+ *  plan. They are anchors for the same reason `boards` is one. */
 export interface AnchorConfig {
   calendar: Tile;
   boards: Tile;
   clock: Tile;
   worldClock: Tile;
+  /** The ASK ME board's wall tile. Drawn like `boards`: the prop's depth is
+   *  `rowDepth(askBoard.y + 1)`, so it must be a wall the floor runs UNDER. */
+  askBoard: Tile;
+  /** The coffee machine's top tile (the counter piece the steam rises from),
+   *  NOT the tile a character stands on — that is `coffee.machineStand`. In
+   *  every shipped theme's café stamp this sits 3 rows above machineStand,
+   *  which is also the fallback themeBundle.ts derives for older bundles. */
+  coffeeSteam: Tile;
+  /** The three floor tiles the board choreography walks an actor to: pin a
+   *  fresh card on the blockers board, take one off the todo board, file a
+   *  finished one on the archive table. These were literals in
+   *  OfficeFloor.tsx too, and unlike the anchors above they are WALK
+   *  DESTINATIONS — each one must be a walkable tile standing in front of the
+   *  `boards` prop, or the actor never arrives and the card never moves.
+   *  office.tmj's are boards + (2,1) / (3,1) / (6,1). */
+  boardPinStand: Tile;
+  boardTakeStand: Tile;
+  boardArchiveStand: Tile;
 }
 
 /** Theme palette. `background` is the canvas clear color; `noteColors` are the
@@ -224,92 +248,19 @@ const BASE_TILESETS: TilesetEntry[] = [
   { url: interiorsUrl, firstgid: 1025, image: 'interiors', imagewidth: 256, imageheight: 1424, tilewidth: 16, tileheight: 16, columns: 16, tilecount: 1424 },
 ];
 
-/** Phase 10: office's own copy of BASE_TILESETS, with the a5 atlas's floor
- *  and wall gids marked for procedural repaint (tileArt.ts). Verified
- *  against office.tmj directly (not guessed): the `floor` layer paints
- *  gids 783/784/799/800 (a5-office-floors-walls.png) as a single repeating
- *  2×2 meta-tile across ~572 of the map's 576 floor cells (the other 4 cells
- *  are a one-off café rug from interiors.png, gids 1698/1699/1714/1715 —
- *  intentionally left untouched, it's a placed decoration, not generic
- *  floor); the `walls` layer paints 12 distinct a5 gids
- *  (514/517/522/530/533/554/570/578/579/581/611/643) across 267 cells — the
- *  room's outer boundary plus the CEO office's divider walls. Both counts
- *  came from parsing office.tmj's layer data directly, not eyeballing the
- *  PNG. See tileArt.ts's patchTilesetCanvas for how `patches` gets applied,
- *  and its drawWallTile doc comment for why walls are alpha-preserving
- *  repaints rather than new shapes. */
-const OFFICE_TILESETS: TilesetEntry[] = [
-  BASE_TILESETS[0],
-  {
-    ...BASE_TILESETS[1],
-    tilePaletteKey: 'office',
-    patches: [
-      { kind: 'floor', gids: [783, 784, 799, 800] },
-      { kind: 'wall', gids: [514, 517, 522, 530, 533, 554, 570, 578, 579, 581, 611, 643] },
-    ],
-  },
-  BASE_TILESETS[2],
-];
+/** Office-only atlas, generated from the same primitives as tileArt.ts.
+ * The other themes continue to use their own atlases and palettes. */
+const OFFICE_TILESETS: TilesetEntry[] = [{
+  url: '', procedural: { kind: 'tech-office' }, tilePaletteKey: TECH_PALETTE_KEY,
+  ...TECH_ATLAS_META,
+}];
 
-/** The existing office, expressed as a theme. Values are copied verbatim from
- *  the former in-file constants in OfficeFloor.tsx / DeskScreen.ts. */
+/** Curated operations floor. Layout bindings are shared with the generator. */
 export const OFFICE_THEME: ThemeConfig = {
   id: 'office',
   mapRaw: officeMapRaw,
-  // Restored to the original, unpatched atlas per Alex's request — back to
-  // exactly how the office shipped before the tvshow-phase10 procedural
-  // floor/wall repaint. OFFICE_TILESETS (below) is left intact, unused, in
-  // case that direction is revisited later.
-  tilesets: BASE_TILESETS,
-  primarySeatNames: [
-    'desk-ceo',
-    'pc-1', 'pc-2', 'pc-3', 'pc-4', 'pc-5', 'pc-6',
-    'desk-chief-architect', 'desk-product-manager', 'desk-team-lead',
-    'desk-backend-engineer', 'desk-ui-ux-expert', 'desk-data-engineer',
-    'desk-project-manager', 'desk-market-researcher', 'desk-agent-organizer',
-  ],
-  cafeSeatNames: ['cafe-seat-1', 'cafe-seat-2', 'cafe-seat-3', 'cafe-seat-4'],
-  cafeStands: [
-    ['cafe-stand-coffee', 'coffee'],
-    ['cafe-stand-vending', 'vending'],
-  ],
-  coffee: {
-    trayTile: { x: 29, y: 15 },     // the sideboard (counter piece)
-    trayStand: { x: 29, y: 16 },
-    machineStand: { x: 26, y: 20 }, // below the counter machine
-    sinkTile: { x: 28, y: 18 },     // free counter top, right end
-    sinkStand: { x: 28, y: 20 },
-    maxCups: 4,
-  },
-  anchors: {
-    calendar: { x: 4, y: 1 },
-    boards: { x: 6, y: 10 },
-    clock: { x: 1, y: 1 },
-    worldClock: { x: 20, y: 1 }, // free stretch of the top wall, past both windows (x=10/x=15)
-  },
-  errandSpots: [
-    // plants (droplets ride on the character via startWatering)
-    { kind: 'water', stand: { x: 2, y: 20 }, facing: 'left', fx: { x: 1, y: 20 }, duration: 4.5 },
-    { kind: 'water', stand: { x: 22, y: 20 }, facing: 'right', fx: { x: 23, y: 20 }, duration: 4.5 },
-    { kind: 'water', stand: { x: 30, y: 20 }, facing: 'right', fx: { x: 31, y: 20 }, duration: 4.5 },
-    // the CEO office is the god's domain: its plant, window, cigar. Workers
-    // never set foot in there for errands.
-    { kind: 'water', stand: { x: 6, y: 4 }, facing: 'up', fx: { x: 6, y: 3 }, duration: 4.5, godOnly: true },
-    { kind: 'smoke', stand: { x: 2, y: 3 }, facing: 'up', fx: { x: 2, y: 1 }, duration: 18, godOnly: true },
-    { kind: 'water', stand: { x: 17, y: 4 }, facing: 'up', fx: { x: 17, y: 3 }, duration: 4.5 },
-    // the two public wall windows — wind streaks drift into the room
-    { kind: 'window', stand: { x: 10, y: 3 }, facing: 'up', fx: { x: 10, y: 1 }, duration: 5 },
-    { kind: 'window', stand: { x: 15, y: 3 }, facing: 'up', fx: { x: 14, y: 1 }, duration: 5 },
-    // water dispensers (hallway + the top-right corner one)
-    { kind: 'dispenser', stand: { x: 16, y: 3 }, facing: 'down', fx: { x: 16, y: 4 }, duration: 3.5 },
-    { kind: 'dispenser', stand: { x: 32, y: 4 }, facing: 'up', fx: { x: 32, y: 3 }, duration: 3.5 },
-    // the café fridge (door light spills out) + the shelf beside it
-    { kind: 'fridge', stand: { x: 29, y: 20 }, facing: 'up', fx: { x: 29, y: 19 }, duration: 3.2 },
-    { kind: 'shelf', stand: { x: 30, y: 20 }, facing: 'up', fx: { x: 30, y: 18 }, duration: 4 },
-    // garbage bins (entrance + café) — a paper ball arcs in
-    { kind: 'bin', stand: { x: 18, y: 20 }, facing: 'left', fx: { x: 17, y: 20 }, duration: 2.6 },
-    { kind: 'bin', stand: { x: 31, y: 16 }, facing: 'right', fx: { x: 32, y: 16 }, duration: 2.6 },
-  ],
+  tilesets: OFFICE_TILESETS,
+  ...OFFICE_BINDINGS,
   monitor: {
     offTopLeftGid: 365,
     onGids: [
@@ -318,7 +269,7 @@ export const OFFICE_THEME: ThemeConfig = {
     ],
   },
   palette: {
-    background: colors.ink[900],
+    background: 0x161d24,
     noteColors: { todo: 0xf2df8a, doing: 0x9ecbf0, blocked: 0xf0a3a3, done: 0xa8e0b0 },
   },
   cast: {
@@ -398,6 +349,25 @@ export const BROOKLYN99_THEME: ThemeConfig = {
     boards: { x: 21, y: 1 },     // over the interrogation/"holding" room → TASKS
     clock: { x: 1, y: 1 },       // top-left corner → CLOSING TIME
     worldClock: { x: 12, y: 1 }, // briefing-room top wall, clear of the window (x=6)
+    // CARRIED OVER VERBATIM, not authored for this map. Both props were
+    // hardcoded to office.tmj's coordinates in OfficeFloor.tsx, so these are
+    // what this theme has been rendering all along and keeping them is what
+    // makes extracting the anchors a zero-pixel change. (14,10) does land on
+    // this map's own briefing-room south wall (gid 522), so the ASK ME board
+    // reads fine; (26,17) is bare floor — the steam has always puffed 2 tiles
+    // short of the break-room machine, which sits at (28,19) here (gid 313,
+    // = machineStand (28,22) − 3 rows, the same café-stamp offset office uses).
+    // Correcting it is a deliberate visual change, not part of this migration.
+    askBoard: { x: 14, y: 10 },
+    coffeeSteam: { x: 26, y: 17 },
+    // ALSO CARRIED OVER VERBATIM, and these ones are already visibly broken:
+    // (12,11) is BLOCKED in this map's collision layer, so "file it as done"
+    // has never been able to reach the archive table here. Fixing it means
+    // picking walkable tiles in front of THIS map's boards anchor (21,1) —
+    // again a deliberate change, made where the result can be looked at.
+    boardPinStand: { x: 8, y: 11 },
+    boardTakeStand: { x: 9, y: 11 },
+    boardArchiveStand: { x: 12, y: 11 },
   },
   // Errand anchors authored to brooklyn99.tmj's own floor plan (verified
   // walkable against the map's collision layer + desk/furniture footprints
@@ -517,6 +487,18 @@ export const SILICONVALLEY_THEME: ThemeConfig = {
     boards: { x: 28, y: 1 },    // top wall, over the server/equipment corner → TASKS
     clock: { x: 1, y: 1 },      // top-left corner → CLOSING TIME
     worldClock: { x: 14, y: 1 }, // war-room top wall, clear of the window (x=5)
+    // CARRIED OVER VERBATIM — see BROOKLYN99_THEME.anchors for the full note.
+    // (14,10) is this map's warroom/servercorner south wall band (gid 522).
+    // This map's own machine top is at (30,19) (gid 313, = machineStand
+    // (30,22) − 3 rows); moving the steam there is a visual change, not this
+    // migration's job.
+    askBoard: { x: 14, y: 10 },
+    coffeeSteam: { x: 26, y: 17 },
+    // ALSO CARRIED OVER VERBATIM — see BROOKLYN99_THEME. Here (9,11) and
+    // (12,11) are both BLOCKED in this map's collision layer.
+    boardPinStand: { x: 8, y: 11 },
+    boardTakeStand: { x: 9, y: 11 },
+    boardArchiveStand: { x: 12, y: 11 },
   },
   // Errand anchors authored to siliconvalley.tmj's own floor plan (verified
   // walkable against the map's collision layer + desk/furniture footprints
@@ -644,6 +626,19 @@ export const FRIENDS_THEME: ThemeConfig = {
     boards: { x: 13, y: 1 },     // over the Ross/Monica-and-Rachel divider → TASKS
     clock: { x: 1, y: 1 },       // top-left corner → CLOSING TIME
     worldClock: { x: 22, y: 1 }, // Monica & Rachel's room, clear of the window (x=19)
+    // CARRIED OVER VERBATIM — see BROOKLYN99_THEME.anchors for the full note.
+    // (14,10) is this map's bedroom south wall band (gid 522). This map's own
+    // Central Perk machine top is at (29,19) (gid 313, = machineStand (29,22)
+    // − 3 rows); moving the steam there is a visual change, not this
+    // migration's job.
+    askBoard: { x: 14, y: 10 },
+    coffeeSteam: { x: 26, y: 17 },
+    // ALSO CARRIED OVER VERBATIM — see BROOKLYN99_THEME. Here ALL THREE are
+    // BLOCKED in this map's collision layer, so no board move has ever
+    // choreographed on this floor.
+    boardPinStand: { x: 8, y: 11 },
+    boardTakeStand: { x: 9, y: 11 },
+    boardArchiveStand: { x: 12, y: 11 },
   },
   // Errand anchors authored to friends.tmj's own floor plan (verified
   // walkable against the map's collision layer + desk/furniture footprints
@@ -805,6 +800,20 @@ export const ISOMETRIC_THEME: ThemeConfig = {
     boards: { x: 4, y: 0 },
     clock: { x: 0, y: 1 },
     worldClock: { x: 7, y: 0 },
+    // Same reasoning as the rest of this block: unused (`features.wallProps`
+    // is false, `features.coffee` is false), but on THIS 12x12 map rather than
+    // on office.tmj's 34x22 one — the literals these replaced, (14,10) and
+    // (26,17), are both off the edge of this map entirely.
+    askBoard: { x: 9, y: 0 },
+    coffeeSteam: { x: 6, y: 10 },
+    // Unused too (the board choreography is gated on `features.wallProps`),
+    // but these are walk destinations, so they point at three tiles of this
+    // map's own open bottom row — all walkable in isometric.tmj's collision
+    // layer — rather than office.tmj's row 11, which on a 12-row map is the
+    // last row and partly outside the room.
+    boardPinStand: { x: 5, y: 10 },
+    boardTakeStand: { x: 6, y: 10 },
+    boardArchiveStand: { x: 7, y: 10 },
   },
   errandSpots: [],
   // No desk paints the office monitor block, so no DeskScreen / DeskShelf /

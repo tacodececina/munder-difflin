@@ -1,4 +1,5 @@
 import { Container, Graphics, Sprite } from 'pixi.js';
+import { monitorDisplayGid } from './deskVisuals';
 import type { TiledMapRenderer } from './TiledMapRenderer';
 import type { MonitorConfig } from './themeRegistry';
 
@@ -30,11 +31,11 @@ export class DeskScreen {
   private on = false;
   private t = 0;
 
-  constructor(mapRenderer: TiledMapRenderer, topLeft: { x: number; y: number }, monitor?: MonitorConfig) {
+  constructor(mapRenderer: TiledMapRenderer, topLeft: { x: number; y: number }, monitor?: MonitorConfig, private visualOffset = 0) {
     const proj = mapRenderer.projection;
     const onGids = monitor?.onGids ?? DEFAULT_ON_GIDS;
     for (const [gid, dx, dy] of onGids) {
-      const tex = mapRenderer.textureForGid(gid);
+      const tex = mapRenderer.textureForGid(monitorDisplayGid(gid, visualOffset));
       if (!tex) continue;
       const s = new Sprite(tex);
       // (dx,dy) is a tile OFFSET inside the block; the projection is linear and
@@ -68,6 +69,7 @@ export class DeskScreen {
 
   update(dt: number): void {
     if (!this.on) return;
+    if (this.visualOffset > 0) return; // Rear panel: only its status LED is visible.
     this.t += dt;
     const g = this.anim;
     g.clear();

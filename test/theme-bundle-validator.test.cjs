@@ -29,9 +29,16 @@ const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'theme-bundle-valid');
 const VALID_MANIFEST_RAW = JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, 'theme.json'), 'utf8'));
 const VALID_MAP_RAW_TEXT = fs.readFileSync(path.join(FIXTURE_DIR, 'map.tmj'), 'utf8');
 
-/** Deep-clone helper so each test mutates its own copy of the fixture. */
+/** A pristine copy of the fixture, re-read from disk every call.
+ *
+ *  Deliberately NOT `JSON.parse(JSON.stringify(VALID_MANIFEST_RAW))`:
+ *  `validateManifestShape` fills its optional anchors in PLACE, so any test
+ *  that validates VALID_MANIFEST_RAW leaves `anchors.worldClock` /
+ *  `askBoard` / `coffeeSteam` stamped onto the shared object, and cloning it
+ *  afterwards hands the next test a manifest that is no longer the fixture.
+ *  Re-reading the file makes each test's copy independent of run order. */
 function cloneManifest() {
-  return JSON.parse(JSON.stringify(VALID_MANIFEST_RAW));
+  return JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, 'theme.json'), 'utf8'));
 }
 
 // ─── the happy path ──────────────────────────────────────────────────────────
@@ -50,6 +57,68 @@ test('a valid bundle (test/fixtures/theme-bundle-valid) passes both validation p
 test('validateThemeBundle can validate manifest shape alone (map text omitted)', () => {
   const result = validateThemeBundle(VALID_MANIFEST_RAW);
   assert.equal(result.ok, true);
+});
+
+// ─── optional anchors: old bundles keep importing ────────────────────────────
+//
+// The fixture manifest declares only calendar/boards/clock — exactly the
+// schema bundles shipped against before worldClock/askBoard/coffeeSteam
+// existed. Those three must be FILLED IN, not rejected and not left undefined:
+// themeLoader.ts hands `manifest.anchors` straight to ThemeConfig, and
+// OfficeFloor reads `.x`/`.y` off each one without a guard.
+
+test('a bundle predating worldClock/askBoard/coffeeSteam still validates, with each anchor defaulted', () => {
+  const manifest = cloneManifest();
+  assert.equal(manifest.anchors.worldClock, undefined, 'fixture should NOT declare the newer anchors');
+  assert.equal(manifest.anchors.askBoard, undefined);
+  assert.equal(manifest.anchors.coffeeSteam, undefined);
+
+  const result = validateManifestShape(manifest);
+  assert.equal(result.ok, true, `expected an old-shape bundle to pass: ${result.ok ? '' : JSON.stringify(result.errors)}`);
+
+  // worldClock → the interactive clock's own wall tile.
+  assert.deepEqual(result.manifest.anchors.worldClock, manifest.anchors.clock);
+  // askBoard → the task boards' wall run (the only wall tile an old manifest has).
+  assert.deepEqual(result.manifest.anchors.askBoard, manifest.anchors.boards);
+  // coffeeSteam → the machine's top tile, 3 rows above where a character brews.
+  assert.deepEqual(result.manifest.anchors.coffeeSteam, {
+    x: manifest.coffee.machineStand.x,
+    y: manifest.coffee.machineStand.y - 3,
+  });
+  // The board stands → office.tmj's own offsets from its boards anchor.
+  const b = manifest.anchors.boards;
+  assert.deepEqual(result.manifest.anchors.boardPinStand, { x: b.x + 2, y: b.y + 1 });
+  assert.deepEqual(result.manifest.anchors.boardTakeStand, { x: b.x + 3, y: b.y + 1 });
+  assert.deepEqual(result.manifest.anchors.boardArchiveStand, { x: b.x + 6, y: b.y + 1 });
+});
+
+test('anchors a bundle DOES declare are never overwritten by the defaults', () => {
+  const manifest = cloneManifest();
+  manifest.anchors.worldClock = { x: 2, y: 2 };
+  manifest.anchors.askBoard = { x: 3, y: 3 };
+  manifest.anchors.coffeeSteam = { x: 4, y: 4 };
+  manifest.anchors.boardPinStand = { x: 5, y: 5 };
+  manifest.anchors.boardTakeStand = { x: 6, y: 6 };
+  manifest.anchors.boardArchiveStand = { x: 7, y: 7 };
+  const result = validateManifestShape(manifest);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.manifest.anchors.worldClock, { x: 2, y: 2 });
+  assert.deepEqual(result.manifest.anchors.askBoard, { x: 3, y: 3 });
+  assert.deepEqual(result.manifest.anchors.coffeeSteam, { x: 4, y: 4 });
+  assert.deepEqual(result.manifest.anchors.boardPinStand, { x: 5, y: 5 });
+  assert.deepEqual(result.manifest.anchors.boardTakeStand, { x: 6, y: 6 });
+  assert.deepEqual(result.manifest.anchors.boardArchiveStand, { x: 7, y: 7 });
+});
+
+test('coffeeSteam falls back to the boards wall when coffee.machineStand is itself unusable', () => {
+  const manifest = cloneManifest();
+  delete manifest.coffee.machineStand;
+  const result = validateManifestShape(manifest);
+  // The manifest is rejected (machineStand is required) — but the anchor pass
+  // must not throw on the way there, and must still produce a usable tile.
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.code === 'coffee'));
+  assert.deepEqual(manifest.anchors.coffeeSteam, manifest.anchors.boards);
 });
 
 // ─── invalid bundles: each must be rejected with a SPECIFIC, human message ───

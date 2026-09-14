@@ -29,6 +29,8 @@ import {
 import type { Tile, Facing, ErrandKind, ErrandSpot, TilesetEntry } from './themeRegistry';
 import { patchTilesetCanvas, TILE_PALETTES } from './tileArt';
 import { buildIsoAtlas } from './isoTileArt';
+import { buildTechOfficeAtlas } from './techOfficeArt';
+import { deskDisplayTop, deskCupPixelOffset } from './deskVisuals';
 
 // The map, tileset atlases, desk-claim order, errand spots, coffee-economy
 // tiles, prop anchors, monitor gids and palette all come from the active
@@ -188,14 +190,14 @@ function loadTilesetTexture(entry: TilesetEntry): Promise<Texture> {
   // destination as the <img> path below (a canvas handed to Texture.from with
   // nearest filtering), just without the network/data-URL round trip — which
   // is also why it can resolve synchronously.
-  if (entry.procedural?.kind === 'iso') {
+  if (entry.procedural) {
     const pal = TILE_PALETTES[entry.tilePaletteKey ?? 'office'] ?? TILE_PALETTES.office;
-    const atlas = buildIsoAtlas(pal);
+    const atlas = entry.procedural.kind === 'tech-office' ? buildTechOfficeAtlas(pal) : buildIsoAtlas(pal);
     const canvas = document.createElement('canvas');
     canvas.width = atlas.width;
     canvas.height = atlas.height;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return Promise.reject(new Error('no 2d context for the isometric atlas'));
+    if (!ctx) return Promise.reject(new Error('no 2d context for the procedural atlas'));
     const img = ctx.createImageData(atlas.width, atlas.height);
     img.data.set(atlas.data);
     ctx.putImageData(img, 0, 0);
@@ -454,7 +456,13 @@ export function OfficeFloor() {
       calG.cursor = 'pointer';
       const calAt = proj.tileToWorld(theme.anchors.calendar.x, theme.anchors.calendar.y);
       calG.position.set(calAt.x + 8, calAt.y + 5);
-      calG.zIndex = proj.rowDepth(3);
+      // WALL-PROP DEPTH, `anchor.y + 2`. A hanging prop is ~20px tall — it
+      // spills one row below the tile it hangs on — so it has to sort in front
+      // of the row under it as well as its own. This used to be a literal
+      // `rowDepth(3)` here, on the clock below, and in WorldClock.ts: the
+      // right answer only as long as every theme hung its wall props on row 1.
+      // Derived from the anchor, it stays right when one doesn't.
+      calG.zIndex = proj.rowDepth(theme.anchors.calendar.y + 2);
       calG.on('pointertap', (ev) => {
         ev.stopPropagation();
         const st = useStore.getState();
@@ -508,9 +516,14 @@ export function OfficeFloor() {
         }
       };
       addZoneSeats('boardroom');       // conference room overflow
-      // The bottom-right open area is the cafeteria (break room) — see the
-      // coffee-break director below. It is deliberately NOT added as overflow
-      // desk seating, so the café tables stay free for breaks.
+      // `boardroom` is still the only zone name this scene reads. On the
+      // rebuilt office floor it is deliberately the SAME rectangle as
+      // `wing-meeting`, so overflow chairs land around the conference tables
+      // rather than on random open floor; the other `wing-*` zones are parsed
+      // and ignored here (they exist for the camera to focus on).
+      // The break room (`wing-break`) is NOT added as overflow desk seating,
+      // so the café tables stay free for breaks — see the coffee-break
+      // director below.
 
       // Waiting spots near the entrance — where a blocked agent walks to signal
       // it needs the user. Collected as walkable tiles in rings around the door.
@@ -858,9 +871,15 @@ export function OfficeFloor() {
       const machineG = new Graphics(); // steam over the counter machine while brewing
       machineG.eventMode = 'none';
       machineG.visible = hasCoffeeFixtures;
-      const machineAt = proj.tileToWorld(26, 17);
+      // The machine's own top tile, from the theme (anchors.coffeeSteam) — the
+      // steam puffs upward out of it. Its depth is `+2` rather than the
+      // sideboard/sink's `+1` because the machine is a two-tile-tall counter
+      // piece: the steam has to sort in front of the tile BELOW it too, or the
+      // counter front draws over it.
+      const STEAM_TILE: Tile = theme.anchors.coffeeSteam;
+      const machineAt = proj.tileToWorld(STEAM_TILE.x, STEAM_TILE.y);
       machineG.position.set(machineAt.x, machineAt.y);
-      machineG.zIndex = proj.rowDepth(19);
+      machineG.zIndex = proj.rowDepth(STEAM_TILE.y + 2);
       charLayer.addChild(machineG);
       let machineBusy = 0;
       const drawMachine = (t: number): void => {
@@ -1728,9 +1747,9 @@ export function OfficeFloor() {
           if (!g) {
             g = new Graphics();
             g.eventMode = 'none';
-            const noteAt = proj.tileToWorld(desk.x - 1, desk.y - 1);
+            const noteAt = proj.tileToWorld(desk.x - 1, desk.y - 1 + mapRenderer.getDeskVisualOffset(desk));
             g.position.set(noteAt.x + 3, noteAt.y + 8);
-            g.zIndex = proj.rowDepth(desk.y) - 1;
+            g.zIndex = proj.rowDepth(desk.y + mapRenderer.getDeskVisualOffset(desk)) - 1;
             charLayer.addChild(g);
             deskNoteG.set(t.assignee!, g);
           }
@@ -1789,7 +1808,7 @@ export function OfficeFloor() {
       // Matches the drawn art (bells stick 3px above, feet 2px below), with a
       // 2px grab margin. The old box was 16x32 of nothing in particular.
       clockG.hitArea = { contains: (x: number, y: number) => x >= -2 && x <= 18 && y >= -6 && y <= 24 };
-      clockG.zIndex = proj.rowDepth(3);
+      clockG.zIndex = proj.rowDepth(theme.anchors.clock.y + 2); // see the calendar's depth note
       let clockPulse = 0;
       let clockHover = false;
       // The ring breathes slowly, so a full per-frame rebuild of the prop is
@@ -1871,9 +1890,14 @@ export function OfficeFloor() {
       askG.visible = hasWallProps;
       askG.eventMode = 'static';
       askG.cursor = 'pointer';
-      const askAt = proj.tileToWorld(14, 10);
-      askG.position.set(askAt.x + 25, askAt.y);
-      askG.zIndex = proj.rowDepth(11);
+      // The wall tile comes from the theme (anchors.askBoard); ASK_CENTER_PAD
+      // is the sub-tile nudge that centers the 30px-wide board on that tile's
+      // wall run, exactly like BOARD_CENTER_PAD does for the task boards.
+      const ASK_TILE: Tile = theme.anchors.askBoard;
+      const ASK_CENTER_PAD = 25;
+      const askAt = proj.tileToWorld(ASK_TILE.x, ASK_TILE.y);
+      askG.position.set(askAt.x + ASK_CENTER_PAD, askAt.y);
+      askG.zIndex = proj.rowDepth(ASK_TILE.y + 1);
       askG.on('pointertap', (ev) => {
         ev.stopPropagation();
         const st = useStore.getState();
@@ -1929,9 +1953,14 @@ export function OfficeFloor() {
         stand: Tile;
         thought: string;
       }
-      const PIN_STAND: Tile = { x: 8, y: 11 };      // under the blockers board
-      const TAKE_STAND: Tile = { x: 9, y: 11 };     // under the todo board
-      const ARCHIVE_STAND: Tile = { x: 12, y: 11 }; // beside the archive table
+      // Where an actor stands to work the boards. From the theme: these used
+      // to be office.tmj's own (8,11)/(9,11)/(12,11) written straight into
+      // this file, and they are WALK DESTINATIONS — on a floor plan whose
+      // boards hang elsewhere they land inside furniture, the actor never
+      // arrives, and the card silently never moves.
+      const PIN_STAND: Tile = theme.anchors.boardPinStand;      // under the blockers board
+      const TAKE_STAND: Tile = theme.anchors.boardTakeStand;    // under the todo board
+      const ARCHIVE_STAND: Tile = theme.anchors.boardArchiveStand; // beside the archive table
       /** What the boards currently SHOW (lags the ledger while moves play). */
       let visualTasks = new Map<string, BoardTask>();
       const moveQueue: BoardMove[] = [];
@@ -2175,11 +2204,13 @@ export function OfficeFloor() {
         // to sit before we cleared it (desks start clean now; cups only exist
         // where an agent actually carried one).
         if (mapRenderer.gidAt('furniture-above', seatTile.x, seatTile.y - 2) === theme.monitor.offTopLeftGid) {
-          const top = { x: seatTile.x, y: seatTile.y - 2 };
-          rt.screen = new DeskScreen(mapRenderer, top, theme.monitor);
+          const visualOffset = mapRenderer.getDeskVisualOffset(seatTile);
+          const top = deskDisplayTop(seatTile, visualOffset);
+          rt.screen = new DeskScreen(mapRenderer, top, theme.monitor, visualOffset);
           charLayer.addChild(rt.screen.container);
           const topAt = proj.tileToWorld(top.x, top.y);
-          character.setCupSpot({ x: topAt.x + 18, y: topAt.y + 23 });
+          const cupOffset = deskCupPixelOffset(visualOffset);
+          character.setCupSpot({ x: topAt.x + cupOffset.x, y: topAt.y + cupOffset.y });
           // The desk stamp that carries this monitor block also has one free
           // tile of surface to its LEFT — verified true for every seat in all
           // four shipped maps — and that tile is where an agent's earned
@@ -2189,7 +2220,7 @@ export function OfficeFloor() {
           // whatever furniture it put there.
           const shelfTile = { x: seatTile.x - 1, y: seatTile.y - 1 };
           if (mapRenderer.gidAt('furniture-above', shelfTile.x, shelfTile.y) === 0) {
-            rt.shelf = new DeskShelf(shelfTile, proj);
+            rt.shelf = new DeskShelf({ x: shelfTile.x, y: shelfTile.y + visualOffset }, proj);
             charLayer.addChild(rt.shelf.container);
             // Seed from the last poll so a late-joining agent (or a theme
             // switch, which rebuilds the whole scene) shows its history

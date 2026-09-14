@@ -3,7 +3,7 @@
 visually verify the map without launching Electron. Usage:
     python3 render_map.py [map.tmj] [out.png] [--labels]
 """
-import json, sys, os
+import base64, json, sys, os, subprocess
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(__file__)
@@ -23,12 +23,22 @@ TILESETS = [
 TILE_LAYERS = ['floor', 'walls', 'furniture-below', 'furniture-above']
 SCALE = 3
 
-def load_sheets():
+def load_sheets(m=None, mappath=None):
+    if m and any(p.get('name') == 'proceduralAtlas' and p.get('value') == 'tech-office'
+                 for p in m.get('properties', [])):
+        # The TS module is the source of truth for both the browser and PNG.
+        # Fail loudly if Node/art generation fails; never substitute old art.
+        result = subprocess.run(
+            ['node', os.path.join(HERE, 'export-tech-preview.cjs'), os.path.abspath(mappath)],
+            check=True, capture_output=True, text=True)
+        atlas = json.loads(result.stdout)
+        img = Image.frombytes('RGBA', (atlas['width'], atlas['height']), base64.b64decode(atlas['rgba']))
+        return [(1, img, atlas['columns'], 16, 16)], atlas['monitorOffsets'], atlas['monitorGids']
     out = []
     for firstgid, path, cols, tw, th in TILESETS:
         img = Image.open(os.path.join(ASSETS, path)).convert('RGBA')
         out.append((firstgid, img, cols, tw, th))
-    return out
+    return out, {}, {}
 
 def resolve(gid, sheets):
     for firstgid, img, cols, tw, th in reversed(sheets):
@@ -42,8 +52,9 @@ def resolve(gid, sheets):
 def render(mappath, outpath, labels=False):
     m = json.load(open(mappath))
     W, H, TS = m['width'], m['height'], m['tilewidth']
-    sheets = load_sheets()
-    canvas = Image.new('RGBA', (W*TS, H*TS), (20, 18, 30, 255))
+    sheets, monitor_offsets, monitor_gids = load_sheets(m, mappath)
+    tech = m.get('tilesets', [{}])[0].get('image') == 'procedural:tech-office'
+    canvas = Image.new('RGBA', (W*TS, H*TS), (22, 29, 36, 255) if tech else (20, 18, 30, 255))
     layers = {l['name']: l for l in m['layers']}
     for name in TILE_LAYERS:
         l = layers.get(name)
@@ -57,6 +68,8 @@ def render(mappath, outpath, labels=False):
                     continue
                 fh = bool(raw & FLIP_H); fv = bool(raw & FLIP_V); fd = bool(raw & FLIP_D)
                 gid = raw & GID_MASK
+                if name == 'furniture-above':
+                    gid = monitor_gids.get(f'{x},{y}', gid)
                 tile, tw, th = resolve(gid, sheets)
                 if tile is None:
                     continue
@@ -66,7 +79,8 @@ def render(mappath, outpath, labels=False):
                     tile = tile.transpose(Image.FLIP_LEFT_RIGHT)
                 if fv:
                     tile = tile.transpose(Image.FLIP_TOP_BOTTOM)
-                canvas.alpha_composite(tile, (x*TS, y*TS))
+                display_y = y + (monitor_offsets.get(f'{x},{y}', 0) if name == 'furniture-above' else 0)
+                canvas.alpha_composite(tile, (x*TS, display_y*TS))
 
     canvas = canvas.resize((W*TS*SCALE, H*TS*SCALE), Image.NEAREST)
     draw = ImageDraw.Draw(canvas)

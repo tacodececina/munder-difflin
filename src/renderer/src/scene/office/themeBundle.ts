@@ -185,10 +185,48 @@ export function validateManifestShape(raw: unknown): BundleValidation {
 
   if (!isRecord(raw.anchors) || !isTile(raw.anchors.calendar) || !isTile(raw.anchors.boards) || !isTile(raw.anchors.clock)) {
     errors.push(err('anchors', 'theme.json "anchors" must set calendar, boards and clock (each {x,y}).'));
-  } else if (!isTile(raw.anchors.worldClock)) {
-    // worldClock predates this validator; default older/unaware bundles to the
-    // same spot as `clock` so they never ship with anchors.worldClock undefined.
-    (raw.anchors as Record<string, unknown>).worldClock = raw.anchors.clock;
+  } else {
+    // OPTIONAL ANCHORS. Only calendar/boards/clock were in the schema when
+    // bundles started shipping; every anchor added since is filled in here
+    // from one that IS required, so an older bundle imports and renders
+    // instead of failing validation or handing OfficeFloor an `undefined`
+    // tile. Each default is the nearest prop of the same kind, not (0,0).
+    const anchors = raw.anchors as Record<string, unknown>;
+    if (!isTile(anchors.worldClock)) {
+      // A second wall clock — hang it where the interactive one hangs.
+      anchors.worldClock = raw.anchors.clock;
+    }
+    if (!isTile(anchors.askBoard)) {
+      // Another pinboard on another wall run — the task boards' own wall is
+      // the only wall tile an old manifest is known to have.
+      anchors.askBoard = raw.anchors.boards;
+    }
+    if (!isTile(anchors.coffeeSteam)) {
+      // The machine's TOP tile. Every shipped theme's café stamp puts it 3
+      // rows above the tile a character brews from, so derive it from
+      // coffee.machineStand when that is present (it is required, but this
+      // pass collects errors rather than stopping, so it may be malformed
+      // here); fall back to the boards wall only if even that is unusable.
+      const stand = isRecord(raw.coffee) && isTile(raw.coffee.machineStand) ? raw.coffee.machineStand : null;
+      anchors.coffeeSteam = stand ? { x: stand.x, y: stand.y - 3 } : raw.anchors.boards;
+    }
+    // The three tiles an actor walks to in order to work the boards, at
+    // office.tmj's own offsets from its `boards` anchor. These are the one
+    // group here that must be WALKABLE; they are deliberately NOT added to
+    // validateBundleAgainstMap's walkability checks, because a bundle that
+    // never declared them would then start failing to import over a tile it
+    // never chose. An unreachable stand degrades to "the card teleports
+    // instead of being carried", which is what old bundles do today anyway.
+    const boardStandDefaults: Array<[string, number, number]> = [
+      ['boardPinStand', 2, 1],
+      ['boardTakeStand', 3, 1],
+      ['boardArchiveStand', 6, 1],
+    ];
+    for (const [key, dx, dy] of boardStandDefaults) {
+      if (!isTile(anchors[key])) {
+        anchors[key] = { x: raw.anchors.boards.x + dx, y: raw.anchors.boards.y + dy };
+      }
+    }
   }
 
   if (!Array.isArray(raw.errandSpots)) {
