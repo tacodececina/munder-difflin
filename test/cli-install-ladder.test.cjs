@@ -14,7 +14,8 @@ const loadTs = require('./load-ts.cjs');
 const { chooseInstallRung, buildMissingCliScript } = loadTs('src/main/cliInstall.ts');
 const { installInfoForProvider } = loadTs('src/shared/agentProvider.ts');
 
-const script = (provider, npmAvailable, platform) =>
+// These assertions inspect POSIX lines; the explicit Windows case below checks cmd.
+const script = (provider, npmAvailable, platform = 'darwin') =>
   buildMissingCliScript(provider, provider, npmAvailable, platform);
 
 test('with npm present the ladder is unchanged — npm install, for every provider', () => {
@@ -68,7 +69,7 @@ test('the no-node script explains the real problem instead of failing at it', ()
 test('the native rung actually runs, and says why it differs', () => {
   const out = script('claude', false);
   assert.match(out, /no Node needed/);
-  const native = installInfoForProvider('claude').nativeCommand;
+  const native = installInfoForProvider('claude', 'darwin').nativeCommand;
   assert.ok(out.split('\n').includes(native), 'the installer must be an executed line, not only echoed');
 });
 
@@ -93,9 +94,11 @@ test('the Windows script stays a single quote-free cmd.exe line', () => {
 });
 
 test('a hostile binary name cannot inject a command into the banner', () => {
-  const out = script('claude', true).split('\n');
-  const evil = buildMissingCliScript("x'; rm -rf /; echo '", 'claude', true).split('\n');
-  assert.equal(evil.length, out.length, 'no extra statements');
-  assert.ok(evil.some((l) => l.includes('xrm-rf')), 'sanitized to a bare identifier');
-  assert.ok(!evil.some((l) => /rm -rf \//.test(l)));
+  for (const platform of ['darwin', 'win32']) {
+    const out = script('claude', true, platform).split('\n');
+    const evil = buildMissingCliScript("x'; rm -rf /; echo '", 'claude', true, platform).split('\n');
+    assert.equal(evil.length, out.length, 'no extra statements');
+    assert.ok(evil.some((l) => l.includes('xrm-rf')), 'sanitized to a bare identifier');
+    assert.ok(!evil.some((l) => /rm -rf \//.test(l)));
+  }
 });

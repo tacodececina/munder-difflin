@@ -30,6 +30,7 @@ export class CharacterSprite {
   private frames: Texture[][];
   private currentDirection: Direction = 'down';
   private currentAnim: AnimState = 'idle';
+  private reducedMotion = false;
   private frameSpeed = 0.15;
   private frameW: number;
   private frameH: number;
@@ -51,6 +52,15 @@ export class CharacterSprite {
 
     this.container.addChild(this.sprite);
     this.container.scale.set(CHAR_SCALE);
+  }
+
+  /** Stop AnimatedSprite's internal ticker updates for the opt-in software
+   *  economy mode. The current pose remains visible; state changes still swap
+   *  textures and are drawn by the next invalidated floor frame. */
+  setReducedMotion(reduced: boolean): void {
+    this.reducedMotion = reduced;
+    if (reduced) this.sprite.gotoAndStop(0);
+    else this.sprite.play();
   }
 
   /**
@@ -97,7 +107,8 @@ export class CharacterSprite {
     this.sprite.textures = this.getFrames(direction, anim);
     this.sprite.scale.x = direction === 'left' ? -1 : 1;
     this.sprite.animationSpeed = anim === 'walk' ? 0.15 : anim === 'idle' ? 0.08 : 0.06;
-    this.sprite.play();
+    if (this.reducedMotion) this.sprite.gotoAndStop(0);
+    else this.sprite.play();
   }
 
   setPosition(x: number, y: number): void {

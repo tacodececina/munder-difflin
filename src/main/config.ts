@@ -343,6 +343,12 @@ export interface HarnessConfig {
    *  it on by itself, because a privacy control that arms itself is a control
    *  the operator cannot reason about. (Mirrored in preload + renderer config.) */
   visitorMode?: boolean;
+  /** Opt-in change-driven floor rendering when Chromium has fallen back to a
+   *  software backend. Default OFF: hardware remains the primary path and the
+   *  existing software cap remains the compatibility fallback. */
+  softwareEconomyEnabled?: boolean;
+  /** Opt-in read-only click inspection for the office floor. Default OFF. */
+  floorInspectionEnabled?: boolean;
   /** Auto-update from GitHub releases (v0.3.4). Default ON. Packaged builds
    *  check on boot + every ~6h, download in the background, and show a
    *  "restart to update" toast — installation is always user-initiated. OFF
@@ -673,6 +679,8 @@ const DEFAULTS: HarnessConfig = {
   strongKeepalive: false,
   // Never on by default, and never inferred: see the field's doc comment.
   visitorMode: false,
+  softwareEconomyEnabled: false,
+  floorInspectionEnabled: false,
   autoUpdate: true,
   telemetryEnabled: true,
   multiWindow: true,

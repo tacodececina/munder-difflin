@@ -43,6 +43,7 @@ export class Camera {
   private mapWidth = 640;
   private mapHeight = 480;
   private manualOverride = false;
+  private reducedMotion = false;
 
   private nudgeOffsetX = 0;
   private nudgeOffsetY = 0;
@@ -52,6 +53,17 @@ export class Camera {
 
   constructor(container: Container) {
     this.container = container;
+  }
+
+  /** At change-driven cadence a frame-based lerp can take tens of seconds.
+   *  Present the requested viewport in the next drawn frame instead. */
+  setReducedMotion(reduced: boolean): void {
+    this.reducedMotion = reduced;
+    if (reduced) {
+      this.nudgeDuration = 0;
+      this.nudgeOffsetX = 0;
+      this.nudgeOffsetY = 0;
+    }
   }
 
   setMapSize(width: number, height: number): void {
@@ -88,7 +100,7 @@ export class Camera {
 
   /** A gentle, decaying pan toward a world point without taking manual control. */
   nudgeToward(worldX: number, worldY: number, duration = NUDGE_DURATION_MS): void {
-    if (this.manualOverride) return;
+    if (this.manualOverride || this.reducedMotion) return;
     // Reduced motion: skip the animated glance entirely rather than merely
     // shortening it — an "instant" transition here means no offset ever
     // appears, not a fast one.
@@ -100,9 +112,15 @@ export class Camera {
   }
 
   update(dt: number): void {
-    this.currentX += (this.targetX - this.currentX) * LERP_SPEED;
-    this.currentY += (this.targetY - this.currentY) * LERP_SPEED;
-    this.currentZoom += (this.targetZoom - this.currentZoom) * LERP_SPEED;
+    if (this.reducedMotion) {
+      this.currentX = this.targetX;
+      this.currentY = this.targetY;
+      this.currentZoom = this.targetZoom;
+    } else {
+      this.currentX += (this.targetX - this.currentX) * LERP_SPEED;
+      this.currentY += (this.targetY - this.currentY) * LERP_SPEED;
+      this.currentZoom += (this.targetZoom - this.currentZoom) * LERP_SPEED;
+    }
 
     if (this.nudgeDuration > 0) {
       this.nudgeElapsed += dt;
@@ -138,5 +156,15 @@ export class Camera {
     } else {
       this.container.y = Math.min(0, Math.max(this.viewHeight - scaledH, this.container.y));
     }
+  }
+
+  /** True while a requested camera target has not settled. Used by the
+   *  change-driven software renderer to keep selection/resize transitions
+   *  alive without animating an otherwise idle floor. */
+  needsAnimationFrame(): boolean {
+    return Math.abs(this.currentX - this.targetX) > 0.5
+      || Math.abs(this.currentY - this.targetY) > 0.5
+      || Math.abs(this.currentZoom - this.targetZoom) > 0.005
+      || this.nudgeDuration > 0;
   }
 }

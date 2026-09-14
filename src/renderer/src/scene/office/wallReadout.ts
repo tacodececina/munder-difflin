@@ -33,8 +33,9 @@
  *             the feed, so it can be shorter in TIME than the chart is wide —
  *             see SHIPPED_LOG_WINDOW and `bucketShipped`, which report the hours
  *             the tail did not reach as unmeasured rather than as quiet ones.
- *   PLAN /  ← `window.cth.hiveTasks()` → `hive/tasks.json`, on the 5 s poll the
- *   BUILD /   cork boards already run. Zero additional IPC.
+ *   PLAN /  ← `window.cth.hiveTaskReading()` → `hive/tasks.json`, on the 5 s poll
+ *   BUILD /   the cork boards already run. The reading carries source, scope,
+ *   last valid access and availability without changing `hiveTasks()` consumers.
  *   SHIP
  *
  *   (`listIssues` was the fourth candidate and is deliberately NOT used. GitHub

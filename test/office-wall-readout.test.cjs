@@ -181,12 +181,13 @@ test('hours the log tail never reached are unmeasured, not quiet', () => {
   assert.equal(partial[SHIPPED_BUCKETS - 2], null);     // the half-covered hour
   assert.equal(partial[SHIPPED_BUCKETS - 1], 1);
 
-  // The default window is the one OfficeFloor asks `hiveLog` for.
+  // The same tail window and source timestamp must reach both sides.
   assert.equal(SHIPPED_LOG_WINDOW, 400);
   const floor = fs.readFileSync(
     path.join(__dirname, '../src/renderer/src/scene/office/OfficeFloor.tsx'), 'utf8');
-  assert.match(floor, /bucketShipped\(log, Date\.now\(\), SHIPPED_LOG_WINDOW\)/);
-  assert.match(floor, /hiveLog\(SHIPPED_LOG_WINDOW\)/);
+  assert.match(floor, /bucketShipped\(log, at, SHIPPED_LOG_WINDOW\)/);
+  assert.match(floor, /const at = reading\.lastValidAt/);
+  assert.match(floor, /hiveLogReading\(SHIPPED_LOG_WINDOW\)/);
 });
 
 test('the SHIPPED window is anchored on now, so the newest bucket is the live hour', () => {

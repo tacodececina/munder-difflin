@@ -97,6 +97,16 @@ test('an unreadable answer is NOT treated as software', () => {
   }
 });
 
+test('an absent backend keeps the ordinary budget but does not claim hardware', () => {
+  for (const renderer of [null, '', '   ']) {
+    const budget = renderBudget(renderer, 2, true);
+    assert.equal(budget.mode, 'unknown');
+    assert.equal(budget.changeDriven, false);
+    assert.equal(budget.resolution, 2);
+    assert.equal(budget.maxFPS, 0);
+  }
+});
+
 test('the hardware budget is byte-for-byte what the floor asked for before', () => {
   // OfficeFloor's original expression: Math.max(window.devicePixelRatio || 1, 2)
   for (const dpr of [1, 1.25, 1.5, 2, 2.5, 3, 0, NaN]) {
@@ -121,6 +131,26 @@ test('the software budget drops both dials, and says which renderer decided it',
   // 8.02 s). The number that has to stay small is this one; what it buys is the
   // measured 12.29 → 3.60 s CPU/s in the gpu-process.
   assert.ok(SOFTWARE_FRAME_CAP > 0 && SOFTWARE_FRAME_CAP < 20);
+});
+
+test('the explicit economy flag selects change-driven software rendering only on software', () => {
+  const economy = renderBudget(SOFTWARE, 2.5, true);
+  assert.equal(economy.software, true);
+  assert.equal(economy.mode, 'software-economy');
+  assert.equal(economy.changeDriven, true);
+  assert.equal(economy.ambientAnimation, false);
+  assert.ok(economy.maxFPS > 0 && economy.maxFPS < SOFTWARE_FRAME_CAP);
+
+  const disabled = renderBudget(SOFTWARE, 2.5, false);
+  assert.equal(disabled.mode, 'software-capped');
+  assert.equal(disabled.changeDriven, false);
+  assert.equal(disabled.ambientAnimation, true);
+
+  const hardware = renderBudget(HARDWARE, 2.5, true);
+  assert.equal(hardware.mode, 'hardware');
+  assert.equal(hardware.changeDriven, false);
+  assert.equal(hardware.ambientAnimation, true);
+  assert.equal(hardware.maxFPS, 0);
 });
 
 test('probing for a renderer never throws where there is no DOM', () => {

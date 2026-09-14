@@ -7,6 +7,7 @@ import { OfficeFloor } from '@/scene/office/OfficeFloor';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { MemoryPanel } from '@/components/MemoryPanel';
 import { OfficeWingPicker } from '@/components/OfficeWingPicker';
+import { OfficeInspector } from '@/components/OfficeInspector';
 import { AgentDetailPanel } from '@/components/AgentDetailPanel';
 import { AgentStrip } from '@/components/AgentStrip';
 import { MichaelBooting } from '@/components/MichaelBooting';
@@ -107,6 +108,7 @@ export function AppShell({
   // state-free): visitor mode both pulls the memory search off the floor and
   // puts a marker in the title bar, and both live in this component.
   const visitorMode = useStore((s) => s.visitorMode);
+  const floorInspectionEnabled = useStore((s) => s.floorInspectionEnabled);
   const { t } = useTranslation();
   return (
     <div style={{
@@ -247,6 +249,7 @@ export function AppShell({
               other four are untouched. NOT gated on visitor mode: it reveals
               nothing about the work, only where the camera is pointing. */}
           <OfficeWingPicker />
+          {!visitorMode && floorInspectionEnabled && <OfficeInspector />}
           {/* VISITOR MODE — the memory search is a free-text window into
               everything every agent has ever remembered, and it floats over the
               floor. Gated at the mount so the panel, its status probe and its

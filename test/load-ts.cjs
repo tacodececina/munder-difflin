@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 const ts = require('typescript');
 
 const cache = new Map();
@@ -47,7 +48,9 @@ function loadFile(filename) {
       // builtin (`import path from 'node:path'`) compiles to `path_1.default`,
       // which is undefined at run time — the module loads fine and then explodes
       // on first use. Test harness only; no shipped code compiles through here.
-      esModuleInterop: true
+      esModuleInterop: true,
+      inlineSourceMap: true,
+      inlineSources: true
     },
     fileName: filename,
     reportDiagnostics: true
@@ -68,7 +71,16 @@ function loadFile(filename) {
     }
     return require(request);
   };
-  const run = new Function('module', 'exports', 'require', '__filename', '__dirname', output.outputText);
+  // Use a named V8 script instead of an anonymous Function. Node's native test
+  // coverage otherwise attributes all transpiled execution to this loader and
+  // can report a misleading 100% while the real TypeScript module is absent.
+  // This names the emitted JavaScript, including the wrapper below. Native V8
+  // line totals are NOT remapped TypeScript source coverage; consumers must not
+  // claim that percentage covers the original TS lines or unlisted modules.
+  const run = new vm.Script(
+    `(function (module, exports, require, __filename, __dirname) {\n${output.outputText}\n})`,
+    { filename }
+  ).runInThisContext();
   run(mod, mod.exports, localRequire, filename, path.dirname(filename));
   return mod.exports;
 }

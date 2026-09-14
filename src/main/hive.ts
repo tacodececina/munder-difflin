@@ -41,6 +41,7 @@ import { MCP_CATALOG } from '../shared/mcpCatalog';
 import { selectBroadcastTargets } from '../shared/broadcast';
 import { preferredAgentRole } from '../shared/agentRole';
 import { mergeTaskLedger } from '../shared/taskLedger';
+import { isTaskLedger, type OfficeReading } from '../shared/officeReadings';
 import { expandTilde } from './fs';
 import { resolveGodName, DEFAULT_GOD_NAME } from '../shared/godIdentity';
 
@@ -1740,6 +1741,35 @@ export class HiveManager {
     return root ? this.readStateJson(join(root, 'tasks.json'), { tasks: [] }) : { tasks: [] };
   }
 
+  /**
+   * Read the task ledger with provenance and freshness metadata. This is an
+   * additive read layer: `tasks()` keeps its long-standing return shape for the
+   * many operational consumers that already use it.
+   */
+  tasksReading(accessedAt = Date.now()): OfficeReading<unknown> {
+    const source = 'hive.tasks';
+    const scope = 'active-hive';
+    const root = this.root();
+    if (!root) {
+      return { source, scope, value: null, lastAccessedAt: accessedAt, lastValidAt: null, availability: 'unavailable' };
+    }
+    const path = join(root, 'tasks.json');
+    const read = this.classifyJson<unknown>(path);
+    if (read.status === 'ok' && isTaskLedger(read.value)) {
+      this.noteGoodState(path, read.value, accessedAt);
+      return {
+        source, scope, value: read.value, lastAccessedAt: accessedAt,
+        lastValidAt: accessedAt, availability: 'available'
+      };
+    }
+    if (read.status === 'corrupt') this.noteCorruptState(path, read.error);
+    const value = this.lastGoodState.has(path) ? this.lastGoodState.get(path) as unknown : null;
+    return {
+      source, scope, value, lastAccessedAt: accessedAt,
+      lastValidAt: this.lastGoodStateAt.get(path) ?? null, availability: 'unavailable'
+    };
+  }
+
   /** Persist the task ledger to hive/tasks.json and commit it. Mirrors the
    *  board/message persist pattern: write JSON, log the change, single-commit.
    *
@@ -1851,9 +1881,9 @@ export class HiveManager {
     // the path (noteCorruptState), which is what stops the next writeTasks from
     // saving a merge built on a default over the top of the corrupt file.
     if (read.status === 'corrupt') { this.noteCorruptState(ledgerPath, read.error); return []; }
-    if (read.status !== 'ok') return []; // absent/empty → nothing to observe yet
+    if (read.status !== 'ok' || !isTaskLedger(read.value)) return []; // no valid ledger → retain baseline
+    const list = read.value.tasks;
     this.noteGoodState(ledgerPath, read.value);
-    const list: unknown[] = Array.isArray(read.value?.tasks) ? read.value.tasks : [];
 
     // A root switch (config:changeHome) invalidates the old baseline: those ids
     // describe a DIFFERENT hive, so re-baseline instead of reporting the new
@@ -1867,7 +1897,12 @@ export class HiveManager {
       const card = raw as Record<string, unknown>;
       const id = typeof card.id === 'string' && card.id ? card.id : null;
       if (!id || next.has(id)) continue; // first card wins on a duplicated id
-      const status = typeof card.status === 'string' ? card.status : 'todo';
+      const status = typeof card.status === 'string' ? card.status : null;
+      if (!status || !['todo', 'doing', 'blocked', 'done'].includes(status)) {
+        const previous = baseline?.get(id);
+        if (previous) next.set(id, previous); // Unknown does not mean reopened.
+        continue;
+      }
       next.set(id, status);
       if (status !== 'done' || !baseline) continue;
       const before = baseline.get(id);
@@ -2581,6 +2616,23 @@ export class HiveManager {
     return lines.slice(-n).map((l) => { try { return JSON.parse(l); } catch { return { raw: l }; } });
   }
 
+  /** Unlike logTail's legacy fallback, a missing source is not measured zero. */
+  logReading(n = 200, accessedAt = Date.now()): OfficeReading<unknown[]> {
+    const info = { source: 'hive.log', scope: 'active-hive', lastAccessedAt: accessedAt };
+    try {
+      const root = this.root();
+      if (!root) throw new Error('No hive');
+      const lines = stripBom(readFileSync(join(root, 'log.jsonl'), 'utf8')).trim().split('\n').filter(Boolean);
+      const value: unknown[] = lines.slice(-n).map((line) => JSON.parse(line));
+      if (value.some((row) => !row || typeof row !== 'object' || Array.isArray(row)
+        || typeof (row as { ts?: unknown }).ts !== 'number'
+        || !Number.isFinite((row as { ts: number }).ts))) throw new Error('Invalid log row');
+      return { ...info, value, availability: 'available', lastValidAt: accessedAt };
+    } catch {
+      return { ...info, value: null, availability: 'unavailable', lastValidAt: null };
+    }
+  }
+
   private listMessages(dir: string): HiveMessage[] {
     if (!existsSync(dir)) return [];
     return readdirSync(dir)
@@ -2666,6 +2718,8 @@ export class HiveManager {
   /** The last value that actually parsed, per critical path — what we serve
    *  instead of a fresh (lying) default while the file on disk is unreadable. */
   private lastGoodState = new Map<string, unknown>();
+  /** Timestamp of the last state value that actually parsed, per path. */
+  private lastGoodStateAt = new Map<string, number>();
 
   /**
    * Read + classify a JSON file. The classification is the product here: callers
@@ -2740,8 +2794,10 @@ export class HiveManager {
 
   /** Remember a value that actually parsed, and un-poison the path if it was
    *  poisoned — someone repaired the file, so writing may resume. */
-  private noteGoodState(p: string, value: unknown): void {
+  private noteGoodState(p: string, value: unknown, validAt = Date.now()): void {
+    if (basename(p) === 'tasks.json' && !isTaskLedger(value)) return;
     this.lastGoodState.set(p, value);
+    this.lastGoodStateAt.set(p, validAt);
     if (!this.corruptState.delete(p)) return;
     console.error(`[hive] ${p} parses again — writes re-enabled`);
     this.appendLog({ kind: 'state-recovered', file: basename(p), path: p });

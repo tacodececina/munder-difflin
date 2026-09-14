@@ -234,6 +234,10 @@
       "body": "这将永久抹除 {{godName}} 的所有记忆和整个 hive，且无法撤销。任何运行中的会话都会被终止，应用将重启进入新手引导。你确定吗？"
     },
     "general": {
+      "softwareEconomy": "\u8f6f\u4ef6\u6e32\u67d3\u7ecf\u6d4e\u6a21\u5f0f",
+      "softwareEconomyDesc": "\u5f53 Chromium \u4f7f\u7528 SwiftShader \u7b49 CPU \u6e32\u67d3\u5668\u65f6\uff0c\u505c\u6b62\u6301\u7eed\u7684\u73af\u5883\u52a8\u753b\uff0c\u5e76\u5728\u53d8\u5316\u65f6\u4ee5\u4f4e\u9891\u7387\u91cd\u65b0\u7ed8\u5236\u529e\u516c\u5ba4\u3002\u9ed8\u8ba4\u5173\u95ed\u3002",
+      "floorInspection": "\u70b9\u51fb\u68c0\u67e5\u529e\u516c\u5ba4",
+      "floorInspectionDesc": "\u663e\u793a\u771f\u5b9e\u5730\u9762\u8bfb\u6570\u3001\u5de5\u4f4d\u3001\u623f\u95f4\u548c\u94fe\u63a5\u7684\u53ea\u8bfb\u68c0\u67e5\u5668\u3002\u9ed8\u8ba4\u5173\u95ed\u3002",
       "homeFolder": "主文件夹",
       "environment": "环境",
       "keepAwake": "智能体运行时保持 Mac 唤醒",
@@ -909,62 +913,6 @@
       "hint": "下班打卡 — 停止智能体并关闭程序"
     },
     "gpuError": "办公楼层丢失了 GPU 上下文。\n\n同时使用 GPU 的终端太多了。\n关闭几个智能体终端，或重启应用，即可恢复。",
-    "errand": {
-      "water": [
-        "给植物浇水 🌿",
-        "给植物们喝点水",
-        "它们长得真快"
-      ],
-      "window": [
-        "开窗透透气 🍃",
-        "一点新鲜空气",
-        "今天微风不错"
-      ],
-      "dispenser": [
-        "接点水喝 💧",
-        "补水时间",
-        "保持精神"
-      ],
-      "fridge": [
-        "冰箱里有什么好东西？",
-        "谁拿走了我的酸奶？",
-        "随便看看…"
-      ],
-      "shelf": [
-        "看看书架 📚",
-        "有什么新东西吗？",
-        "好东西真多"
-      ],
-      "bin": [
-        "把废纸清掉 🗑️",
-        "收拾桌子的日子",
-        "稍微整理一下"
-      ],
-      "smoke": [
-        "这层楼自己就能运转 🚬",
-        "老板休息一下。",
-        "思考人生 🚬",
-        "我宣布……休息一下"
-      ]
-    },
-    "suckUp": [
-      "{{godName}}，已经交付了 {{done}} 个任务。加薪吗？🥺",
-      "老板，这周完成了 {{done}} 个任务！",
-      "一如既往的好眼光，老板！",
-      "我正要去做那件事！",
-      "今天领带不错，{{godName}}",
-      "努力工作，老板！💪",
-      "史上最好的老板。真心话。"
-    ],
-    "cheer": [
-      "完成！✔",
-      "漂亮",
-      "收工",
-      "上线 🚀",
-      "又搞定一个",
-      "拿下了",
-      "记入战绩"
-    ],
     "mugs": {
       "empty": "没有干净的杯子了…",
       "brewing": "正在冲一杯新的 ☕",
@@ -1737,6 +1685,30 @@
   "appShell": {
     "closeDetail": "关闭面板",
     "openDetail": "打开代理面板"
+  },
+  "floorInspector": {
+    "snapshotNotice": "打开时的快照；请重新检查以刷新。采集时间：",
+    "chooseTarget": "检查办公室中的对象",
+    "title": "地面检查器",
+    "hover": "点击检查",
+    "agent": "代理",
+    "activity": "最后记录的活动",
+    "desk": "工位",
+    "screen": "屏幕",
+    "rooms": { "operations": "运营", "engineering": "工程", "briefing": "简报", "deployments": "部署", "rest": "休息" },
+    "breaker": "断路器读数",
+    "handoffs": "真实交接",
+    "ci": "已识别仓库的 CI",
+    "tasks": "已分配任务",
+    "reading": "读数",
+    "available": "可用",
+    "lastRead": "最后有效读数",
+    "noData": "无数据",
+    "openAgent": "打开代理面板",
+    "openThread": "打开线程",
+    "openRun": "打开 CI 运行",
+    "ciDisclaimer": "CI 通过不代表已经部署。",
+    "noConversation": "没有对话数据"
   },
   "visitorMode": {
     "badge": "访客模式",

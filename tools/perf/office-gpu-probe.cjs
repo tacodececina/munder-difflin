@@ -20,6 +20,8 @@
  *   node_modules/.bin/electron tools/perf/office-gpu-probe.cjs
  *   node_modules/.bin/electron tools/perf/office-gpu-probe.cjs --software camera
  *   node_modules/.bin/electron tools/perf/office-gpu-probe.cjs --software --res=1 --fps=8
+ *   node_modules/.bin/electron tools/perf/office-gpu-probe.cjs --software --economy --fixture=19 camera
+ *   node_modules/.bin/electron tools/perf/office-gpu-probe.cjs --software --economy --hidden --fixture=11 camera
  *
  * Results go to office-gpu-probe.log beside this file — on Windows, Electron is
  * a GUI-subsystem binary and its stdout never reaches the shell.
@@ -31,8 +33,9 @@
  *   panel1hz  + a wall panel repainted once a second — as shipped
  *   panel60hz + a wall panel repainted EVERY FRAME — the original hypothesis
  *
- * Switches: `--software` forces SwiftShader; `--res=N` / `--fps=N` override the
- * two dials renderBudget() sets (scene/office/softwareRendering.ts).
+ * Switches: `--software` forces SwiftShader; `--economy` enables the explicit
+ * change-driven mode; `--hidden` hides the probe window; `--res=N` / `--fps=N`
+ * override the two dials renderBudget() sets (scene/office/softwareRendering.ts).
  *
  * WHAT IT MEASURED (this machine, 24 threads, 1280x800 window, `camera`):
  *
@@ -58,6 +61,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { app, BrowserWindow } = require('electron');
+const { getSyntheticSceneFixture } = require('./office-scene-fixtures.cjs');
 
 // Electron is a GUI-subsystem binary on Windows: console.log from the main
 // process never reaches the parent shell. Everything goes to a file.
@@ -74,12 +78,17 @@ const SAMPLE_MS = 8000;
 
 const wanted = process.argv.slice(2).filter((a) => SCENARIOS.includes(a));
 const run = wanted.length > 0 ? wanted : SCENARIOS;
+const fixtureArg = process.argv.find((a) => /^--fixture=/.test(a));
+const fixtureSize = fixtureArg ? Number(fixtureArg.slice('--fixture='.length)) : null;
+const fixture = fixtureSize == null ? null : getSyntheticSceneFixture(fixtureSize);
 
 // `--software` reproduces what Chromium does when it cannot use the real GPU:
 // it runs the whole GL stack on SwiftShader, INSIDE the gpu-process, on a
 // thread pool sized to the machine's cores. This is the control condition for
 // "is the office scene expensive, or is the backend wrong?".
 const SOFTWARE = process.argv.includes('--software');
+const ECONOMY = process.argv.includes('--economy');
+const HIDDEN = process.argv.includes('--hidden');
 if (SOFTWARE) {
   app.commandLine.appendSwitch('use-angle', 'swiftshader');
   app.commandLine.appendSwitch('use-gl', 'angle');
@@ -131,6 +140,7 @@ async function measure(win, scenario) {
   await sleep(WARMUP_MS);
   const before = snapshot();
   const t0 = Date.now();
+  if (ECONOMY) await win.webContents.executeJavaScript('window.__probe.change()');
   await sleep(SAMPLE_MS);
   const after = snapshot();
   const seconds = (Date.now() - t0) / 1000;
@@ -141,17 +151,17 @@ async function measure(win, scenario) {
 ensureBundle();
 
 app.whenReady().then(async () => {
-  const win = new BrowserWindow({
+   const win = new BrowserWindow({
     width: 1280,
     height: 800,
-    show: true,
+     show: !HIDDEN,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
       backgroundThrottling: false,
     },
   });
-  log('[probe] software=' + SOFTWARE + ' cores=' + require('node:os').cpus().length);
+   log('[probe] software=' + SOFTWARE + ' economy=' + ECONOMY + ' mode=' + (ECONOMY ? 'software-economy' : SOFTWARE ? 'software-capped' : 'hardware-default') + ' visibility=' + (HIDDEN ? 'hidden' : 'visible') + ' cores=' + require('node:os').cpus().length);
   log('[probe] gpu feature status ' + JSON.stringify(app.getGPUFeatureStatus()));
   win.webContents.on('console-message', (_e, _lvl, msg) => log("[renderer]", msg));
   const query = {};
@@ -159,8 +169,11 @@ app.whenReady().then(async () => {
     const m = /^--(res|fps|sorted|cast)=(\d+(?:\.\d+)?)$/.exec(a);
     if (m) query[m[1]] = m[2];
   }
+  if (ECONOMY) query.economy = '1';
+  if (fixture) query.fixture = fixture.id;
   await win.loadFile(path.join(__dirname, 'office-gpu-probe.html'), { query });
   log('[probe] knobs ' + JSON.stringify(query));
+  if (fixture) log('[probe] synthetic fixture ' + fixture.id + ' agents=' + fixture.agents.join(','));
   try {
     await win.webContents.executeJavaScript('window.__probeReady');
   } catch (err) {
@@ -173,7 +186,7 @@ app.whenReady().then(async () => {
   for (const scenario of run) {
     const r = await measure(win, scenario);
     results.push(r);
-    log(`=== ${r.scenario} === ${r.seconds}s, ${r.frames} frames (${(r.frames / r.seconds).toFixed(1)} fps), ${r.paints} panel paints`);
+     log(`=== ${r.scenario} === ${r.seconds}s, ${r.frames} frames (${(r.frames / r.seconds).toFixed(1)} fps), ${r.paints} panel paints, latency=${r.renderLatencyMs ?? 'n/a'}ms`);
     for (const row of r.cpu) log(`    ${row.type.padEnd(14)} ${row.cpuSecondsPerSecond.toFixed(3)} s CPU / s`);
   }
   log('JSON ' + JSON.stringify(results));

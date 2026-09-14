@@ -59,6 +59,15 @@ function knob(name, fallback) {
   return v === null ? fallback : Number(v);
 }
 
+function syntheticFixture(id) {
+  if (id !== 'synthetic-office-11' && id !== 'synthetic-office-19') return null;
+  const count = id.endsWith('-11') ? 11 : 19;
+  return {
+    id,
+    agents: Array.from({ length: count }, (_, i) => `fixture-agent-${String(i + 1).padStart(2, '0')}`),
+  };
+}
+
 /** What the GL context says it is running on — the string the fix keys off. */
 function readRendererName(a) {
   try {
@@ -71,6 +80,7 @@ function readRendererName(a) {
 
 async function boot() {
   const host = document.getElementById('host');
+  const economy = knob('economy', 0) > 0;
   app = new PIXI.Application();
   await app.init({
     background: 0x12131a,
@@ -82,9 +92,11 @@ async function boot() {
     width: host.clientWidth,
     height: host.clientHeight,
   });
-  const fps = knob('fps', 0);
+  const fps = knob('fps', economy ? 2 : 0);
   if (fps > 0) app.ticker.maxFPS = fps;
   host.appendChild(app.canvas);
+
+  const fixture = syntheticFixture(new URLSearchParams(location.search).get('fixture'));
 
   const atlas = buildAtlas();
   world = new PIXI.Container();
@@ -132,16 +144,24 @@ async function boot() {
   // container re-sort at all.
   const WALKERS = 15;
   const cast = [];
-  for (let i = 0; i < knob('cast', 0); i++) {
+  const fixtureAgents = fixture?.agents ?? [];
+  for (let i = 0; i < (fixture ? fixtureAgents.length : knob('cast', 0)); i++) {
     const c = new PIXI.Container();
-    const frame = new PIXI.Rectangle((i % 16) * TILE, (i % 32) * TILE, TILE, TILE * 2);
-    const sp = new PIXI.Sprite(new PIXI.Texture({ source: atlas.source, frame }));
+    const frameY = Math.floor((i % 32) / 16) * TILE;
+    const frames = [0, 1, 2, 1].map((col) => new PIXI.Texture({
+      source: atlas.source,
+      frame: new PIXI.Rectangle(col * TILE, frameY, TILE, TILE * 2),
+    }));
+    const sp = new PIXI.AnimatedSprite(frames);
+    sp.animationSpeed = 0.06;
+    if (economy) sp.gotoAndStop(0); else sp.play();
     sp.anchor.set(0.5, 1);
     c.addChild(sp);
     c.x = (i * 37) % (MAP_W * TILE);
     c.y = (i * 53) % (MAP_H * TILE);
     c.zIndex = c.y;
     charLayer.addChild(c);
+    c.label = fixtureAgents[i] ?? `synthetic-cast-${i + 1}`;
     cast.push(c);
   }
 
@@ -151,11 +171,19 @@ async function boot() {
   const minZoom = Math.min(view.w / map.w, view.h / map.h);
   const cam = { x: map.w / 2, y: map.h / 2, zoom: minZoom, tx: map.w / 2, ty: map.h / 2, tz: minZoom };
 
-  state = { scenario: 'idle', frames: 0, acc: 0, paintsAtStart: 0 };
+  state = {
+    scenario: 'idle', frames: 0, acc: 0, paintsAtStart: 0,
+    dirty: false, changeAt: 0, renderLatencyMs: null,
+  };
 
   app.ticker.add((ticker) => {
     const dt = ticker.deltaMS / 1000;
     state.frames++;
+    if (economy && state.dirty) {
+      state.renderLatencyMs = +(performance.now() - state.changeAt).toFixed(1);
+      state.dirty = false;
+      app.ticker.stop();
+    }
 
     if (state.scenario !== 'idle') {
       // Camera.update(), unchanged — including the two writes to container.x.
@@ -195,11 +223,20 @@ async function boot() {
       // `off` is the floor paused the way OfficeFloor pauses it behind a
       // fullscreen terminal: the ticker stops, the scene graph and the GL
       // context stay. It is the floor's true zero.
-      if (scenario === 'off') app.ticker.stop(); else app.ticker.start();
       state.scenario = scenario;
       state.frames = 0;
       state.acc = 0;
       state.paintsAtStart = panel.paints;
+      state.dirty = economy && scenario !== 'off';
+      state.changeAt = state.dirty ? performance.now() : 0;
+      state.renderLatencyMs = null;
+      if (scenario === 'off') app.ticker.stop(); else app.ticker.start();
+    },
+    change() {
+      if (!economy) return;
+      state.dirty = true;
+      state.changeAt = performance.now();
+      app.ticker.start();
     },
     stats() {
       return {
@@ -208,6 +245,11 @@ async function boot() {
         canvas: `${app.canvas.width}x${app.canvas.height}`,
         resolution: app.renderer.resolution,
         gpu: readRendererName(app),
+        economy,
+        mode: economy ? 'software-economy' : 'continuous',
+        renderLatencyMs: state.renderLatencyMs,
+        fixture: fixture?.id ?? null,
+        fixtureAgents,
       };
     }
   };

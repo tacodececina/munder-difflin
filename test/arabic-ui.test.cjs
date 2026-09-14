@@ -251,12 +251,12 @@ test('inline markup and array shapes are preserved', () => {
     assert.equal(tags(a.get(k)), tags(v), `markup changed in ${k}`);
   }
   const count = (o, p) => p.split('.').reduce((n, s) => n?.[s], o);
-  // `office.gossip` used to be in this list. It was the break room's canned
-  // small talk and was deleted along with the rest of the fabricated café
-  // dialogue (see scene/office/cafeMood.ts) — the floor now says nothing there
-  // unless the dialogue director actually wrote it.
-  for (const p of ['office.errand.smoke', 'office.suckUp', 'office.cheer']) {
-    assert.equal(count(ar, p).length, count(en, p).length, `${p} changed length`);
+  // The old errand, suck-up and cheer pools were canned claims. They are
+  // intentionally absent from every locale now; the floor keeps only the
+  // observed movement/celebration visuals.
+  for (const p of ['office.errand', 'office.suckUp', 'office.cheer']) {
+    assert.equal(count(ar, p), undefined, `${p} must not survive in Arabic`);
+    assert.equal(count(en, p), undefined, `${p} must not survive in English`);
   }
 });
 

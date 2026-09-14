@@ -4122,6 +4122,9 @@ ipcMain.handle('hive:setAgentHold', (_evt, id: unknown, hold: unknown) => {
 });
 ipcMain.handle('hive:board', () => hive.board());
 ipcMain.handle('hive:tasks', () => hive.tasks());
+ipcMain.handle('hive:taskReading', () => hive.tasksReading());
+ipcMain.handle('hive:logReading', (_evt, n: unknown) => hive.logReading(
+  typeof n === 'number' && Number.isFinite(n) ? Math.max(1, Math.min(10000, Math.floor(n))) : 200));
 ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
 ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));
 ipcMain.handle('hive:inbox', (_evt, id: unknown) => (typeof id === 'string' ? hive.inbox(id) : []));

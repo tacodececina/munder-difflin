@@ -20,7 +20,8 @@ test('Codex remote uses a short stable per-agent home alias', () => {
   assert.equal(first, again);
   assert.notEqual(first, other);
   assert.ok(first.length < 80);
-  assert.match(codexRemoteEndpoint(first), /^unix:\/\/\/tmp\//);
+  // The helper uses native filesystem separators; production remote setup is POSIX-only.
+  assert.match(codexRemoteEndpoint(first).replaceAll('\\', '/'), /^unix:\/\/\/tmp\//);
 });
 
 test('the default alias root yields a socket within sun_path', () => {

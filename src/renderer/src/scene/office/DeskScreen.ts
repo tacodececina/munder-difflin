@@ -30,6 +30,7 @@ export class DeskScreen {
   private anim = new Graphics();
   private on = false;
   private t = 0;
+  private reducedMotion = false;
 
   constructor(mapRenderer: TiledMapRenderer, topLeft: { x: number; y: number }, monitor?: MonitorConfig, private visualOffset = 0) {
     const proj = mapRenderer.projection;
@@ -67,9 +68,19 @@ export class DeskScreen {
     if (!on) { this.anim.clear(); this.t = 0; }
   }
 
+  /** Keep the real on/off monitor state while removing its continuous screen
+   *  line animation from the opt-in software economy mode. */
+  setReducedMotion(reduced: boolean): void {
+    this.reducedMotion = reduced;
+    if (reduced) {
+      this.t = 0;
+      this.anim.clear();
+    }
+  }
+
   update(dt: number): void {
     if (!this.on) return;
-    if (this.visualOffset > 0) return; // Rear panel: only its status LED is visible.
+    if (this.visualOffset > 0 || this.reducedMotion) return; // Rear panel: only its status LED is visible.
     this.t += dt;
     const g = this.anim;
     g.clear();

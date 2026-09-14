@@ -234,6 +234,10 @@
       "body": "Esto borra de forma permanente todos los recuerdos de {{godName}} y la colmena entera, y no se puede deshacer. Cualquier sesión en curso se terminará y la app se reiniciará en la configuración inicial. ¿Seguro que quieres continuar?"
     },
     "general": {
+      "softwareEconomy": "Modo económico para renderizado por software",
+      "softwareEconomyDesc": "Cuando Chromium usa un renderizador de CPU como SwiftShader, detiene las animaciones ambientales continuas y actualiza el piso cuando hay cambios, con una cadencia baja. Desactivado por defecto.",
+      "floorInspection": "Inspeccionar el piso al hacer clic",
+      "floorInspectionDesc": "Muestra un inspector de solo lectura con lecturas reales del piso, escritorios, salas y enlaces. Desactivado por defecto.",
       "homeFolder": "Carpeta base",
       "environment": "Entorno",
       "keepAwake": "Mantener la Mac despierta mientras los agentes trabajan",
@@ -909,62 +913,6 @@
       "hint": "MARCAR SALIDA — detiene a los agentes y cierra la app"
     },
     "gpuError": "La oficina perdió su contexto de GPU.\n\nHay demasiadas terminales usando la GPU al mismo tiempo.\nCierra algunas terminales de agentes, o reinicia la app, para recuperarla.",
-    "errand": {
-      "water": [
-        "regando las plantas 🌿",
-        "dándoles agua a las plantas",
-        "crecen tan rápido"
-      ],
-      "window": [
-        "dejando entrar aire 🍃",
-        "un poco de aire fresco",
-        "qué rica brisa hoy"
-      ],
-      "dispenser": [
-        "yendo por agua 💧",
-        "pausa para hidratarse",
-        "manteniéndome despierto"
-      ],
-      "fridge": [
-        "¿habrá algo bueno en el refri?",
-        "¿quién se llevó mi yogur?",
-        "solo estoy viendo…"
-      ],
-      "shelf": [
-        "revisando el estante 📚",
-        "¿habrá algo nuevo aquí?",
-        "cuántas cosas buenas"
-      ],
-      "bin": [
-        "a tirar el papel de borrador 🗑️",
-        "día de limpiar el escritorio",
-        "ordenando un poco"
-      ],
-      "smoke": [
-        "la oficina se maneja sola 🚬",
-        "descanso del jefe.",
-        "pensando en grande 🚬",
-        "YO DECLARO… un descanso"
-      ]
-    },
-    "suckUp": [
-      "ya entregué {{done}} tareas, {{godName}}. ¿aumento? 🥺",
-      "¡{{done}} tareas terminadas esta semana, jefe!",
-      "¡gran visión, como siempre, jefe!",
-      "¡JUSTO iba a hacer exactamente eso!",
-      "me encanta tu corbata de hoy, {{godName}}",
-      "¡dándole con todo, jefe! 💪",
-      "el mejor jefe del mundo. en serio."
-    ],
-    "cheer": [
-      "¡listo! ✔",
-      "clavado",
-      "y eso es todo",
-      "a producción 🚀",
-      "otra menos",
-      "la rompimos",
-      "anotada"
-    ],
     "mugs": {
       "empty": "no quedan tazas limpias…",
       "brewing": "preparando café fresco ☕",
@@ -1737,6 +1685,30 @@
   "appShell": {
     "closeDetail": "Cerrar panel",
     "openDetail": "Abrir panel del agente"
+  },
+  "floorInspector": {
+    "snapshotNotice": "Captura al abrir; vuelve a inspeccionar para actualizar. Capturada:",
+    "chooseTarget": "Inspeccionar un elemento del piso",
+    "title": "Inspector del piso",
+    "hover": "Haz clic para inspeccionar",
+    "agent": "Agente",
+    "activity": "Última actividad registrada",
+    "desk": "Escritorio",
+    "screen": "Pantalla",
+    "rooms": { "operations": "Operaciones", "engineering": "Ingeniería", "briefing": "Briefing", "deployments": "Despliegues", "rest": "Descanso" },
+    "breaker": "Lecturas del breaker",
+    "handoffs": "Handoffs reales",
+    "ci": "CI del repositorio identificado",
+    "tasks": "Tareas asignadas",
+    "reading": "Lectura",
+    "available": "disponible",
+    "lastRead": "última lectura válida",
+    "noData": "Sin datos",
+    "openAgent": "Abrir panel del agente",
+    "openThread": "Abrir hilo",
+    "openRun": "Abrir ejecución de CI",
+    "ciDisclaimer": "Una ejecución de CI exitosa no demuestra un despliegue.",
+    "noConversation": "Sin datos de conversación"
   },
   "visitorMode": {
     "badge": "MODO VISITA",

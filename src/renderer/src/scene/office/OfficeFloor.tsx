@@ -4,6 +4,7 @@ import { Application, Container, Graphics, Ticker, Texture } from 'pixi.js';
 // PixiJS uses new Function() internally, blocked by Electron CSP — this patches it.
 import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
+import { readTaskDoneEvents } from '@/store/legend';
 import { visitorSafeActivity } from '@/store/visitorMode';
 import { TiledMapRenderer } from './TiledMapRenderer';
 import { Camera } from './Camera';
@@ -45,6 +46,15 @@ import {
   type CIState, type Held, type OpsReadout, type PlanBoard, type ShippedBuckets
 } from './wallReadout';
 import { deskDisplayTop, deskCupPixelOffset } from './deskVisuals';
+import { heldFromReading, readingState, visibleTaskLedger } from './floorReadings';
+import { createSceneLifecycle } from './sceneLifecycle';
+import type { OfficeReading } from '@shared/officeReadings';
+import {
+  FloorInteractionRegistry, agentVisualRect, deskVisualRect, projectedTileRect,
+  screenVisualRect, normalizeInspectionTasks,
+  type FloorInspectionEventDetail, type FloorInspectionHandoff, type FloorInspectionTarget,
+  type FloorRoom
+} from './floorInteractions';
 
 // The map, tileset atlases, desk-claim order, errand spots, coffee-economy
 // tiles, prop anchors, monitor gids and palette all come from the active
@@ -119,8 +129,6 @@ interface Runtime {
   cupCarryHome?: boolean;
   err?: ErrandRun;
   run?: CoffeeRun;
-  /** When the current busy stretch (working/thinking/compacting) began. */
-  busySince?: number;
   /** Who this agent is currently gravitating toward while idle, how long that
    *  choice still stands, and how hard it bends the roam. Set only by the
    *  idle-affinity director (behind officeChatterEnabled). */
@@ -135,54 +143,6 @@ interface IdleCompanion {
   /** 0..1 share of wander waypoints steered toward them. */
   pull: number;
 }
-
-/** Only a busy stretch at least this long earns a cheer on finishing. Short
- *  turns (an inbox nudge, a heartbeat reply) end quietly — otherwise idle
- *  agents "celebrate" every few minutes over nothing, and the "done!" bubble
- *  reads like real work completed when none did. */
-const CHEER_MIN_BUSY_MS = 60_000;
-
-/** What an avatar mutters per errand, picked at random. i18n keys into
- *  `office.errand.*`. */
-const ERRAND_THOUGHTS: Record<ErrandKind, readonly string[]> = {
-  water:     ['office.errand.water.0', 'office.errand.water.1', 'office.errand.water.2'],
-  window:    ['office.errand.window.0', 'office.errand.window.1', 'office.errand.window.2'],
-  dispenser: ['office.errand.dispenser.0', 'office.errand.dispenser.1', 'office.errand.dispenser.2'],
-  fridge:    ['office.errand.fridge.0', 'office.errand.fridge.1', 'office.errand.fridge.2'],
-  shelf:     ['office.errand.shelf.0', 'office.errand.shelf.1', 'office.errand.shelf.2'],
-  bin:       ['office.errand.bin.0', 'office.errand.bin.1', 'office.errand.bin.2'],
-  smoke:     ['office.errand.smoke.0', 'office.errand.smoke.1', 'office.errand.smoke.2', 'office.errand.smoke.3']
-};
-
-/** What workers blurt out when the boss walks by — performative excellence.
- *  `{{done}}` interpolates that worker's REAL done-task count. */
-const SUCK_UP_KEYS = [
-  'office.suckUp.0',
-  'office.suckUp.1',
-  'office.suckUp.2',
-  'office.suckUp.3',
-  'office.suckUp.4',
-  'office.suckUp.5',
-  'office.suckUp.6'
-] as const;
-
-// (The break-room gossip pool that used to live here is gone, with the rest of
-// the canned café dialogue — see cafeMood.ts. What an agent said at the coffee
-// machine corresponded to nothing real, so it is no longer said at all. The
-// suck-up pool above stays: it fires because the boss's avatar is ACTUALLY
-// standing next to that worker, and it quotes that worker's REAL closed-task
-// count.)
-
-/** Lines an avatar throws over its shoulder right after finishing a task. */
-const CHEER_KEYS = [
-  'office.cheer.0',
-  'office.cheer.1',
-  'office.cheer.2',
-  'office.cheer.3',
-  'office.cheer.4',
-  'office.cheer.5',
-  'office.cheer.6'
-] as const;
 
 /** Load one tileset atlas image via an <img> element. Unlike Pixi's
  *  Assets.load(), this handles extension-less data: URLs (Vite inlines small
@@ -280,6 +240,9 @@ export function OfficeFloor() {
   // The active office theme (store mirror of config.officeTheme). Changing it
   // tears down and rebuilds the whole scene on the new map/cast (see deps below).
   const officeTheme = useStore((s) => s.officeTheme);
+  const softwareEconomyEnabled = useStore((s) => s.softwareEconomyEnabled);
+  const floorInspectionEnabled = useStore((s) => s.floorInspectionEnabled);
+  const economyRenderRef = useRef<(() => void) | null>(null);
 
   // Is the floor actually on screen? A fullscreen terminal or file editor covers
   // it completely, and a hidden window shows nothing at all — but the Pixi ticker
@@ -321,7 +284,9 @@ export function OfficeFloor() {
     pausedRef.current = paused;
     const ticker = appRef.current?.ticker;
     if (!ticker) return; // app.init() hasn't created it yet — init() applies it
-    if (paused) ticker.stop(); else ticker.start();
+    if (paused) ticker.stop();
+    else if (economyRenderRef.current) economyRenderRef.current();
+    else ticker.start();
   }, [paused]);
 
   useEffect(() => {
@@ -332,6 +297,7 @@ export function OfficeFloor() {
     const mountId = ++mountIdRef.current;
     const app = new Application();
     appRef.current = app;
+    const lifecycle = createSceneLifecycle(mountId);
 
     const runtimes = new Map<string, Runtime>();
     const seatClaims = new Set<number>();
@@ -350,16 +316,28 @@ export function OfficeFloor() {
     const init = async () => {
       // Load the active theme bundle (falls back to 'office' on a bad/absent bundle).
       const theme = await loadTheme(officeTheme);
+      if (mountIdRef.current !== mountId) return;
       // WHICH BACKEND DID THIS PROCESS GET? Chromium silently falls back to a
       // CPU rasteriser (SwiftShader) after enough GPU-process crashes, or when
       // it started without a usable device, and then a full-window animated
       // scene costs SIX CORES in the gpu-process while the renderer looks
       // perfectly healthy — measured, and the reason this call exists. See
       // ./softwareRendering for the numbers and for what the budget does.
-      const budget = renderBudget(probeRendererName(), window.devicePixelRatio);
+      const budget = renderBudget(
+        probeRendererName(),
+        window.devicePixelRatio,
+        softwareEconomyEnabled,
+      );
+      const economyMode = budget.changeDriven;
+      let requestEconomyRender: () => void = () => {};
+      let economyFramePending = false;
+      let economyFrameInProgress = false;
+      console.info(
+        `[OfficeFloor] rendering backend=${budget.renderer ?? 'unavailable'} mode=${budget.mode}`
+      );
       if (budget.software) {
         console.warn(
-          '[OfficeFloor] no GPU: this window is being rendered in software '
+          `[OfficeFloor] no GPU: this window is being rendered in software `
           + `(${budget.renderer}). The floor is dropping to 1:1 and capping its `
           + `ticker at ${budget.maxFPS} fps to `
           + 'stop the GPU process burning several cores. Restarting the app on the '
@@ -384,6 +362,17 @@ export function OfficeFloor() {
         height: host.clientHeight || 600,
       });
       if (mountIdRef.current !== mountId) { safeDestroy(app); return; }
+      const requestFrame = (): void => {
+        if (!economyMode || pausedRef.current || economyFramePending || economyFrameInProgress) return;
+        economyFramePending = true;
+        lifecycle.timeout(() => {
+          economyFramePending = false;
+          if (mountIdRef.current !== mountId || pausedRef.current) return;
+          app.ticker.start();
+        }, 0);
+      };
+      requestEconomyRender = requestFrame;
+      economyRenderRef.current = economyMode ? requestFrame : null;
       // Cost here is very close to linear in frames rendered, so on a software
       // backend the frame cap is the only dial that actually moves the number.
       // Pixi's cap is NOMINAL — it hands back whatever a frame overshot it by,
@@ -428,6 +417,11 @@ export function OfficeFloor() {
       // (scene/office/projection.ts, owned by the map renderer). Nothing below
       // multiplies by `tileSize` to place or sort a prop any more.
       const proj = mapRenderer.projection;
+      // Phase 3 is a genuinely inert opt-in. Do not even allocate the registry
+      // or attach a stage listener when the flag is off.
+      const interactions = floorInspectionEnabled ? new FloorInteractionRegistry() : null;
+      const inspectionHint = interactions ? new ToolBubble() : null;
+      let emitInspection: ((target: FloorInspectionTarget) => void) | null = null;
 
       // Which parts of the floor this theme actually carries (themeRegistry's
       // ThemeFeatures). Read as `!== false` so an absent object — every shipped
@@ -440,6 +434,7 @@ export function OfficeFloor() {
       const hasWeather = theme.features?.weather !== false;
 
       const camera = new Camera(world);
+      camera.setReducedMotion(economyMode);
       const mapWorld = mapRenderer.worldSize();
       camera.setMapSize(mapWorld.width, mapWorld.height);
       camera.setViewSize(app.screen.width, app.screen.height);
@@ -504,21 +499,25 @@ export function OfficeFloor() {
       // grid; this is a "not ported yet", not a "not wanted".
       weatherOverlay.container.visible = hasWeather;
       app.stage.addChild(weatherOverlay.container);
-      // Cold start: the next push is up to one beat (30 s) away, and a floor that
-      // was already raining when the scene rebuilt (theme switch, GPU recovery)
-      // would show a clear sky until then. The agent directory already carries
-      // each agent's current breaker level, so seed from it.
-      void window.cth.hiveAgentDirectory?.().then((dir) => {
-        if (mountIdRef.current !== mountId) return;
-        const now = Date.now();
-        for (const a of dir?.agents ?? []) {
-          if (a.archived) continue;
-          floorWeather.record({ agentId: a.id, level: a.breaker, ts: now }, now);
-        }
-      }).catch(() => { /* directory unavailable — the sky just starts clear */ });
+      let lastEconomyWeather = 'clear';
+      const refreshEconomyWeather = (): void => {
+        if (!economyMode || !hasWeather) return;
+        const next = floorWeather.weather(Date.now(), new Set(useStore.getState().agents.map((agent) => agent.id)));
+        if (next === lastEconomyWeather) return;
+        lastEconomyWeather = next;
+        weatherOverlay.setWeather(next);
+        requestEconomyRender();
+      };
+      // The directory's levelFor() defaults to healthy and has no observation
+      // timestamp. Only actual breaker beats may light the health pips.
       // Live: one BreakerState per live agent per beat, on the same channel the
       // status pin and the cost meter already read.
-      const offBreaker = window.cth.onBreakerState?.((s) => floorWeather.record(s));
+      const offBreaker = window.cth.onBreakerState?.((s) => {
+        floorWeather.record(s);
+        refreshEconomyWeather();
+        paintOps();
+        requestEconomyRender();
+      });
       (app as any).__offBreaker = offBreaker;
 
       // ─── The wall instruments → REAL DATA, OR NOTHING ──────────────────────
@@ -575,10 +574,37 @@ export function OfficeFloor() {
       // flicker over a dropped read, and it does not display a stale one for
       // ever either.
       let heldCI: Held<CIState[]> | null = null;
+      let ciAvailable = false;
+      let heldCIRuns: { at: number; value: Array<{ name: string | null; status: string | null; conclusion: string | null; url: string | null }> } | null = null;
       let heldShipped: Held<ShippedBuckets> | null = null;
       let heldPlan: Held<PlanBoard> | null = null;
+      let lastTaskReading: OfficeReading<unknown> | null = null;
+      let heldHandoffs: { at: number; value: FloorInspectionHandoff[] } | null = null;
+      let chatterEnabled = false;
+      let chatterGeneration = 0;
       let opsSignature = '';
       let planSig = '';
+
+      const handoffsFromLog = (log: unknown): FloorInspectionHandoff[] => {
+        if (!Array.isArray(log)) return [];
+        return log.flatMap((row) => {
+          if (!row || typeof row !== 'object') return [];
+          const item = row as { kind?: unknown; id?: unknown; from?: unknown; to?: unknown; act?: unknown; ts?: unknown; delivered?: unknown };
+          if (item.kind !== 'message' || typeof item.from !== 'string' || typeof item.to !== 'string'
+            || typeof item.delivered !== 'number' || item.delivered <= 0) return [];
+          return [{
+            id: typeof item.id === 'string' ? item.id : null,
+            from: item.from,
+            to: item.to,
+            act: typeof item.act === 'string' ? item.act : null,
+            createdAt: typeof item.ts === 'number' && Number.isFinite(item.ts) ? item.ts : null,
+          }];
+        });
+      };
+
+      const readingInfo = (source: string, scope: string, availability: 'available' | 'unavailable', lastValidAt: number | null) => ({
+        source, scope, availability, lastValidAt,
+      });
 
       /** Redraw the operations display if anything it shows actually changed. */
       const paintOps = (): void => {
@@ -587,22 +613,26 @@ export function OfficeFloor() {
         const present = new Set(useStore.getState().agents.map((a) => a.id));
         const readout: OpsReadout = {
           agents: agentPips(floorWeather.fresh(now, present), now, present),
-          ci: heldValue(heldCI, now, CI_TTL_MS),
+          ci: ciAvailable ? heldValue(heldCI, now, CI_TTL_MS) : null,
           shipped: heldValue(heldShipped, now, SHIPPED_TTL_MS),
         };
         const sig = readoutSignature(readout);
         if (sig === opsSignature) return;
         opsSignature = sig;
         opsPanel.paint(drawOpsReadout(readout, readoutPal, readoutInk));
+        requestEconomyRender();
       };
       /** Same, for the ledger board. */
       const paintPlan = (): void => {
         if (!planPanel) return;
-        const board = heldValue(heldPlan, Date.now(), PLAN_TTL_MS);
+        const board = readingState(lastTaskReading, Date.now(), PLAN_TTL_MS) !== 'available'
+          ? null
+          : heldValue(heldPlan, Date.now(), PLAN_TTL_MS);
         const sig = planSignature(board);
         if (sig === planSig) return;
         planSig = sig;
         planPanel.paint(drawPlanReadout(board, readoutPal, readoutInk));
+        requestEconomyRender();
       };
       // Cold start: both surfaces say NO DATA until their first source answers.
       // That is the honest opening state, and it is also what a floor with no
@@ -615,12 +645,22 @@ export function OfficeFloor() {
        *  and `bucketShipped` can only tell a complete feed from a truncated one
        *  if it knows how many rows were asked for. */
       const pollShipped = async (): Promise<void> => {
-        if (!opsPanel) return;
+        const token = lifecycle.issue('shipped');
         try {
-          const log = await window.cth.hiveLog(SHIPPED_LOG_WINDOW);
-          const buckets = bucketShipped(log, Date.now(), SHIPPED_LOG_WINDOW);
-          if (buckets) heldShipped = { value: buckets, at: Date.now() };
-        } catch { /* held reading stands until its TTL */ }
+          const reading = await window.cth.hiveLogReading(SHIPPED_LOG_WINDOW);
+          if (!lifecycle.isCurrent('shipped', token)) return;
+          const log = reading.availability === 'available' ? reading.value : null;
+          const at = reading.lastValidAt;
+          const buckets = log && at !== null ? bucketShipped(log, at, SHIPPED_LOG_WINDOW) : null;
+          heldShipped = buckets && at !== null ? { value: buckets, at } : null;
+          if (floorInspectionEnabled) heldHandoffs = log && at !== null ? { value: handoffsFromLog(log), at } : null;
+          observeTaskDone(log);
+          if (log) requestEconomyRender();
+        } catch {
+          if (!lifecycle.isCurrent('shipped', token)) return;
+          heldShipped = null;
+          heldHandoffs = null;
+        }
         paintOps();
       };
       /** The `gh` CLI → the CI strip. A subprocess and a network round trip, so
@@ -629,11 +669,32 @@ export function OfficeFloor() {
       let ciRepo: string | null = null;
       const pollCI = async (): Promise<void> => {
         if (!opsPanel) return;
-        if (!ciRepo) { heldCI = null; paintOps(); return; }
+        const repo = ciRepo;
+        const token = lifecycle.issue('ci');
+        if (!repo) { heldCI = null; heldCIRuns = null; ciAvailable = false; paintOps(); return; }
         try {
-          const runs = summarizeCIRuns(await window.cth.githubCIRuns(ciRepo));
-          if (runs) heldCI = { value: runs, at: Date.now() };
-        } catch { /* gh unavailable — held reading stands until its TTL */ }
+          const reply = await window.cth.githubCIRuns(repo);
+          const runs = summarizeCIRuns(reply);
+          if (!lifecycle.isCurrent('ci', token) || ciRepo !== repo) return;
+          ciAvailable = runs !== null;
+          if (runs) {
+            const at = Date.now();
+            heldCI = { value: runs, at };
+            const raw = Array.isArray(reply.runs) ? reply.runs : [];
+            if (floorInspectionEnabled) heldCIRuns = {
+              at,
+              value: raw.slice(0, 5).map((run) => ({
+                name: typeof run.name === 'string' ? run.name : null,
+                status: typeof run.status === 'string' ? run.status : null,
+                conclusion: typeof run.conclusion === 'string' ? run.conclusion : null,
+                url: typeof run.url === 'string' ? run.url : null,
+              })),
+            };
+          }
+        } catch {
+          if (!lifecycle.isCurrent('ci', token) || ciRepo !== repo) return;
+          ciAvailable = false;
+        }
         paintOps();
       };
       /** Which repo the CI strip watches: the first REGISTERED one, the same
@@ -645,18 +706,21 @@ export function OfficeFloor() {
       const applyCIRepo = (repos: string[] | undefined): void => {
         const next = repos?.[0] ?? null;
         if (next === ciRepo) return;
+        lifecycle.invalidate('ci');
         ciRepo = next;
         heldCI = null;
+        heldCIRuns = null;
+        ciAvailable = false;
+        paintOps();
+        if (floorInspectionEnabled) window.dispatchEvent(new Event('cth:floor-inspection-reset'));
         void pollCI();
       };
       if (opsPanel) {
-        void pollShipped();
         (app as any).__wallPolls = [
-          setInterval(() => { void pollShipped(); }, SHIPPED_POLL_MS),
           // Fires on its own schedule from here on; the FIRST call comes from
           // applyCIRepo, because until getConfig answers there is no repo to ask
           // about and spawning `gh` with nothing to look at is pure cost.
-          setInterval(() => { void pollCI(); }, CI_POLL_MS),
+          lifecycle.interval(() => { void pollCI(); }, CI_POLL_MS),
         ];
       }
 
@@ -683,6 +747,7 @@ export function OfficeFloor() {
       calG.zIndex = proj.rowDepth(theme.anchors.calendar.y + 2);
       calG.on('pointertap', (ev) => {
         ev.stopPropagation();
+        if (floorInspectionEnabled) { emitInspection?.({ kind: 'room', room: 'operations' }); return; }
         const st = useStore.getState();
         const god = st.agents.find((a) => a.isGod);
         if (god) st.select(god.id);
@@ -742,6 +807,156 @@ export function OfficeFloor() {
       // The break room (`wing-break`) is NOT added as overflow desk seating,
       // so the café tables stay free for breaks — see the coffee-break
       // director below.
+
+      const seatIdFor = (seat: Tile): string => {
+        const named = theme.primarySeatNames.find((name) => {
+          const point = mapRenderer.getSpawnPoint(name);
+          return point?.x === seat.x && point?.y === seat.y;
+        });
+        return named ?? `seat-${seat.x}-${seat.y}`;
+      };
+      const seatForId = (seatId: string): Tile | undefined =>
+        seatTiles.find((seat) => seatIdFor(seat) === seatId);
+      const roomByZone: Record<string, FloorRoom> = {
+        'wing-warroom': 'operations',
+        'wing-engineering': 'engineering',
+        'wing-meeting': 'briefing',
+        'wing-deploy': 'deployments',
+        'wing-break': 'rest',
+      };
+      if (interactions) {
+        for (const [zoneName, room] of Object.entries(roomByZone)) {
+          const zone = mapRenderer.getZone(zoneName);
+          if (!zone) continue;
+          interactions.register({
+            id: `room:${room}`,
+            kind: 'room',
+            priority: 1,
+            bounds: projectedTileRect(proj, zone),
+            target: { kind: 'room', room },
+          });
+        }
+        for (const seat of seatTiles) {
+          const seatId = seatIdFor(seat);
+          const visualOffset = mapRenderer.getDeskVisualOffset(seat);
+          interactions.register({
+            id: `desk:${seatId}`,
+            kind: 'desk',
+            priority: 20,
+            bounds: deskVisualRect(proj, seat, visualOffset),
+            target: { kind: 'desk', seatId },
+          });
+          if (mapRenderer.gidAt('furniture-above', seat.x, seat.y - 2) === theme.monitor.offTopLeftGid) {
+            interactions.register({
+              id: `screen:${seatId}`,
+              kind: 'screen',
+              priority: 30,
+              bounds: screenVisualRect(proj, seat, visualOffset),
+              target: { kind: 'screen', seatId },
+            });
+          }
+        }
+      }
+
+      const inspectionSnapshot = (target: FloorInspectionTarget): FloorInspectionEventDetail => {
+        const now = Date.now();
+        const present = new Set(useStore.getState().agents.map((agent) => agent.id));
+        const breaker = floorWeather.fresh(now, present);
+        const taskState = lastTaskReading ? readingState(lastTaskReading, now, PLAN_TTL_MS) : 'unavailable';
+        const ciFresh = ciAvailable && heldCIRuns !== null && now - heldCIRuns.at < CI_TTL_MS;
+        const handoffsFresh = heldHandoffs !== null && now - heldHandoffs.at < SHIPPED_TTL_MS;
+        let enriched = target;
+        if (target.kind === 'desk' || target.kind === 'screen') {
+          const seat = seatForId(target.seatId);
+          const runtime = seat ? [...runtimes.entries()].find(([, value]) => {
+            const index = value.seatIndex;
+            return index != null && seatTiles[index]?.x === seat.x && seatTiles[index]?.y === seat.y;
+          }) : undefined;
+          enriched = { ...target, agentId: runtime?.[0] ?? null };
+        }
+        const taskInfo = readingInfo(
+          lastTaskReading?.source ?? 'hive:tasks',
+          lastTaskReading?.scope ?? 'hive',
+          taskState === 'available' ? 'available' : 'unavailable',
+          lastTaskReading?.lastValidAt ?? null,
+        );
+        const breakerLast = breaker.reduce<number | null>((latest, row) => latest === null ? row.ts : Math.max(latest, row.ts), null);
+        return {
+          target: enriched,
+          snapshot: {
+            capturedAt: now,
+            breaker: {
+              info: readingInfo('control:breakerState', 'live-agents', breaker.length ? 'available' : 'unavailable', breakerLast),
+              readings: breaker.length ? breaker.map((row) => ({ agentId: row.agentId, level: row.level, ts: row.ts })) : null,
+            },
+            tasks: taskState === 'expired' ? null : normalizeInspectionTasks(lastTaskReading?.value),
+            taskReading: taskInfo,
+            ci: {
+              info: readingInfo('github:actions', ciRepo ?? 'registered-repository', ciFresh ? 'available' : 'unavailable', ciFresh ? heldCIRuns!.at : null),
+              repo: ciFresh ? ciRepo : null,
+              runs: ciFresh ? heldCIRuns!.value : null,
+            },
+            handoffs: {
+              info: readingInfo('hive:log', 'routed-messages', handoffsFresh ? 'available' : 'unavailable', handoffsFresh ? heldHandoffs!.at : null),
+              items: handoffsFresh ? heldHandoffs!.value : null,
+            },
+            conversationsEnabled: chatterEnabled,
+          },
+        };
+      };
+      emitInspection = (target) => {
+        if (!floorInspectionEnabled || useStore.getState().visitorMode) return;
+        window.dispatchEvent(new CustomEvent<FloorInspectionEventDetail>('cth:floor-inspection', {
+          detail: inspectionSnapshot(target),
+        }));
+      };
+      if (interactions) {
+        if (inspectionHint) charLayer.addChild(inspectionHint.container);
+        app.stage.eventMode = 'static';
+        const refreshInteractionBounds = () => {
+          for (const rt of runtimes.values()) {
+            interactions.update(`agent:${rt.character.agentId}`, {
+              bounds: agentVisualRect(rt.character.getPixelPosition()),
+            });
+          }
+        };
+        const onFloorTap = (event: { global: { x: number; y: number }; stopPropagation?: () => void }) => {
+          refreshInteractionBounds();
+          const point = world.toLocal(event.global);
+          const hit = interactions.resolve(point);
+          if (!hit) return;
+          event.stopPropagation?.();
+          emitInspection?.(hit.target);
+        };
+        app.stage.on('pointertap', onFloorTap);
+        const onFloorMove = (event: { global: { x: number; y: number } }) => {
+          refreshInteractionBounds();
+          const point = world.toLocal(event.global);
+          const hit = interactions.resolve(point);
+          if (!hit || !inspectionHint) { inspectionHint?.hide(); return; }
+          inspectionHint.showText(t('floorInspector.hover'));
+          inspectionHint.setPosition(point.x, point.y);
+        };
+        app.stage.on('pointermove', onFloorMove);
+        const onTargetsRequest = () => {
+          if (useStore.getState().visitorMode) return;
+          window.dispatchEvent(new CustomEvent('cth:floor-inspection-targets', { detail: interactions.list() }));
+        };
+        const onInspectionRequest = (event: Event) => {
+          const target = (event as CustomEvent<FloorInspectionTarget>).detail;
+          if (interactions.list().some((item) => JSON.stringify(item) === JSON.stringify(target))) emitInspection?.(target);
+        };
+        window.addEventListener('cth:floor-inspection-targets-request', onTargetsRequest);
+        window.addEventListener('cth:floor-inspection-request', onInspectionRequest);
+        onTargetsRequest();
+        (app as any).__offFloorInspection = () => {
+          window.removeEventListener('cth:floor-inspection-targets-request', onTargetsRequest);
+          window.removeEventListener('cth:floor-inspection-request', onInspectionRequest);
+          app.stage.off('pointertap', onFloorTap);
+          app.stage.off('pointermove', onFloorMove);
+          inspectionHint?.destroy();
+        };
+      }
 
       // Waiting spots near the entrance — where a blocked agent walks to signal
       // it needs the user. Collected as walkable tiles in rings around the door.
@@ -850,8 +1065,6 @@ export function OfficeFloor() {
       // of waiting for a remount (which only happens on theme/language
       // switch); flipping it OFF stops the poll and drops the last snapshot
       // right away rather than leaving a stale one lying around.
-      let chatterEnabled = false;
-
       // Relationship state is DIRECTIONAL (see src/main/officeRel.ts): the map is
       // keyed by an ORDERED (from → to) edge, and the snapshot carries a settled
       // pair twice. `relFor(x, y)` is always "how x reads y" — every caller below
@@ -880,6 +1093,7 @@ export function OfficeFloor() {
         };
       };
       const pollRel = async (): Promise<void> => {
+        const token = lifecycle.issue('relationships');
         try {
           if (!window.cth.officeRelSnapshot) return; // stale preload bridge
           const rows = await window.cth.officeRelSnapshot();
@@ -889,7 +1103,7 @@ export function OfficeFloor() {
           // visible as hearts/sparks drawn from data the experiment is supposed
           // to have dropped. Re-check after the await, exactly like the threads
           // panel's `alive` guard.
-          if (!chatterEnabled) return;
+          if (!chatterEnabled || !lifecycle.isCurrent('relationships', token)) return;
           relByEdge.clear();
           for (const r of rows) relByEdge.set(edgeKey(r.from, r.to), r);
         } catch { /* keep last snapshot */ }
@@ -921,14 +1135,16 @@ export function OfficeFloor() {
         idlePullsActive = false;
       }
       const applyChatterEnabled = (enabled: boolean): void => {
+        if (enabled !== chatterEnabled) chatterGeneration++;
         chatterEnabled = enabled;
         if (enabled) {
           if (relPoll) return;
           void pollRel();
-          relPoll = setInterval(() => { void pollRel(); }, 60_000);
+          relPoll = lifecycle.interval(() => { void pollRel(); }, 60_000);
           (app as any).__relPoll = relPoll;
         } else {
-          if (relPoll) { clearInterval(relPoll); relPoll = null; }
+          if (relPoll) { lifecycle.clear(relPoll); relPoll = null; }
+          lifecycle.invalidate('relationships');
           (app as any).__relPoll = null;
           relByEdge.clear(); // stale relationship reads must not survive a toggle-off
           clearIdlePulls(); // …and neither must a lean computed from them
@@ -946,8 +1162,10 @@ export function OfficeFloor() {
       const applyVoicesEnabled = (c: { officeChatterEnabled?: boolean; officeVoicesEnabled?: boolean }): void => {
         setOfficeVoicesEnabled(c.officeChatterEnabled === true && c.officeVoicesEnabled === true);
       };
+      const configToken = lifecycle.issue('config');
       void window.cth.getConfig()
         .then((c) => {
+          if (!lifecycle.isCurrent('config', configToken)) return;
           applyChatterEnabled(c.officeChatterEnabled === true);
           applyVoicesEnabled(c);
           applyCIRepo(c.registeredRepos);
@@ -955,6 +1173,7 @@ export function OfficeFloor() {
         .catch(() => { /* flags stay off, and the CI strip stays NO DATA */ });
       (app as any).__unsubChatterConfig =
         window.cth.onConfigChanged((c) => {
+          lifecycle.invalidate('config');
           applyChatterEnabled(c.officeChatterEnabled === true);
           applyVoicesEnabled(c);
           applyCIRepo(c.registeredRepos);
@@ -1261,12 +1480,14 @@ export function OfficeFloor() {
           const p = runtimes.get(partnerId);
           if (p?.brk) p.brk.asking = false;
         };
+        const chatGeneration = chatterGeneration;
         void window.cth.officeChatRequest({
           a: personaFor(speakerAgent),
           b: personaFor(partnerAgent),
           mood,
           spot: spot.spot
         }).then((res) => {
+          if (mountIdRef.current !== mountId || !chatterEnabled || chatGeneration !== chatterGeneration) return;
           clearAsking();
           if (!res?.lines?.length) return;   // nothing written → they sit quietly
           // Re-read both breaks AFTER the await: either agent may have stood up,
@@ -1799,8 +2020,6 @@ export function OfficeFloor() {
           rt!.err.phase = 'doing';
           rt!.err.timer = 0;
           c.faceDirection(spot.facing);
-          const lines = ERRAND_THOUGHTS[spot.kind];
-          c.showThought(t(lines[Math.floor(Math.random() * lines.length)]));
           const finish = (): void => {
             const wasGod = !!agent!.isGod;
             releaseErrand(rt!);
@@ -1811,63 +2030,6 @@ export function OfficeFloor() {
           if (spot.kind === 'water') c.startWatering(spot.duration, finish);
           else if (spot.kind === 'smoke') c.startSmoking(spot.duration, finish);
         });
-      };
-
-      // ─── The boss aura: performative excellence in Michael's presence ──────
-      // When the god's avatar wanders close to a worker, the worker bursts
-      // into suck-up mode — including REAL stats ("already shipped N tasks,
-      // Michael. raise?" with N from the actual ledger). This one survived the
-      // cull of canned dialogue because it is anchored to two real facts: the
-      // boss's avatar really is standing there, and the number really is that
-      // worker's closed-task count.
-      const lastSuckUp = new Map<string, number>();
-      let doneByAssignee = new Map<string, number>();
-      let statsAge = 999;
-      let auraCooldown = 1.5;
-      const updateBossAura = (dt: number): void => {
-        // refresh the done-counts from the ledger at a relaxed cadence
-        statsAge += dt;
-        if (statsAge > 30) {
-          statsAge = 0;
-          void window.cth.hiveTasks().then((raw) => {
-            const arr = (raw && typeof raw === 'object' && Array.isArray((raw as { tasks?: unknown }).tasks))
-              ? (raw as { tasks: Array<{ status?: string; assignee?: string }> }).tasks
-              : [];
-            const m = new Map<string, number>();
-            for (const t of arr) {
-              if (t?.status === 'done' && typeof t.assignee === 'string' && t.assignee) {
-                m.set(t.assignee, (m.get(t.assignee) ?? 0) + 1);
-              }
-            }
-            doneByAssignee = m;
-          }).catch(() => { /* keep last counts */ });
-        }
-        auraCooldown -= dt;
-        if (auraCooldown > 0) return;
-        auraCooldown = 1.5;
-        const god = useStore.getState().agents.find((a) => a.isGod);
-        const grt = god ? runtimes.get(god.id) : undefined;
-        if (!grt) return;
-        const gp = grt.character.getPixelPosition();
-        const now = Date.now();
-        for (const [id, rt] of runtimes) {
-          if (id === god!.id) continue;
-          const a = agentById(id);
-          if (!a) continue;
-          // only relaxed workers perform — not someone mid-thought of real work
-          if (a.status !== 'idle' && a.status !== 'success') continue;
-          if (rt.brk?.chat || rt.brk?.chattingWith) continue;
-          const p = rt.character.getPixelPosition();
-          if (Math.hypot(p.x - gp.x, p.y - gp.y) > 44) continue;
-          if (now - (lastSuckUp.get(id) ?? 0) < 25_000) continue;
-          if (Math.random() >= 0.6) continue;
-          lastSuckUp.set(id, now);
-          const done = doneByAssignee.get(id) ?? 0;
-          const pool = done > 0 ? SUCK_UP_KEYS : SUCK_UP_KEYS.slice(2);
-          const line = pool[Math.floor(Math.random() * pool.length)];
-          rt.character.showThought(t(line, { done: String(done) }));
-          rt.character.hideThought(); // linger briefly, then fade
-        }
       };
 
       // ─── Coffee delivery + desk screens, every frame ───────────────────────
@@ -1915,6 +2077,7 @@ export function OfficeFloor() {
       boardG.zIndex = proj.rowDepth(BOARD_TILE.y + 1);
       boardG.on('pointertap', (ev) => {
         ev.stopPropagation();
+        if (floorInspectionEnabled) { emitInspection?.({ kind: 'room', room: 'engineering' }); return; }
         const st = useStore.getState();
         const god = st.agents.find((a) => a.isGod);
         if (god) st.select(god.id);
@@ -2088,16 +2251,21 @@ export function OfficeFloor() {
       // the bubble rise back into the gap under the clock instead of off-world.
       const clockHintY = clockAt.y + 78;
       clockG.on('pointerover', () => {
+        if (floorInspectionEnabled) return;
         clockHover = true;
         clockHint.showText(t('office.clockOut.hint'));
         clockHint.setPosition(clockHintX, clockHintY);
+        if (economyMode) clockHint.update(1);
+        requestEconomyRender();
       });
       clockG.on('pointerout', () => {
         clockHover = false;
         clockHint.hide();
+        requestEconomyRender();
       });
       clockG.on('pointertap', (ev) => {
         ev.stopPropagation();
+        if (floorInspectionEnabled) return;
         clockHint.hide();
         // ASKS — never closes. See ClockOutConfirmModal / store/clockOut.ts.
         useStore.getState().requestClockOut();
@@ -2123,6 +2291,7 @@ export function OfficeFloor() {
       askG.zIndex = proj.rowDepth(ASK_TILE.y + 1);
       askG.on('pointertap', (ev) => {
         ev.stopPropagation();
+        if (floorInspectionEnabled) { emitInspection?.({ kind: 'room', room: 'engineering' }); return; }
         const st = useStore.getState();
         const god = st.agents.find((a) => a.isGod);
         if (god) st.select(god.id);
@@ -2175,6 +2344,10 @@ export function OfficeFloor() {
         carryColor: number;
         stand: Tile;
         thought: string;
+        channel?: string;
+        token?: number;
+        timer?: ReturnType<typeof setTimeout>;
+        startedAt?: number;
       }
       // Where an actor stands to work the boards. From the theme: these used
       // to be office.tmj's own (8,11)/(9,11)/(12,11) written straight into
@@ -2188,16 +2361,38 @@ export function OfficeFloor() {
       let visualTasks = new Map<string, BoardTask>();
       const moveQueue: BoardMove[] = [];
       const busyActors = new Set<string>();
+      const activeMoves = new Map<string, BoardMove>();
       // The note riding in an actor's hand, floor-side so it needs no Character
       // support: one tiny Graphics per active move, repositioned every tick.
       const carriedNotes = new Map<string, Graphics>();
 
-      const redrawVisual = (): void => drawTaskBoard([...visualTasks.values()]);
+      const cancelBoardMove = (actorId: string): void => {
+        lifecycle.invalidate(`move:${actorId}`);
+        const active = activeMoves.get(actorId);
+        if (active?.timer) lifecycle.clear(active.timer);
+        activeMoves.delete(actorId);
+        for (let i = moveQueue.length - 1; i >= 0; i--) {
+          if (moveQueue[i].actorId === actorId) moveQueue.splice(i, 1);
+        }
+        busyActors.delete(actorId);
+        const note = carriedNotes.get(actorId);
+        if (note) { note.parent?.removeChild(note); note.destroy(); carriedNotes.delete(actorId); }
+        const rt = runtimes.get(actorId);
+        const agent = agentById(actorId);
+        if (rt && agent) { rt.character.hideThought(); applyState(agent, rt, true); }
+      };
+
+      const redrawVisual = (): void => {
+        drawTaskBoard([...visualTasks.values()]);
+        requestEconomyRender();
+      };
 
       const finishMove = (mv: BoardMove, rt: Runtime | undefined): void => {
+        if (mv.channel && mv.token !== undefined && !lifecycle.isCurrent(mv.channel, mv.token)) return;
         visualTasks.set(mv.taskId, mv.after);
         redrawVisual();
         busyActors.delete(mv.actorId);
+        activeMoves.delete(mv.actorId);
         const g = carriedNotes.get(mv.actorId);
         if (g) { g.parent?.removeChild(g); g.destroy(); carriedNotes.delete(mv.actorId); }
         if (rt) {
@@ -2218,9 +2413,12 @@ export function OfficeFloor() {
       };
 
       const startMove = (mv: BoardMove): void => {
+        if (mv.channel && mv.token !== undefined && !lifecycle.isCurrent(mv.channel, mv.token)) return;
         const rt = runtimes.get(mv.actorId);
         if (!rt) { finishMove(mv, undefined); return; }
         busyActors.add(mv.actorId);
+        mv.startedAt = Date.now();
+        activeMoves.set(mv.actorId, mv);
         const c = rt.character;
         if (mv.kind === 'archive') {
           // picks the note up at its desk before walking — in hand, off the desk
@@ -2230,10 +2428,12 @@ export function OfficeFloor() {
         }
         c.showThought(mv.thought);
         c.walkToAndThen(mv.stand, () => {
+          if (mv.channel && mv.token !== undefined && !lifecycle.isCurrent(mv.channel, mv.token)) return;
           c.faceDirection('up');
           if (mv.kind === 'take') attachCarriedNote(mv.actorId, mv.carryColor);
           // brief acting beat, then the boards update under their hands
-          setTimeout(() => {
+          mv.timer = lifecycle.timeout(() => {
+            if (mv.channel && mv.token !== undefined && !lifecycle.isCurrent(mv.channel, mv.token)) return;
             if (mv.kind === 'take') {
               // carry it home: the desk note appears on arrival via finishMove
               const rt2 = runtimes.get(mv.actorId);
@@ -2249,7 +2449,6 @@ export function OfficeFloor() {
         });
       };
 
-      let moveWatchdog = 0;
       const updateBoardMoves = (dt: number): void => {
         // carried notes ride at the actor's hand
         for (const [id, g] of carriedNotes) {
@@ -2267,19 +2466,9 @@ export function OfficeFloor() {
           }
         }
         // the ASK ME board pulses for attention while questions wait
-        askPulse += dt;
-        if (askCount > 0) drawAskBoard(askPulse);
-        // global watchdog: if anything has been in flight too long, hard-sync
-        moveWatchdog += dt;
-        if (moveWatchdog > 30 && busyActors.size > 0) {
-          moveWatchdog = 0;
-          for (const id of [...busyActors]) {
-            busyActors.delete(id);
-            const g = carriedNotes.get(id);
-            if (g) { g.parent?.removeChild(g); g.destroy(); carriedNotes.delete(id); }
-          }
-          visualTasks = new Map(lastLedger.map((t) => [t.id, { status: t.status, assignee: t.assignee }]));
-          redrawVisual();
+        if (!economyMode) {
+          askPulse += dt;
+          if (askCount > 0) drawAskBoard(askPulse);
         }
       };
 
@@ -2301,28 +2490,104 @@ export function OfficeFloor() {
       // Kept here rather than inside `visualTasks` on purpose — the board's
       // copy is deliberately LAGGED (a card only flips once an avatar has
       // walked the note over), while a desk should reflect the ledger itself.
-      let deskDone = new Map<string, number>();
+      let deskDone: Map<string, number> | null = null;
       const applyDeskHistory = (): void => {
-        for (const [id, rt] of runtimes) rt.shelf?.setDoneCount(deskDone.get(id) ?? 0);
+        for (const [id, rt] of runtimes) {
+          if (!rt.shelf) continue;
+          rt.shelf.container.visible = deskDone !== null;
+          if (deskDone) rt.shelf.setDoneCount(deskDone.get(id) ?? 0);
+        }
       };
 
       let lastLedger: LedgerTask[] = [];
       let firstPoll = true;
+      let ledgerVisible = false;
+      const hideLedgerDisplay = (): void => {
+        boardG.visible = false;
+        askG.visible = false;
+        if (!ledgerVisible) return;
+        ledgerVisible = false;
+        for (const id of [...busyActors, ...moveQueue.map((move) => move.actorId)]) cancelBoardMove(id);
+        clearDeskNotes();
+        visualTasks.clear();
+        lastLedger = [];
+        firstPoll = true;
+        deskDone = null;
+        applyDeskHistory();
+        requestEconomyRender();
+      };
+      hideLedgerDisplay();
+      let taskDoneBaseline = false;
+      let seenTaskDone = new Set<string>();
+      const taskDoneKey = (event: { taskId: string; at: number }): string => `${event.taskId}:${event.at}`;
+      const observeTaskDone = (log: unknown): void => {
+        if (!Array.isArray(log)) return;
+        const events = readTaskDoneEvents(log);
+        const current = new Set(events.map(taskDoneKey));
+        if (!taskDoneBaseline) {
+          seenTaskDone = current;
+          taskDoneBaseline = true;
+          return;
+        }
+        for (const event of events) {
+          const key = taskDoneKey(event);
+          if (seenTaskDone.has(key)) continue;
+          seenTaskDone.add(key);
+          // task_done.ts is when this process observed the closure, not an
+          // invented claim about the exact instant the work finished.
+          const id = event.who;
+          const rt = id ? runtimes.get(id) : undefined;
+          const agent = id ? agentById(id) : undefined;
+          if (rt && agent && !agent.isGod) rt.character.cheer();
+        }
+        // hive:log is a tail; keep this dedupe set bounded by that tail.
+        for (const key of seenTaskDone) if (!current.has(key)) seenTaskDone.delete(key);
+      };
       const pollTaskBoard = async (): Promise<void> => {
+        // Choreography cancellation uses elapsed wall time, never rendered frames.
+        let cancelled = false;
+        for (const move of activeMoves.values()) {
+          if (move.startedAt !== undefined && Date.now() - move.startedAt >= 30_000) {
+            cancelBoardMove(move.actorId);
+            cancelled = true;
+          }
+        }
+        if (cancelled) {
+          visualTasks = new Map(lastLedger.map((task) => [task.id, task]));
+          redrawVisual();
+        }
+        // TTL checks run on the existing wall-clock poll, even if Pixi is stopped
+        // or a previous IPC is still pending.
+        if (!visibleTaskLedger(lastTaskReading, Date.now(), PLAN_TTL_MS)) hideLedgerDisplay();
+        paintPlan();
+        paintOps();
+        refreshEconomyWeather();
+        const token = lifecycle.issue('task-board');
         try {
-          const raw = await window.cth.hiveTasks() as { tasks?: Array<{ id?: string; status?: string; assignee?: string; humanQA?: Array<{ q?: string; a?: string }> }> } | null;
-          const arr = (raw && Array.isArray(raw.tasks)) ? raw.tasks : [];
+          const reading = await window.cth.hiveTaskReading();
+          if (!lifecycle.isCurrent('task-board', token)) return;
+          lastTaskReading = reading;
+          const held = heldFromReading(reading);
+          const arr = visibleTaskLedger(reading, Date.now(), PLAN_TTL_MS);
+          const board = arr ? summarizePlanBoard({ tasks: arr }) : null;
+          if (board && held) heldPlan = { value: board, at: held.at };
+          else {
+            heldPlan = null;
+          }
+          paintPlan();
+
+          if (!arr) { hideLedgerDisplay(); return; }
+          ledgerVisible = true;
+          boardG.visible = hasWallProps;
+          askG.visible = hasWallProps;
           // The PLAN / BUILD / SHIP whiteboard rides this same read — the
           // ledger is already on the wire, and a second poll for the same file
           // would be pure waste. Unlike the cork boards it is NOT lagged behind
           // the note-carrying choreography: a written board states the ledger,
           // not the walk.
-          const board = summarizePlanBoard(raw);
-          if (board) heldPlan = { value: board, at: Date.now() };
-          paintPlan();
-          const ledger: LedgerTask[] = arr.map((t, i) => ({
-            id: typeof t?.id === 'string' && t.id ? t.id : `idx-${i}`,
-            status: String(t?.status ?? 'todo'),
+          const ledger: LedgerTask[] = arr.map((t) => ({
+            id: t.id,
+            status: t.status,
             assignee: typeof t?.assignee === 'string' && t.assignee ? t.assignee : undefined
           }));
           deskDone = countDoneByAssignee(arr);
@@ -2346,6 +2611,14 @@ export function OfficeFloor() {
             return;
           }
           const prev = new Map(lastLedger.map((t) => [t.id, t]));
+          // A newer ledger or deletion cancels any old arrival/timer before it
+          // can put a removed or superseded card back on the board.
+          for (const move of [...activeMoves.values(), ...moveQueue]) {
+            const task = ledger.find((row) => row.id === move.taskId);
+            if (!task || task.status !== move.after.status || task.assignee !== move.after.assignee) {
+              cancelBoardMove(move.actorId);
+            }
+          }
           let instant = false;
           for (const t of ledger) {
             const old = prev.get(t.id);
@@ -2369,9 +2642,10 @@ export function OfficeFloor() {
             // No boards on the wall ⇒ no walking a note to one. The `else`
             // below is exactly the existing "un-choreographable diff" path:
             // the card updates instantly and drawTaskBoard swallows the redraw.
-            if (mv && hasWallProps && !busyActors.has(mv.actorId) && !moveQueue.some((q) => q.actorId === mv!.actorId)) {
-              if (!visualTasks.has(t.id) && mv.kind !== 'pin') visualTasks.set(t.id, { status: oldS ?? 'todo', assignee: old?.assignee });
-              moveQueue.push(mv);
+            if (mv && !economyMode && hasWallProps && !busyActors.has(mv.actorId) && !moveQueue.some((q) => q.actorId === mv!.actorId)) {
+              if (!visualTasks.has(t.id) && mv.kind !== 'pin' && oldS) visualTasks.set(t.id, { status: oldS, assignee: old?.assignee });
+              const channel = `move:${mv.actorId}`;
+              moveQueue.push({ ...mv, channel, token: lifecycle.issue(channel) });
             } else {
               visualTasks.set(t.id, after);
               instant = true;
@@ -2384,6 +2658,9 @@ export function OfficeFloor() {
           if (instant) redrawVisual();
           lastLedger = ledger;
         } catch {
+          if (!lifecycle.isCurrent('task-board', token)) return;
+          if (lastTaskReading) lastTaskReading = { ...lastTaskReading, availability: 'unavailable' };
+          hideLedgerDisplay();
           // Keep the last drawing — but the whiteboard's held reading is now
           // one poll older, and paintPlan is what notices when it has been
           // silent long enough to stop being believable.
@@ -2391,7 +2668,11 @@ export function OfficeFloor() {
         }
       };
       void pollTaskBoard();
-      const taskBoardPoll = setInterval(() => { void pollTaskBoard(); }, 5000);
+      // The existing log cadence serves the chart, handoffs and celebrations.
+      // No second five-second log scan alongside the sixty-second reader.
+      void pollShipped();
+      lifecycle.interval(() => { void pollShipped(); }, SHIPPED_POLL_MS);
+      const taskBoardPoll = lifecycle.interval(() => { void pollTaskBoard(); }, 5000);
       (app as any).__taskBoardPoll = taskBoardPoll;
 
       const addCharacter = async (agent: Agent) => {
@@ -2430,9 +2711,20 @@ export function OfficeFloor() {
           seatDirection: facingForSeat(seatTile),
           spawnTile: entrance, // walk in from the office door
           glowColor: hexNum(colors.accent[agent.accent]) ?? hexToNumber(custom?.accent ?? member.shirt),
-          onClick: (id) => useStore.getState().select(id),
+          onClick: (id) => {
+            if (floorInspectionEnabled) { emitInspection?.({ kind: 'agent', agentId: id }); return; }
+            useStore.getState().select(id);
+          },
         });
+        character.setEconomyMode(economyMode);
         character.show(charLayer);
+        interactions?.register({
+          id: `agent:${agent.id}`,
+          kind: 'agent',
+          priority: 100,
+          bounds: agentVisualRect(character.getPixelPosition()),
+          target: { kind: 'agent', agentId: agent.id },
+        });
         const rt: Runtime = { character, seatIndex, waitTile, charName };
         // Standard desks paint the 2×2 PC monitor two rows above the seat —
         // give those a DeskScreen (lights up while seated) and a cup spot
@@ -2443,6 +2735,7 @@ export function OfficeFloor() {
           const visualOffset = mapRenderer.getDeskVisualOffset(seatTile);
           const top = deskDisplayTop(seatTile, visualOffset);
           rt.screen = new DeskScreen(mapRenderer, top, theme.monitor, visualOffset);
+          rt.screen.setReducedMotion(economyMode);
           charLayer.addChild(rt.screen.container);
           const topAt = proj.tileToWorld(top.x, top.y);
           const cupOffset = deskCupPixelOffset(visualOffset);
@@ -2461,17 +2754,21 @@ export function OfficeFloor() {
             // Seed from the last poll so a late-joining agent (or a theme
             // switch, which rebuilds the whole scene) shows its history
             // immediately instead of a bare desk until the next 5s tick.
-            rt.shelf.setDoneCount(deskDone.get(agent.id) ?? 0);
+            rt.shelf.container.visible = deskDone !== null;
+            if (deskDone) rt.shelf.setDoneCount(deskDone.get(agent.id) ?? 0);
           }
         }
         runtimes.set(agent.id, rt);
         applyState(agent, rt, true);
+        requestEconomyRender();
         } finally { spawning.delete(agent.id); }
       };
 
       const removeCharacter = (id: string) => {
         const rt = runtimes.get(id);
         if (!rt) return;
+        interactions?.unregister(`agent:${id}`);
+        cancelBoardMove(id);
         releaseBreak(rt);                // free any café seat it was holding
         releaseErrand(rt);               // and any idle errand it was running
         releaseRun(rt);                  // and any coffee run in progress
@@ -2490,7 +2787,7 @@ export function OfficeFloor() {
         rt.shelf?.destroy();   // the trinkets leave with the desk's owner
         rt.character.hide(0);
         // give the fade-out a moment, then destroy
-        setTimeout(() => rt.character.destroy(), 700);
+        lifecycle.timeout(() => rt.character.destroy(), 700);
         runtimes.delete(id);
       };
 
@@ -2527,18 +2824,6 @@ export function OfficeFloor() {
           || rt.prevCarrying !== agent.carrying
           || rt.prevPrompt !== agent.lastPrompt;
         if (!changed) return;
-        // Finishing real work (working/thinking/compacting → done) earns a
-        // little celebration before the avatar goes back to roaming — but only
-        // after a SUBSTANTIAL busy stretch (see CHEER_MIN_BUSY_MS): an inbox
-        // nudge or heartbeat reply that flips busy for a few seconds ends
-        // quietly instead of "celebrating" every few minutes over nothing.
-        const wasBusy = rt.prevStatus === 'working' || rt.prevStatus === 'thinking' || rt.prevStatus === 'compacting';
-        const isBusy = agent.status === 'working' || agent.status === 'thinking' || agent.status === 'compacting';
-        if (isBusy && !wasBusy) rt.busySince = Date.now();
-        const finishedWork = !force && !agent.isGod
-          && wasBusy && (agent.status === 'idle' || agent.status === 'success')
-          && rt.busySince !== undefined && Date.now() - rt.busySince >= CHEER_MIN_BUSY_MS;
-        if (!isBusy) rt.busySince = undefined;
         rt.prevStatus = agent.status;
         rt.prevAction = agent.action;
         rt.prevCarrying = agent.carrying;
@@ -2627,12 +2912,7 @@ export function OfficeFloor() {
             c.setStatusGlyph('success');
             if (agent.isGod) { c.hideThought(); c.sitAtDesk(true); break; }
             c.startWandering();
-            if (finishedWork) {
-              c.cheer();
-              c.showThought(t(CHEER_KEYS[Math.floor(Math.random() * CHEER_KEYS.length)]));
-            } else {
-              c.hideThought();
-            }
+            c.hideThought();
             break;
           case 'ghost':
             c.setStatusGlyph('none');
@@ -2644,12 +2924,6 @@ export function OfficeFloor() {
             c.setStatusGlyph('none');
             // The god runs the floor from its desk; everyone else wanders when idle.
             if (agent.isGod) { c.sitAtDesk(true); c.showThought(thought(agent, t('office.activity.runningFloor'))); }
-            else if (finishedWork) {
-              // Task done → a quick cheer on the spot, then back to roaming.
-              c.startWandering();
-              c.cheer();
-              c.showThought(t(CHEER_KEYS[Math.floor(Math.random() * CHEER_KEYS.length)]));
-            }
             else { c.startWandering(); c.showThought(thought(agent, t('office.activity.idle'))); }
             break;
         }
@@ -2666,6 +2940,7 @@ export function OfficeFloor() {
           if (!rt) { if (!spawning.has(agent.id)) void addCharacter(agent); }
           else applyState(agent, rt);
         }
+        requestEconomyRender();
       };
 
       syncAgents();
@@ -2712,6 +2987,8 @@ export function OfficeFloor() {
             }
           }
         }
+        if (s.agents !== prev.agents || s.officeWing !== prev.officeWing
+          || s.visitorMode !== prev.visitorMode || s.selectedId !== prev.selectedId) requestEconomyRender();
       });
       (app as any).__unsub = unsubscribe;
 
@@ -2734,6 +3011,7 @@ export function OfficeFloor() {
         const env = new MessageEnvelope(from, to, act, needsHuman);
         charLayer.addChild(env.container);
         envelopes.push(env);
+        requestEconomyRender();
       };
 
       // Real path: the main-process router emits one event per routed message.
@@ -2742,10 +3020,6 @@ export function OfficeFloor() {
       const offMessage = window.cth.onHiveMessage
         ? window.cth.onHiveMessage((e) => {
             for (const target of e.targets) spawnHandoff(e.from, target, e.act, e.needsHuman);
-            // A REAL handoff between two live agents also earns a quick café
-            // rendezvous (see startRendezvous above) — skipped for human
-            // escalations, since 'human' has no avatar on the floor to walk.
-            if (!e.needsHuman && e.to !== 'human') startRendezvous(e.from, e.to);
           })
         : () => { /* onHiveMessage unavailable — real handoffs disabled this session */ };
       // Demo path: with no live hive, the mock loop dispatches synthetic handoffs
@@ -2804,6 +3078,7 @@ export function OfficeFloor() {
       let opsAcc = 0;
       const updateOpsPanel = (dt: number): void => {
         if (!opsPanel) return;
+        if (budget.changeDriven) return;
         opsAcc += dt;
         if (opsAcc < 1) return;
         opsAcc = 0;
@@ -2812,6 +3087,7 @@ export function OfficeFloor() {
 
       const updateWeather = (dt: number) => {
         if (!hasWeather) return;
+        if (budget.changeDriven) return;
         weatherAcc += dt;
         if (weatherAcc >= 1) {
           weatherAcc = 0;
@@ -2823,8 +3099,14 @@ export function OfficeFloor() {
         weatherOverlay.update(dt);
       };
 
+      const needsEconomyFrame = (): boolean =>
+        camera.needsAnimationFrame()
+        || envelopes.length > 0
+        || Array.from(runtimes.values()).some((rt) => rt.character.needsAnimationFrame());
+
       const onTick = (ticker: Ticker) => {
-        const dt = ticker.deltaMS / 1000;
+        economyFrameInProgress = economyMode;
+        const dt = economyMode ? Math.min(ticker.elapsedMS / 1000, 0.5) : ticker.deltaMS / 1000;
         camera.update(dt);
         // Thought clouds counter-scale against the camera so their text never
         // renders below 1:1 screen size when the window/world shrinks.
@@ -2833,25 +3115,33 @@ export function OfficeFloor() {
           rt.character.setBubbleZoom(zoom);
           rt.character.update(dt);
         }
-        updateCafeteria(dt);
-        updateCoffeeRuns(dt);
-        updateIdleAffinity(dt);
-        updateErrands(dt);
-        updateBossAura(dt);
+        if (!economyMode) {
+          updateCafeteria(dt);
+          updateCoffeeRuns(dt);
+          updateIdleAffinity(dt);
+          updateErrands(dt);
+        }
         updateDeskLife(dt);
         updateBoardMoves(dt);
-        updateRelFx(dt);
-        worldClock.update(dt);
+        if (!economyMode) {
+          updateRelFx(dt);
+          worldClock.update(dt);
+        }
         // The end-of-day clock breathes so it never reads as wall dressing,
         // and its hover label fades in through ToolBubble's own state machine.
-        clockPulse += dt;
-        clockRedrawAcc += dt;
-        if (clockRedrawAcc >= 0.08 || clockHover !== clockDrawnHover) {
-          clockRedrawAcc = 0;
+        if (!economyMode) {
+          clockPulse += dt;
+          clockRedrawAcc += dt;
+          if (clockRedrawAcc >= 0.08 || clockHover !== clockDrawnHover) {
+            clockRedrawAcc = 0;
+            clockDrawnHover = clockHover;
+            drawClock(clockPulse, clockHover);
+          }
+        } else if (clockHover !== clockDrawnHover) {
           clockDrawnHover = clockHover;
           drawClock(clockPulse, clockHover);
         }
-        clockHint.update(dt);
+        if (!economyMode) clockHint.update(dt);
         updateWeather(dt);
         updateOpsPanel(dt);
         resolveBubbleOverlaps();
@@ -2861,11 +3151,17 @@ export function OfficeFloor() {
             envelopes.splice(i, 1);
           }
         }
+        economyFrameInProgress = false;
+        if (economyMode && !needsEconomyFrame()) app.ticker.stop();
       };
       app.ticker.add(onTick);
       // init() is async: the floor may already be behind a fullscreen terminal by
-      // the time we get here, and app.init() starts the ticker itself.
-      if (pausedRef.current) app.ticker.stop();
+      // the time we get here, and app.init() starts the ticker itself. Economy mode
+      // immediately changes that from a continuous loop to one invalidated frame.
+      if (economyMode) {
+        app.ticker.stop();
+        requestEconomyRender();
+      } else if (pausedRef.current) app.ticker.stop();
 
       const resize = new ResizeObserver((entries) => {
         for (const e of entries) {
@@ -2880,6 +3176,7 @@ export function OfficeFloor() {
           // the old panel: the wing stops fitting, silently.
           if (activeWing) applyWing(activeWing);
           weatherOverlay.setViewSize(width, height);
+          requestEconomyRender();
         }
       });
       resize.observe(host);
@@ -2899,7 +3196,7 @@ export function OfficeFloor() {
       if (plan.action === 'retry') {
         initRetriesRef.current = plan.attempt;
         console.warn(`[OfficeFloor] could not get a WebGL context (the GPU process may be restarting) — retrying, attempt ${plan.attempt}/${DEFAULT_MAX_INIT_RETRIES}`);
-        setTimeout(() => {
+        lifecycle.timeout(() => {
           if (mountIdRef.current === mountId) setGlGeneration((n) => n + 1);
         }, plan.delayMs);
         return;
@@ -2923,6 +3220,9 @@ export function OfficeFloor() {
     });
 
     return () => {
+      if (floorInspectionEnabled) window.dispatchEvent(new Event('cth:floor-inspection-reset'));
+      lifecycle.dispose();
+      economyRenderRef.current = null;
       mountIdRef.current++;
       // The wing picker floats OVER this scene; leaving it offering rooms of a
       // map that is no longer rendered (an error-boundary fallback, a theme
@@ -2940,6 +3240,7 @@ export function OfficeFloor() {
         (a as any).__resize?.disconnect?.();
         try { (a as any).__unsub?.(); } catch { /* noop */ }
         try { (a as any).__offMessage?.(); } catch { /* noop */ }
+        try { (a as any).__offFloorInspection?.(); } catch { /* noop */ }
         try { (a as any).__offBreaker?.(); } catch { /* noop */ }
         try { clearInterval((a as any).__taskBoardPoll); } catch { /* noop */ }
         try { clearInterval((a as any).__relPoll); } catch { /* noop */ }
@@ -2958,7 +3259,7 @@ export function OfficeFloor() {
       appRef.current = null;
       while (host.firstChild) host.removeChild(host.firstChild);
     };
-  }, [officeTheme, glGeneration, i18n.language]);
+  }, [officeTheme, glGeneration, i18n.language, softwareEconomyEnabled, floorInspectionEnabled]);
 
   return (
     <div

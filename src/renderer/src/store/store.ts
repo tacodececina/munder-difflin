@@ -338,6 +338,15 @@ interface State {
    *  save in any floor window seals every floor. Policy: store/visitorMode.ts. */
   visitorMode: boolean;
   setVisitorMode: (on: boolean) => void;
+  /** Mirror of config.softwareEconomyEnabled. The floor consumes this only to
+   *  select its software rendering policy; absent/false preserves the current
+   *  fallback behavior. */
+  softwareEconomyEnabled: boolean;
+  setSoftwareEconomyEnabled: (on: boolean) => void;
+  /** Mirror of config.floorInspectionEnabled. The floor creates no interaction
+   *  registry, hit-testing listener, or inspector bridge while this is false. */
+  floorInspectionEnabled: boolean;
+  setFloorInspectionEnabled: (on: boolean) => void;
   /** Mirror of config.webhookTriggers — the inbound HTTP endpoints. Webhooks are
    *  editable from BOTH Settings → Connections and the Triggers tab, so neither
    *  surface keeps its own copy: both render off this list and both call the
@@ -993,6 +1002,10 @@ export const useStore = create<State>((set, get) => ({
   // never derived — see store/visitorMode.ts.
   visitorMode: false,
   setVisitorMode: (on) => set({ visitorMode: on }),
+  softwareEconomyEnabled: false,
+  setSoftwareEconomyEnabled: (on) => set({ softwareEconomyEnabled: on }),
+  floorInspectionEnabled: false,
+  setFloorInspectionEnabled: (on) => set({ floorInspectionEnabled: on }),
   webhookTriggers: [],
   setWebhookTriggers: (list) => set({ webhookTriggers: list }),
   // A copy, not the shared DEFAULT_ORG_TRIGGER instance — main takes the same

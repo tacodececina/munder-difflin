@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore, selectedAgent } from '@/store/store';
 import { startMockLoop, stopMockLoop } from '@/store/mockEvents';
 import type { HarnessConfig } from '@/store/config';
@@ -46,6 +46,7 @@ export function App() {
 }
 
 function AppInner() {
+  const configReadGeneration = useRef(0);
   // Point every {{godName}} string at the orchestrator's real, renameable name.
   useGodNameSync();
   // Mirror the document only for a user who has picked an RTL app language.
@@ -144,8 +145,9 @@ function AppInner() {
   // Initial config load
   useEffect(() => {
     let cancelled = false;
+    const generation = configReadGeneration.current;
     window.cth.getConfig().then(c => {
-      if (cancelled) return;
+      if (cancelled || configReadGeneration.current !== generation) return;
       setConfig(c);
       // Mirror the Free Flow flag into the store so the composer mic button shows
       // only when enabled (Settings keeps this in sync on save).
@@ -182,6 +184,8 @@ function AppInner() {
       // the store rather than threaded through props. `=== true` on purpose: a
       // config that predates the field must read as OFF, never as sealed.
       useStore.getState().setVisitorMode(withTriggers.visitorMode === true);
+      useStore.getState().setSoftwareEconomyEnabled(c.softwareEconomyEnabled === true);
+      useStore.getState().setFloorInspectionEnabled(c.floorInspectionEnabled === true);
     });
     // Mirror BYOK OpenAI key presence (boolean only; the key never leaves main) so the
     // Realtime Michael voice toggle can gate on it. Lives in the secret broker, not
@@ -263,12 +267,15 @@ function AppInner() {
   // Config subscription — the copy loaded above would otherwise go stale the
   // moment anything saves a setting.
   useEffect(() => window.cth.onConfigChanged((c) => {
+    configReadGeneration.current++;
     setConfig(c);
     // The one mirror that MUST follow every broadcast rather than only the
     // Settings save path: visitor mode is a privacy control, and a second floor
     // window still showing terminals after the operator armed it in the first
     // would defeat the entire point.
     useStore.getState().setVisitorMode((c as HarnessConfig).visitorMode === true);
+    useStore.getState().setSoftwareEconomyEnabled((c as HarnessConfig).softwareEconomyEnabled === true);
+    useStore.getState().setFloorInspectionEnabled((c as HarnessConfig).floorInspectionEnabled === true);
   }), []);
 
   // Quit warning subscription

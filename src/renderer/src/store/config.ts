@@ -106,6 +106,11 @@ export interface HarnessConfig {
    *  the office and nothing else. Default OFF; only the Settings → General
    *  toggle ever sets it. Mirrors src/main/config.ts. */
   visitorMode?: boolean;
+  /** Opt-in change-driven floor rendering for software backends. Default OFF.
+   *  Mirrors src/main/config.ts and the preload bridge. */
+  softwareEconomyEnabled?: boolean;
+  /** Opt-in read-only click inspection for the office floor. Default OFF. */
+  floorInspectionEnabled?: boolean;
   /** Auto-update from GitHub releases (default ON; Settings → General). */
   autoUpdate?: boolean;
   /** Anonymous product analytics (default ON, opt-out; see TELEMETRY.md).

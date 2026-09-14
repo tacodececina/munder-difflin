@@ -234,6 +234,10 @@
       "body": "This permanently erases all of {{godName}}'s memories and the entire hive, and cannot be undone. Any running sessions will be terminated and the app will relaunch into onboarding. Are you sure?"
     },
     "general": {
+      "softwareEconomy": "Economy mode for software rendering",
+      "softwareEconomyDesc": "When Chromium uses a CPU renderer such as SwiftShader, stop continuous ambient animation and redraw the floor on changes at a low cadence. Off by default.",
+      "floorInspection": "Inspect the floor by clicking",
+      "floorInspectionDesc": "Show a read-only inspector for real floor readings, desks, rooms and links. Off by default.",
       "homeFolder": "Home folder",
       "environment": "Environment",
       "keepAwake": "Keep Mac awake while agents run",
@@ -909,62 +913,6 @@
       "hint": "CLOCK OUT — stops the agents and closes the app"
     },
     "gpuError": "The office floor lost its GPU context.\n\nToo many terminals are using the GPU at once.\nClose a few agent terminals, or restart the app, to bring it back.",
-    "errand": {
-      "water": [
-        "watering the plants 🌿",
-        "giving the plants a drink",
-        "they grow so fast"
-      ],
-      "window": [
-        "letting some air in 🍃",
-        "a bit of fresh air",
-        "nice breeze today"
-      ],
-      "dispenser": [
-        "getting some water 💧",
-        "hydration break",
-        "staying sharp"
-      ],
-      "fridge": [
-        "anything good in the fridge?",
-        "who took my yogurt?",
-        "just looking…"
-      ],
-      "shelf": [
-        "checking out the shelf 📚",
-        "anything new in here?",
-        "so much good stuff"
-      ],
-      "bin": [
-        "out with the scrap paper 🗑️",
-        "desk cleanup day",
-        "tidying up a little"
-      ],
-      "smoke": [
-        "the floor runs itself 🚬",
-        "boss break.",
-        "thinking big thoughts 🚬",
-        "I DECLARE… a break"
-      ]
-    },
-    "suckUp": [
-      "already shipped {{done}} tasks, {{godName}}. raise? 🥺",
-      "{{done}} tasks done this week, boss!",
-      "great vision as always, boss!",
-      "I was JUST about to do exactly that!",
-      "love the tie today, {{godName}}",
-      "working hard, boss! 💪",
-      "best boss ever. genuinely."
-    ],
-    "cheer": [
-      "done! ✔",
-      "nailed it",
-      "that's a wrap",
-      "ship it 🚀",
-      "another one done",
-      "crushed it",
-      "in the books"
-    ],
     "mugs": {
       "empty": "no clean mugs left…",
       "brewing": "brewing a fresh one ☕",
@@ -1737,6 +1685,30 @@
   "appShell": {
     "closeDetail": "Close panel",
     "openDetail": "Open agent panel"
+  },
+  "floorInspector": {
+    "snapshotNotice": "Snapshot when opened; inspect again to refresh. Captured:",
+    "chooseTarget": "Inspect a floor target",
+    "title": "Floor inspector",
+    "hover": "Click to inspect",
+    "agent": "Agent",
+    "activity": "Last recorded activity",
+    "desk": "Desk",
+    "screen": "Screen",
+    "rooms": { "operations": "Operations", "engineering": "Engineering", "briefing": "Briefing", "deployments": "Deployments", "rest": "Rest" },
+    "breaker": "Breaker readings",
+    "handoffs": "Real handoffs",
+    "ci": "Identified repository CI",
+    "tasks": "Assigned tasks",
+    "reading": "Reading",
+    "available": "available",
+    "lastRead": "last valid read",
+    "noData": "No data",
+    "openAgent": "Open agent panel",
+    "openThread": "Open thread",
+    "openRun": "Open CI run",
+    "ciDisclaimer": "A passing CI run does not prove a deployment.",
+    "noConversation": "No conversation data"
   },
   "visitorMode": {
     "badge": "VISITOR MODE",

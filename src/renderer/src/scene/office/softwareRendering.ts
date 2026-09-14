@@ -136,6 +136,13 @@ export function isSoftwareRenderer(renderer: string | null | undefined): boolean
 export const SOFTWARE_FRAME_CAP = 8;
 
 /**
+ * Maximum cadence for the opt-in change-driven software mode. The ticker is
+ * stopped between invalidations; this cap only bounds a real transition (for
+ * example, an avatar walking to a newly observed state) while it is active.
+ */
+export const SOFTWARE_ECONOMY_FRAME_CAP = 2;
+
+/**
  * Backing-store scale while software-rendering.
  *
  * The floor normally asks for `max(devicePixelRatio, 2)` so the half-scale
@@ -188,6 +195,12 @@ export interface RenderBudget {
   software: boolean;
   /** The renderer string the decision was made on, for the log line. */
   renderer: string | null;
+  /** The explicit operating mode selected for this floor. */
+  mode: 'unknown' | 'hardware' | 'software-capped' | 'software-economy';
+  /** True when the ticker is stopped between state changes. */
+  changeDriven: boolean;
+  /** True when continuous ambient animation is allowed. */
+  ambientAnimation: boolean;
 }
 
 /**
@@ -197,12 +210,20 @@ export interface RenderBudget {
  * hardware branch is byte-for-byte the expression OfficeFloor used before this
  * module existed, so a healthy machine renders exactly what it always did.
  */
-export function renderBudget(renderer: string | null, devicePixelRatio: number): RenderBudget {
+export function renderBudget(
+  renderer: string | null,
+  devicePixelRatio: number,
+  economyEnabled = false,
+): RenderBudget {
   const software = isSoftwareRenderer(renderer);
+  const economy = software && economyEnabled;
   return {
     resolution: software ? SOFTWARE_RESOLUTION : Math.max(devicePixelRatio || 1, 2),
-    maxFPS: software ? SOFTWARE_FRAME_CAP : 0,
+    maxFPS: economy ? SOFTWARE_ECONOMY_FRAME_CAP : software ? SOFTWARE_FRAME_CAP : 0,
     software,
     renderer,
+    mode: economy ? 'software-economy' : software ? 'software-capped' : renderer?.trim() ? 'hardware' : 'unknown',
+    changeDriven: economy,
+    ambientAnimation: !economy,
   };
 }

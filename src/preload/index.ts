@@ -16,6 +16,8 @@ import type { HookEvent } from '../shared/hookEvents';
 export type { HookEvent } from '../shared/hookEvents';
 import type { RendererErrorPayload } from '../shared/rendererErrors';
 export type { RendererErrorPayload } from '../shared/rendererErrors';
+import type { OfficeReading } from '../shared/officeReadings';
+export type { OfficeReading, OfficeReadingAvailability } from '../shared/officeReadings';
 import type { LocalSkill, CatalogSkill } from '../main/skills';
 export type { LocalSkill, CatalogSkill } from '../main/skills';
 import type {
@@ -402,6 +404,11 @@ export interface HarnessConfig {
    *  screen-share viewing. Default OFF. Mirrors main + renderer HarnessConfig
    *  so updateConfig({ visitorMode }) is typed across the bridge. */
   visitorMode?: boolean;
+  /** Opt-in change-driven floor rendering for software backends. Default OFF.
+   *  Mirrors src/main/config.ts and the renderer store. */
+  softwareEconomyEnabled?: boolean;
+  /** Opt-in read-only click inspection for the office floor. Default OFF. */
+  floorInspectionEnabled?: boolean;
   /** Auto-update from GitHub releases (default ON; Settings → General). */
   autoUpdate?: boolean;
   /** Anonymous product analytics (default ON, opt-out; see TELEMETRY.md).
@@ -929,6 +936,9 @@ const api = {
     ipcRenderer.invoke('hive:setAgentHold', id, hold),
   hiveBoard: (): Promise<string> => ipcRenderer.invoke('hive:board'),
   hiveTasks: (): Promise<unknown> => ipcRenderer.invoke('hive:tasks'),
+  /** Task ledger plus read provenance; keeps `hiveTasks` backwards compatible. */
+  hiveTaskReading: (): Promise<OfficeReading<unknown>> => ipcRenderer.invoke('hive:taskReading'),
+  hiveLogReading: (n?: number): Promise<OfficeReading<unknown[]>> => ipcRenderer.invoke('hive:logReading', n),
   /** Office relationship experiment — every known DIRECTED edge's decayed
    *  state. A settled pair appears twice, once per direction. */
   officeRelSnapshot: (): Promise<OfficeRelSummary[]> =>

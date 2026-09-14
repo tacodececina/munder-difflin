@@ -25,10 +25,10 @@
 export type BreakSpot = 'coffee' | 'vending' | 'snack' | 'table';
 
 /** What a pair's café moment is about, derived from both agents' live status.
- *  Priority-ordered: concern beats celebration beats ordinary small talk.
- *  Callers pass each agent's live `status` string (Agent['status']); anything
- *  that isn't 'looping'/'blocked'/'success' — including custom or unknown
- *  statuses — falls through to 'generic'. */
+ *  Only blocked/looping status warrants a check-in. `success` can mean a
+ *  completed agent turn without a closed ledger task, so it remains generic.
+ *  Celebrations require task_done evidence at the floor's completion boundary;
+ *  this status classifier never supplies that evidence. */
 export type CafeMood = 'breaker-checkin' | 'celebration' | 'generic';
 
 export function cafeMoodFor(speakerStatus?: string, partnerStatus?: string): CafeMood {
@@ -36,7 +36,6 @@ export function cafeMoodFor(speakerStatus?: string, partnerStatus?: string): Caf
     speakerStatus === 'looping' || partnerStatus === 'looping' ||
     speakerStatus === 'blocked' || partnerStatus === 'blocked'
   ) return 'breaker-checkin';
-  if (speakerStatus === 'success' || partnerStatus === 'success') return 'celebration';
   return 'generic';
 }
 

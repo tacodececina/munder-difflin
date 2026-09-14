@@ -122,6 +122,7 @@ export class Character {
   private overlay: Graphics;
   private statusGlyph: StatusGlyph = 'none';
   private glyphElapsed = 0;
+  private statusGlyphDirty = false;
   private onClick?: (agentId: string) => void;
 
   // ── Office-life effects (cheer / coffee / watering) ────────────────────────
@@ -142,6 +143,7 @@ export class Character {
   private smokeT = -1;                // -1 = not smoking (the boss's cigar)
   private smokeDur = 0;
   private onSmokeDone: (() => void) | null = null;
+  private economyMode = false;
 
   constructor(options: CharacterOptions) {
     this.agentId = options.agentId;
@@ -187,6 +189,28 @@ export class Character {
 
   getTilePosition(): { x: number; y: number } {
     return this.mapRenderer.projection.footToTile(this.px, this.py);
+  }
+
+  /** Apply the floor's explicit software-economy visual policy. Real work and
+   *  directed movement remain representable; ambient wandering and sprite
+   *  frame animation do not keep the renderer alive between changes. */
+  setEconomyMode(enabled: boolean): void {
+    this.economyMode = enabled;
+    this.sprite.setReducedMotion(enabled);
+    if (enabled) {
+      this.idleLoop = false;
+      this.wandering = false;
+    }
+  }
+
+  /** Whether this character still needs another floor frame to complete a
+   *  directed visual transition. Static status and idle poses do not. */
+  needsAnimationFrame(): boolean {
+    return this.state === 'walk'
+      || this.fadeDirection !== null
+      || this.cheerT >= 0
+      || this.waterT >= 0
+      || this.smokeT >= 0;
   }
 
   moveTo(tile: { x: number; y: number }): void {
@@ -308,6 +332,10 @@ export class Character {
   /** Roam the office between tasks. Picks random walkable tiles and strolls
    *  to them until the agent is given work again. */
   startWandering(): void {
+    if (this.economyMode) {
+      this.setIdle();
+      return;
+    }
     if (this.idleLoop && this.wandering) return; // already in the linger phase
     // (Re)enter the idle loop at its linger phase, then begin roaming.
     this.idleLoop = true;
@@ -398,6 +426,7 @@ export class Character {
     if (glyph === this.statusGlyph) return;
     this.statusGlyph = glyph;
     this.glyphElapsed = 0;
+    this.statusGlyphDirty = true;
     if (glyph === 'none') this.overlay.clear();
   }
 
@@ -615,18 +644,24 @@ export class Character {
     this.workGlow.x = this.px;
     this.workGlow.y = this.py - ts / 2;
     this.workGlow.zIndex = depth - 1;
-    if (this.glowOn) {
+    if (this.glowOn && !this.economyMode) {
       this.workGlowElapsed += dt;
       const phase = (Math.sin((this.workGlowElapsed * Math.PI) / 0.6) + 1) / 2;
       this.workGlow.alpha = (0.18 + 0.27 * phase) * this.sprite.container.alpha;
       this.workGlow.scale.set(0.95 + 0.15 * phase);
+    } else if (this.glowOn) {
+      this.workGlow.alpha = 0.3 * this.sprite.container.alpha;
+      this.workGlow.scale.set(1);
     } else {
       this.workGlow.alpha = 0;
       this.workGlowElapsed = 0;
     }
 
-    this.updateStatusGlyph(dt);
-    this.updateFx(dt);
+    if (!this.economyMode || heldByFx || this.statusGlyphDirty) {
+      this.updateStatusGlyph(dt);
+      this.statusGlyphDirty = false;
+    }
+    if (!this.economyMode || heldByFx) this.updateFx(dt);
   }
 
   /** True while parked in the seated pose at the HOME desk (not a café seat). */

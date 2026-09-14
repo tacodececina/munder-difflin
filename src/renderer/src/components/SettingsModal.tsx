@@ -226,6 +226,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     strongKeepalive?: boolean; audience?: string; autoMode?: boolean;
     defaultModel?: string; maxTurns?: number; semanticMemory?: boolean;
     visitorMode?: boolean;
+    floorInspectionEnabled?: boolean;
   };
   /**
    * ONE SAVE BUTTON.
@@ -281,6 +282,20 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     const next = !visitorMode;
     setVisitorMode(next);
     stage({ visitorMode: next } as Partial<HarnessConfig>);
+  };
+  /** Software fallback economy is explicit and opt-in. It affects only a
+   *  detected CPU renderer; a healthy GPU keeps the normal floor unchanged. */
+  const [softwareEconomy, setSoftwareEconomy] = useState<boolean>(cfgX.softwareEconomyEnabled === true);
+  const toggleSoftwareEconomy = (): void => {
+    const next = !softwareEconomy;
+    setSoftwareEconomy(next);
+    stage({ softwareEconomyEnabled: next });
+  };
+  const [floorInspection, setFloorInspection] = useState<boolean>(cfgX.floorInspectionEnabled === true);
+  const toggleFloorInspection = (): void => {
+    const next = !floorInspection;
+    setFloorInspection(next);
+    stage({ floorInspectionEnabled: next });
   };
   /**
    * UNATTENDED LAUNCH — open the last config instead of the launch picker.
@@ -1237,6 +1252,28 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                             </div>
                             <PixelButton variant={visitorMode ? 'primary' : 'secondary'} size="sm" onClick={toggleVisitorMode}>
                               {visitorMode ? t('common.on') : t('common.off')}
+                            </PixelButton>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>{t('settings.general.floorInspection')}</span>
+                              <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                {t('settings.general.floorInspectionDesc')}
+                              </span>
+                            </div>
+                            <PixelButton variant={floorInspection ? 'primary' : 'secondary'} size="sm" onClick={toggleFloorInspection}>
+                              {floorInspection ? t('common.on') : t('common.off')}
+                            </PixelButton>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>{t('settings.general.softwareEconomy')}</span>
+                              <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                {t('settings.general.softwareEconomyDesc')}
+                              </span>
+                            </div>
+                            <PixelButton variant={softwareEconomy ? 'primary' : 'secondary'} size="sm" onClick={toggleSoftwareEconomy}>
+                              {softwareEconomy ? t('common.on') : t('common.off')}
                             </PixelButton>
                           </div>
                           {/* Unattended launch. Sits with the environment
