@@ -240,6 +240,8 @@
       "floorInspectionDesc": "Muestra un inspector de solo lectura con lecturas reales del piso, escritorios, salas y enlaces. Desactivado por defecto.",
       "stationActivity": "Estaciones de actividad de herramientas",
       "stationActivityDesc": "Muestra solicitudes y resultados observados. Las solicitudes sostenidas con identificaci\u00f3n verificable pueden visitar una estaci\u00f3n. Desactivado por defecto.",
+      "movementCoordination": "Coordinar movimiento",
+      "movementCoordinationDesc": "Da prioridad a los bloqueos operativos y coordina cruces, esperas y cesi\u00f3n de paso. Desactivado por defecto.",
       "homeFolder": "Carpeta base",
       "environment": "Entorno",
       "keepAwake": "Mantener la Mac despierta mientras los agentes trabajan",
@@ -922,6 +924,7 @@
       "washing": "lavando la taza"
     },
     "activity": {
+      "movementRestricted": "Cortacircuitos: desplazamientos opcionales desactivados",
       "waiting": "esperando",
       "needsYou": "te necesita",
       "compacting": "compactando contexto",

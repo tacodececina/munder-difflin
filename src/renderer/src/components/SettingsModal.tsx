@@ -229,6 +229,8 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     floorInspectionEnabled?: boolean;
     /** Verifiable tool station visits. Default off. */
     stationActivityEnabled?: boolean;
+    /** Coordinated visual movement. Default off. */
+    movementCoordinationEnabled?: boolean;
   };
   /**
    * ONE SAVE BUTTON.
@@ -292,6 +294,12 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     const next = !softwareEconomy;
     setSoftwareEconomy(next);
     stage({ softwareEconomyEnabled: next });
+  };
+  const [movementCoordination, setMovementCoordination] = useState<boolean>(cfgX.movementCoordinationEnabled === true);
+  const toggleMovementCoordination = (): void => {
+    const next = !movementCoordination;
+    setMovementCoordination(next);
+    stage({ movementCoordinationEnabled: next });
   };
   const [stationActivity, setStationActivity] = useState<boolean>(cfgX.stationActivityEnabled === true);
   const toggleStationActivity = (): void => {
@@ -1282,6 +1290,17 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                             </div>
                             <PixelButton variant={stationActivity ? 'primary' : 'secondary'} size="sm" onClick={toggleStationActivity}>
                               {stationActivity ? t('common.on') : t('common.off')}
+                            </PixelButton>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>{t('settings.general.movementCoordination')}</span>
+                              <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                {t('settings.general.movementCoordinationDesc')}
+                              </span>
+                            </div>
+                            <PixelButton variant={movementCoordination ? 'primary' : 'secondary'} size="sm" onClick={toggleMovementCoordination}>
+                              {movementCoordination ? t('common.on') : t('common.off')}
                             </PixelButton>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>

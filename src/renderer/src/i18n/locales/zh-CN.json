@@ -240,6 +240,8 @@
       "floorInspectionDesc": "\u663e\u793a\u771f\u5b9e\u5730\u9762\u8bfb\u6570\u3001\u5de5\u4f4d\u3001\u623f\u95f4\u548c\u94fe\u63a5\u7684\u53ea\u8bfb\u68c0\u67e5\u5668\u3002\u9ed8\u8ba4\u5173\u95ed\u3002",
       "stationActivity": "\u5de5\u5177\u6d3b\u52a8\u7ad9\u70b9",
       "stationActivityDesc": "\u663e\u793a\u89c2\u5bdf\u5230\u7684\u5de5\u5177\u8bf7\u6c42\u548c\u7ed3\u679c\u3002\u6301\u7eed\u4e14\u53ef\u5173\u8054\u7684\u8bf7\u6c42\u53ef\u4ee5\u8bbf\u95ee\u7ad9\u70b9\u3002\u9ed8\u8ba4\u5173\u95ed\u3002",
+      "movementCoordination": "\u534f\u8c03\u79fb\u52a8",
+      "movementCoordinationDesc": "\u4f18\u5148\u5904\u7406\u64cd\u4f5c\u963b\u585e\uff0c\u5e76\u534f\u8c03\u4ea4\u53c9\u3001\u7b49\u5f85\u548c\u8ba9\u884c\u3002\u9ed8\u8ba4\u5173\u95ed\u3002",
       "homeFolder": "主文件夹",
       "environment": "环境",
       "keepAwake": "智能体运行时保持 Mac 唤醒",
@@ -922,6 +924,7 @@
       "washing": "在洗杯子"
     },
     "activity": {
+      "movementRestricted": "断路器：已禁用可选移动",
       "waiting": "等待中",
       "needsYou": "需要你",
       "compacting": "正在压缩上下文",

@@ -240,6 +240,8 @@
       "floorInspectionDesc": "Show a read-only inspector for real floor readings, desks, rooms and links. Off by default.",
       "stationActivity": "Tool activity stations",
       "stationActivityDesc": "Show observed tool requests and outcomes. Sustained, correlated requests may visit a station. Off by default.",
+      "movementCoordination": "Coordinate movement",
+      "movementCoordinationDesc": "Give operational blocks priority and coordinate crossings, waiting and yielding. Off by default.",
       "homeFolder": "Home folder",
       "environment": "Environment",
       "keepAwake": "Keep Mac awake while agents run",
@@ -922,6 +924,7 @@
       "washing": "washing the mug"
     },
     "activity": {
+      "movementRestricted": "Circuit breaker: optional movement disabled",
       "waiting": "waiting",
       "needsYou": "needs you",
       "compacting": "compacting context",

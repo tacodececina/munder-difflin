@@ -1,6 +1,8 @@
 import { startStationActivity, type StationActivity } from './stationActivity';
 import type { StationDirector } from './stationDirector';
-import type { MovementDirector } from './movementDirector';
+import { createFloorMovement, type MovementDirector } from './movementDirector';
+import { createSpawnCoordinator, type SpawnCoordinator } from './spawnCoordinator';
+import { operationalMovementFloor } from './movementState';
 import { subscribeParserTools } from './toolActivityChannel';
 import { stationForTool } from '@shared/toolStation';
 import { useEffect, useRef, useState } from 'react';
@@ -246,6 +248,7 @@ export function OfficeFloor() {
   // tears down and rebuilds the whole scene on the new map/cast (see deps below).
   const officeTheme = useStore((s) => s.officeTheme);
   const softwareEconomyEnabled = useStore((s) => s.softwareEconomyEnabled);
+  const movementCoordinationEnabled = useStore((s) => s.movementCoordinationEnabled);
   const stationActivityEnabled = useStore((s) => s.stationActivityEnabled);
   const floorInspectionEnabled = useStore((s) => s.floorInspectionEnabled);
   const economyRenderRef = useRef<(() => void) | null>(null);
@@ -309,13 +312,18 @@ export function OfficeFloor() {
     let stationSession: StationActivity | null = null;
     const runtimes = new Map<string, Runtime>();
     const seatClaims = new Set<number>();
-    // Agents whose addCharacter() is mid-flight. It claims a seat synchronously
+    // Async texture loading and permanent seat claims have generation ownership.
+    // This replaces the old pending-spawn Set; no extra movement-off cache.
+    // The old loader claimed a seat synchronously
     // but only lands in `runtimes` after awaiting its sprite frames, so a
     // syncAgents() inside that window saw no runtime and started a SECOND build
     // for the same agent — burning another desk each time. With nine agents
     // booting at once that exhausted the named desks and pushed whoever came
     // last into the boardroom overflow seats.
-    const spawning = new Set<string>();
+    let spawns: SpawnCoordinator<Agent> | null = null;
+    let tearingDown = false;
+    let coordinatedMovement: MovementDirector | null = null;
+    const movementBlocks = movementCoordinationEnabled ? new Set<string>() : null;
     // In-flight message envelopes (sender desk → recipient desk). Capped so a
     // broadcast doesn't bury the floor in paper.
     const envelopes: MessageEnvelope[] = [];
@@ -415,7 +423,8 @@ export function OfficeFloor() {
       app.stage.addChild(world);
 
       const mapRenderer = new TiledMapRenderer(resolveThemeMap(theme), tilesetTextures);
-      let movement: MovementDirector | null = null;
+      coordinatedMovement = createFloorMovement(movementCoordinationEnabled, () => mapRenderer);
+      let movement: MovementDirector | null = coordinatedMovement;
       world.addChild(mapRenderer.getContainer());
       const charLayer = mapRenderer.getCharacterContainer();
       const tileCount = mapRenderer.getContainer().children.reduce(
@@ -523,7 +532,14 @@ export function OfficeFloor() {
       // status pin and the cost meter already read.
       const offBreaker = window.cth.onBreakerState?.((s) => {
         floorWeather.record(s);
-        stations?.setBreaker(s.agentId, s.level === 'constrained' || s.level === 'stopped');
+        const blocked = s.level === 'constrained' || s.level === 'stopped';
+        stations?.setBreaker(s.agentId, blocked);
+        if (movementBlocks) {
+          if (blocked) movementBlocks.add(s.agentId); else movementBlocks.delete(s.agentId);
+          const rt = runtimes.get(s.agentId);
+          const agent = useStore.getState().agents.find(a => a.id === s.agentId);
+          if (rt && agent) applyState(agent, rt, true);
+        }
         refreshEconomyWeather();
         paintOps();
         requestEconomyRender();
@@ -1352,7 +1368,7 @@ export function OfficeFloor() {
         if (c.isCarryingCup()) {
           rt.cupCarryHome = true;   // whatever happened, a held cup goes home
           c.hideThought();
-          c.sitAtDesk(false);
+          c.sitAtDesk(false, 'cafe');
         } else {
           c.hideThought();
           c.startWandering();
@@ -1393,7 +1409,7 @@ export function OfficeFloor() {
             drawTray();
             rt.run = { phase: 'placing', timer: 0 };
           }
-        });
+        }, () => releaseRun(rt), 'cafe');
       };
 
       /** Cancel a coffee run (real work / teardown). A held mug rides along to
@@ -1567,11 +1583,11 @@ export function OfficeFloor() {
         releaseBreak(rt);
         rt.character.hideThought();
         const agent = agentById(id);
-        if (agent?.isGod) { rt.character.sitAtDesk(true); return; }
+        if (agent?.isGod) { rt.character.sitAtDesk(true, 'cafe'); return; }
         const c = rt.character;
         if (!arrived) {
           // Never made it to the café (watchdog) — a held mug still goes home.
-          if (c.isCarryingCup()) { rt.cupCarryHome = true; c.sitAtDesk(false); }
+          if (c.isCarryingCup()) { rt.cupCarryHome = true; c.sitAtDesk(false, 'cafe'); }
           else c.startWandering();
           return;
         }
@@ -1606,7 +1622,7 @@ export function OfficeFloor() {
           // Bail if the break was cancelled or reassigned while walking.
           if (!rt.brk || rt.brk.spotIdx !== idx) return;
           if (spot.seated) c.sitInPlace(spot.facing);
-          else { c.setIdle(); c.faceDirection(spot.facing); }
+          else { c.setIdle('cafe'); c.faceDirection(spot.facing); }
           rt.brk.phase = 'lingering';
           rt.brk.timer = 8 + Math.random() * 8;   // 8–16s of lingering
           // Drop whatever status bubble the avatar walked in with: a break is a
@@ -1614,7 +1630,7 @@ export function OfficeFloor() {
           // is here AND the director has an exchange written for the two of them.
           c.hideThought();
           maybePairChat(id, rt, idx);
-        });
+        }, () => releaseBreak(rt), 'cafe');
       };
 
       const startBreak = (id: string, rt: Runtime): void => {
@@ -2034,12 +2050,12 @@ export function OfficeFloor() {
             const wasGod = !!agent!.isGod;
             releaseErrand(rt!);
             c.hideThought();
-            if (wasGod) c.sitAtDesk(true);  // the boss returns to his throne
+            if (wasGod) c.sitAtDesk(true, 'errand');  // the boss returns to his throne
             else c.startWandering();
           };
           if (spot.kind === 'water') c.startWatering(spot.duration, finish);
           else if (spot.kind === 'smoke') c.startSmoking(spot.duration, finish);
-        });
+        }, () => releaseErrand(rt!), 'errand');
       };
 
       // ─── Coffee delivery + desk screens, every frame ───────────────────────
@@ -2376,11 +2392,12 @@ export function OfficeFloor() {
       // support: one tiny Graphics per active move, repositioned every tick.
       const carriedNotes = new Map<string, Graphics>();
 
-      const cancelBoardMove = (actorId: string): void => {
+      const cancelBoardMove = (actorId: string, restoreState = true): void => {
         lifecycle.invalidate(`move:${actorId}`);
         const active = activeMoves.get(actorId);
         if (active?.timer) lifecycle.clear(active.timer);
         activeMoves.delete(actorId);
+        if (active) { visualTasks.set(active.taskId, active.after); redrawVisual(); }
         for (let i = moveQueue.length - 1; i >= 0; i--) {
           if (moveQueue[i].actorId === actorId) moveQueue.splice(i, 1);
         }
@@ -2389,7 +2406,7 @@ export function OfficeFloor() {
         if (note) { note.parent?.removeChild(note); note.destroy(); carriedNotes.delete(actorId); }
         const rt = runtimes.get(actorId);
         const agent = agentById(actorId);
-        if (rt && agent) { rt.character.hideThought(); applyState(agent, rt, true); }
+        if (restoreState && rt && agent) { rt.character.hideThought(); applyState(agent, rt, true); }
       };
 
       const redrawVisual = (): void => {
@@ -2425,7 +2442,11 @@ export function OfficeFloor() {
       const startMove = (mv: BoardMove): void => {
         if (mv.channel && mv.token !== undefined && !lifecycle.isCurrent(mv.channel, mv.token)) return;
         const rt = runtimes.get(mv.actorId);
-        if (!rt || stations?.owns(mv.actorId)) { finishMove(mv, undefined); return; }
+        const actor = agentById(mv.actorId);
+        const operational = movementCoordinationEnabled && actor
+          && (operationalMovementFloor(actor.status, movementBlocks?.has(actor.id) === true)
+            || ['working', 'thinking', 'waiting'].includes(actor.status));
+        if (!rt || operational || stations?.owns(mv.actorId)) { finishMove(mv, undefined); return; }
         busyActors.add(mv.actorId);
         mv.startedAt = Date.now();
         activeMoves.set(mv.actorId, mv);
@@ -2450,13 +2471,13 @@ export function OfficeFloor() {
               if (!rt2) { finishMove(mv, undefined); return; }
               visualTasks.set(mv.taskId, { ...mv.after, status: '__carried__' });
               redrawVisual();
-              rt2.character.walkToAndThen(rt2.character.getDeskTile(), () => finishMove(mv, rt2));
+              rt2.character.walkToAndThen(rt2.character.getDeskTile(), () => finishMove(mv, rt2), () => finishMove(mv, undefined), 'card');
               // watchdog below also covers this leg
             } else {
               finishMove(mv, runtimes.get(mv.actorId));
             }
           }, 900);
-        });
+        }, () => finishMove(mv, undefined), 'card');
       };
 
       const updateBoardMoves = (dt: number): void => {
@@ -2685,9 +2706,7 @@ export function OfficeFloor() {
       const taskBoardPoll = lifecycle.interval(() => { void pollTaskBoard(); }, 5000);
       (app as any).__taskBoardPoll = taskBoardPoll;
 
-      const addCharacter = async (agent: Agent) => {
-        spawning.add(agent.id);
-        try {
+      const loadCharacter = async (agent: Agent) => {
         // A custom character (id `custom:<uuid>`) is never a key of
         // theme.cast.byName — its recipe lives in the customCast registry, not
         // the fixed roster. Resolve it explicitly so getFrames() below receives
@@ -2701,18 +2720,15 @@ export function OfficeFloor() {
           ? agent.character
           : (theme.cast.byName[agent.character] ? agent.character : theme.cast.defaultCharacter);
         const member = theme.cast.byName[charName] ?? theme.cast.byName[theme.cast.defaultCharacter];
-        const seatIndex = claimSeat(agent);
+        const frames = await theme.cast.getFrames(charName);
+        return { custom, charName, member, frames };
+      };
+      const attachCharacter = (agent: Agent, prepared: Awaited<ReturnType<typeof loadCharacter>>, seatIndex: number | null) => {
+        const { custom, charName, member, frames } = prepared;
         const seatTile: Tile = (seatIndex != null ? seatTiles[seatIndex] : undefined)
           ?? mapRenderer.getSpawnPoint('entrance')
           ?? { x: 2, y: 2 };
         const waitTile = waitTiles[(seatIndex ?? 0) % waitTiles.length];
-        const frames = await theme.cast.getFrames(charName);
-        // Bail if the agent was removed (or scene torn down) while loading.
-        if (mountIdRef.current !== mountId) return;
-        if (!useStore.getState().agents.some((a) => a.id === agent.id)) {
-          if (seatIndex != null) seatClaims.delete(seatIndex);
-          return;
-        }
         const character = new Character({
           agentId: agent.id,
           mapRenderer,
@@ -2726,10 +2742,12 @@ export function OfficeFloor() {
             useStore.getState().select(id);
           },
         });
-        if (movement && !character.setMovementDirector(movement)) {
-          character.destroy();
-          if (seatIndex != null) seatClaims.delete(seatIndex);
-          return;
+        // Publish ownership before registration or graphics attachment so the
+        // coordinator can clean up any partially attached character.
+        const rt: Runtime = { character, seatIndex, waitTile, charName };
+        runtimes.set(agent.id, rt);
+        if (movement && !character.setMovementDirector(movement, movementCoordinationEnabled)) {
+          throw new Error('No free transit tile for character spawn');
         }
         character.setEconomyMode(economyMode);
         character.show(charLayer);
@@ -2740,7 +2758,6 @@ export function OfficeFloor() {
           bounds: agentVisualRect(character.getPixelPosition()),
           target: { kind: 'agent', agentId: agent.id },
         });
-        const rt: Runtime = { character, seatIndex, waitTile, charName };
         // Standard desks paint the 2×2 PC monitor two rows above the seat —
         // give those a DeskScreen (lights up while seated) and a cup spot
         // beside the monitor, exactly where the tileset's baked-in mug used
@@ -2773,20 +2790,19 @@ export function OfficeFloor() {
             if (deskDone) rt.shelf.setDoneCount(deskDone.get(agent.id) ?? 0);
           }
         }
-        runtimes.set(agent.id, rt);
         stationSession?.connections.bind(agent.id, agent.ptyId);
         applyState(agent, rt, true);
         requestEconomyRender();
-        } finally { spawning.delete(agent.id); }
       };
 
       const removeCharacter = (id: string) => {
         const rt = runtimes.get(id);
         if (!rt) return;
+        movementBlocks?.delete(id);
         stations?.disconnect(id);
         stationSession?.connections.remove(id);
         interactions?.unregister(`agent:${id}`);
-        cancelBoardMove(id);
+        cancelBoardMove(id, false);
         releaseBreak(rt);                // free any café seat it was holding
         releaseErrand(rt);               // and any idle errand it was running
         releaseRun(rt);                  // and any coffee run in progress
@@ -2800,10 +2816,9 @@ export function OfficeFloor() {
           cleanCups = Math.min(MAX_CUPS, cleanCups + 1);
           drawTray();
         }
-        if (rt.seatIndex != null) seatClaims.delete(rt.seatIndex);
         rt.screen?.destroy();
         rt.shelf?.destroy();   // the trinkets leave with the desk's owner
-        if (stationActivityEnabled) rt.character.destroy();
+        if (tearingDown || movementCoordinationEnabled || stationActivityEnabled) rt.character.destroy();
         else {
           rt.character.hide(0);
           lifecycle.timeout(() => rt.character.destroy(), 700);
@@ -2850,6 +2865,20 @@ export function OfficeFloor() {
         rt.prevPrompt = agent.lastPrompt;
 
         const c = rt.character;
+        if (movementCoordinationEnabled) {
+          const floor = operationalMovementFloor(agent.status, movementBlocks?.has(agent.id) === true);
+          c.setMovementFloor(floor);
+          if (floor || ['working', 'thinking', 'waiting'].includes(agent.status)) {
+            if (activeMoves.has(agent.id)) cancelBoardMove(agent.id, false);
+          }
+          if (floor) { releaseBreak(rt); releaseErrand(rt); releaseRun(rt); }
+          if (movementBlocks?.has(agent.id)) {
+            c.setStatusGlyph('looping');
+            c.sitAtDesk(false, 'blocked');
+            c.showThought(t('office.activity.movementRestricted'));
+            return;
+          }
+        }
         if (stationActivityEnabled) {
           if (agent.status === 'blocked' || agent.status === 'looping' || agent.status === 'compacting' || agent.status === 'ghost') {
             stations?.block(agent.id);
@@ -2921,20 +2950,20 @@ export function OfficeFloor() {
           case 'blocked':
             c.setStatusGlyph('blocked');
             c.showThought(thought(agent, t('office.activity.needsYou')));
-            c.walkToTile(rt.waitTile);
+            c.walkToTile(rt.waitTile, 'blocked');
             break;
           case 'compacting':
             // #5C — mid-/compact: stay put at the desk, "boxing up" glyph + thought,
             // so an agent compacting context reads as busy rather than frozen.
             c.setStatusGlyph('compacting');
-            c.sitAtDesk(true);
+            c.sitAtDesk(true, 'blocked');
             c.showThought(thought(agent, t('office.activity.compacting')));
             break;
           case 'looping':
             // #5C — circuit-breaker armed (#6): hold position with the spinning
             // warning glyph so a runaway agent is visible on the floor.
             c.setStatusGlyph('looping');
-            c.sitAtDesk(false);
+            c.sitAtDesk(false, 'blocked');
             c.showThought(thought(agent, t('office.activity.looping')));
             break;
           case 'success':
@@ -2946,7 +2975,7 @@ export function OfficeFloor() {
           case 'ghost':
             c.setStatusGlyph('none');
             c.hideThought();
-            c.setIdle();
+            c.setIdle('blocked');
             break;
           case 'idle':
           default:
@@ -2960,14 +2989,10 @@ export function OfficeFloor() {
 
       const syncAgents = () => {
         const { agents } = useStore.getState();
-        const present = new Set(agents.map((a) => a.id));
-        for (const id of Array.from(runtimes.keys())) {
-          if (!present.has(id)) removeCharacter(id);
-        }
+        spawns?.sync(agents);
         for (const agent of agents) {
           const rt = runtimes.get(agent.id);
-          if (!rt) { if (!spawning.has(agent.id)) void addCharacter(agent); }
-          else {
+          if (rt) {
             stationSession?.connections.bind(agent.id, agent.ptyId);
             applyState(agent, rt);
           }
@@ -2977,6 +3002,7 @@ export function OfficeFloor() {
 
       stationSession = startStationActivity(stationActivityEnabled, () => ({
         map: mapRenderer,
+        movement: coordinatedMovement ?? undefined,
         onHook: callback => window.cth.onHiveHookEvent(callback),
         onParser: subscribeParserTools,
         onExit: (ptyId, callback) => window.cth.onPtyExit(ptyId, callback),
@@ -2993,7 +3019,7 @@ export function OfficeFloor() {
             const rt = runtimes.get(id);
             if (!rt) return;
             cancelBoardMove(id); releaseBreak(rt); releaseErrand(rt); releaseRun(rt);
-            rt.character.sitAtDesk(false);
+            rt.character.sitAtDesk(false, 'station');
             const key = event.provenance === 'parser' ? 'observed' : event.toolPhase ?? 'observed';
             // Isolate provider tool names inside RTL sentences as well.
             const label = t(`office.stationActivity.${key}`, { tool: `\u2068${event.tool ?? ''}\u2069` });
@@ -3006,21 +3032,30 @@ export function OfficeFloor() {
             if (!rt) return false;
             rt.character.walkToAndThen(spot.stand, () => {
               if (!isCurrent()) return;
-              rt.character.setIdle(); rt.character.faceDirection(spot.facing);
+              rt.character.setIdle('station'); rt.character.faceDirection(spot.facing);
               requestEconomyRender();
-            }, failed);
+            }, failed, 'station');
             requestEconomyRender();
             return true;
           },
           cancel: (id) => {
             const character = runtimes.get(id)?.character;
-            character?.cancelMovement(); character?.sitAtDesk(false);
+            character?.cancelMovement('station'); character?.sitAtDesk(false, 'station');
             requestEconomyRender();
           }
         }
       }));
       stations = stationSession?.director ?? null;
-      movement = stationSession?.movement ?? null;
+      movement = coordinatedMovement ?? stationSession?.movement ?? null;
+      spawns = createSpawnCoordinator({
+        keyOf: (agent: Agent) => agent.id,
+        reserve: claimSeat,
+        release: (seat: number | null) => { if (seat != null) seatClaims.delete(seat); },
+        build: loadCharacter,
+        attach: (agent, prepared, context) => attachCharacter(agent, prepared, context.seat),
+        detach: removeCharacter,
+        onError: (error, id) => console.warn('[office] character spawn failed', id, error),
+      });
       syncAgents();
 
       let lastSelected: string | null = useStore.getState().selectedId;
@@ -3301,7 +3336,11 @@ export function OfficeFloor() {
 
     return () => {
       if (floorInspectionEnabled) window.dispatchEvent(new Event('cth:floor-inspection-reset'));
+      tearingDown = true;
       stationSession?.dispose(); stationSession = null; stations = null;
+      spawns?.teardown(); spawns = null;
+      coordinatedMovement?.dispose(); coordinatedMovement = null;
+      movementBlocks?.clear();
       for (const rt of runtimes.values()) rt.character.destroy();
       runtimes.clear();
       lifecycle.dispose();
@@ -3342,7 +3381,7 @@ export function OfficeFloor() {
       appRef.current = null;
       while (host.firstChild) host.removeChild(host.firstChild);
     };
-  }, [officeTheme, glGeneration, i18n.language, softwareEconomyEnabled, floorInspectionEnabled, stationActivityEnabled]);
+  }, [officeTheme, glGeneration, i18n.language, softwareEconomyEnabled, floorInspectionEnabled, stationActivityEnabled, movementCoordinationEnabled]);
 
   return (
     <div

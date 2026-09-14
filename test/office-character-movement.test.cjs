@@ -134,3 +134,82 @@ test('cancellation callbacks may issue a newer command without being overwritten
   assert.deepEqual(outcomes, ['latest']);
   assert.deepEqual(c.getTilePosition(), tile(0, 2));
 });
+
+test('command authority is allocated only when explicitly enabled', () => {
+  const legacy = character('legacy'), coordinated = character('coordinated');
+  const d = new MovementDirector(map);
+  legacy.setMovementDirector(d);
+  coordinated.setMovementDirector(d, true);
+  assert.equal(legacy.movementCommands, null);
+  assert.ok(coordinated.movementCommands);
+});
+
+test('ambient wandering cannot disturb a directed work command', () => {
+  const c = character(), d = new MovementDirector(map), outcomes = [];
+  c.setMovementDirector(d, true);
+  c.walkToAndThen(tile(4), () => outcomes.push('work-arrived'), undefined, 'work');
+  c.startWandering();
+  assert.equal(c.idleLoop, false);
+  assert.equal(c.wandering, false);
+  settle(c);
+  assert.deepEqual(outcomes, ['work-arrived']);
+  assert.equal(c.movementCommands.activeOwner, null);
+});
+
+test('a blocked movement floor persists after arrival and rejects later work', () => {
+  const c = character(), d = new MovementDirector(map), outcomes = [];
+  c.setMovementDirector(d, true);
+  c.setMovementFloor('blocked');
+  c.walkToAndThen(tile(2), () => outcomes.push('blocked-arrived'), undefined, 'blocked');
+  settle(c);
+  c.walkToAndThen(tile(4), () => outcomes.push('wrong-work'), reason => outcomes.push(`work-${reason}`), 'work');
+  settle(c);
+  assert.deepEqual(outcomes, ['blocked-arrived', 'work-cancelled']);
+  assert.deepEqual(c.getTilePosition(), tile(2));
+});
+
+test('raising the movement floor cancels the old route after its in-flight step', () => {
+  const c = character(), d = new MovementDirector(map), outcomes = [];
+  c.setMovementDirector(d, true);
+  c.walkToAndThen(tile(4), () => outcomes.push('wrong-work'), reason => outcomes.push(`work-${reason}`), 'work');
+  c.updateWalk(0.05);
+  c.setMovementFloor('blocked');
+  settle(c);
+  assert.deepEqual(outcomes, ['work-cancelled']);
+  assert.deepEqual(c.getTilePosition(), tile(1));
+});
+
+test('polling the same reserved physical step reuses the Character path array', () => {
+  const c = character(), d = new MovementDirector(map);
+  c.setMovementDirector(d, true);
+  c.walkToTile(tile(4), 'blocked');
+  c.updateWalk(0.001);
+  const pendingPath = c.path;
+  c.updateWalk(0.001);
+  assert.equal(c.path, pendingPath);
+});
+
+test('a higher desk command replaces a lower command waiting at the desk', () => {
+  let now = 0;
+  const c = character('a', tile(0, 1));
+  const d = new MovementDirector(map, { now: () => now, maxWaitMs: 1000 });
+  c.setMovementDirector(d, true);
+  for (let y = 0; y < 3; y++) d.register(`block-${y}`, tile(1, y));
+  const outcomes = [];
+  c.walkToAndThen(tile(4, 1), () => outcomes.push('wrong-card'), reason => outcomes.push(`card-${reason}`), 'card');
+  assert.equal(d.nextStep('a'), null);
+  c.sitAtDesk(true, 'work');
+  assert.deepEqual(outcomes, ['card-cancelled']);
+  assert.equal(c.movementCommands.activeOwner, null);
+  assert.equal(c.isSitting(), true);
+});
+
+test('a persistent blocked floor rejects setIdle even when no command is active', () => {
+  const c = character(), d = new MovementDirector(map);
+  c.setMovementDirector(d, true);
+  c.setMovementFloor('blocked');
+  c.sitAtDesk(false, 'blocked');
+  assert.equal(c.isSitting(), true);
+  c.setIdle('work');
+  assert.equal(c.isSitting(), true);
+});

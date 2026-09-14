@@ -351,6 +351,8 @@ export interface HarnessConfig {
   floorInspectionEnabled?: boolean;
   /** Verifiable tool station visits. Default off. */
   stationActivityEnabled?: boolean;
+  /** Coordinated visual movement. Default off. */
+  movementCoordinationEnabled?: boolean;
   /** Auto-update from GitHub releases (v0.3.4). Default ON. Packaged builds
    *  check on boot + every ~6h, download in the background, and show a
    *  "restart to update" toast — installation is always user-initiated. OFF
@@ -684,6 +686,7 @@ const DEFAULTS: HarnessConfig = {
   softwareEconomyEnabled: false,
   floorInspectionEnabled: false,
   stationActivityEnabled: false,
+  movementCoordinationEnabled: false,
   autoUpdate: true,
   telemetryEnabled: true,
   multiWindow: true,

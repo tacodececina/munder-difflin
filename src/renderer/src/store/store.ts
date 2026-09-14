@@ -343,10 +343,12 @@ interface State {
    *  fallback behavior. */
   softwareEconomyEnabled: boolean;
   setSoftwareEconomyEnabled: (on: boolean) => void;
-  /** Mirror of config.floorInspectionEnabled. The floor creates no interaction
-   *  registry, hit-testing listener, or inspector bridge while this is false. */
+  movementCoordinationEnabled: boolean;
+  setMovementCoordinationEnabled: (on: boolean) => void;
   stationActivityEnabled: boolean;
   setStationActivityEnabled: (on: boolean) => void;
+  /** Mirror of config.floorInspectionEnabled. The floor creates no interaction
+   *  registry, hit-testing listener, or inspector bridge while this is false. */
   floorInspectionEnabled: boolean;
   setFloorInspectionEnabled: (on: boolean) => void;
   /** Mirror of config.webhookTriggers — the inbound HTTP endpoints. Webhooks are
@@ -1006,6 +1008,8 @@ export const useStore = create<State>((set, get) => ({
   setVisitorMode: (on) => set({ visitorMode: on }),
   softwareEconomyEnabled: false,
   setSoftwareEconomyEnabled: (on) => set({ softwareEconomyEnabled: on }),
+  movementCoordinationEnabled: false,
+  setMovementCoordinationEnabled: (on) => set({ movementCoordinationEnabled: on }),
   stationActivityEnabled: false,
   setStationActivityEnabled: (on) => set({ stationActivityEnabled: on }),
   floorInspectionEnabled: false,

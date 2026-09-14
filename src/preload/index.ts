@@ -411,6 +411,8 @@ export interface HarnessConfig {
   floorInspectionEnabled?: boolean;
   /** Verifiable tool station visits. Default off. */
   stationActivityEnabled?: boolean;
+  /** Coordinated visual movement. Default off. */
+  movementCoordinationEnabled?: boolean;
   /** Auto-update from GitHub releases (default ON; Settings → General). */
   autoUpdate?: boolean;
   /** Anonymous product analytics (default ON, opt-out; see TELEMETRY.md).

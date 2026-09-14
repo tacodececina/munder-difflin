@@ -4,6 +4,7 @@ import { findPath } from './pathfinding';
 import type { TiledMapRenderer } from './TiledMapRenderer';
 import { ThoughtBubble } from './ThoughtBubble';
 import type { MovementDirector } from './movementDirector';
+import { MOVEMENT_PRIORITY, MovementCommands, type MovementOwner } from './movementCommands';
 
 // Adapted from shahar061/the-office (office/characters/Character.ts).
 // Differences: keyed by our dynamic agentId (not a fixed role); seat tile +
@@ -111,6 +112,7 @@ export class Character {
   private arrivalCallback: (() => void) | null = null;
   private failureCallback: ((reason: MovementFailure) => void) | null = null;
   private movementDirector: MovementDirector | null = null;
+  private movementCommands: MovementCommands | null = null;
   private movementGeneration = 0;
 
   public isVisible = false;
@@ -199,15 +201,19 @@ export class Character {
 
   /** Attach before show. Registration picks a free spawn without changing the
    * assigned home seat. Existing scenes may attach when the flag is enabled. */
-  setMovementDirector(director: MovementDirector | null): boolean {
-    if (director === this.movementDirector) return true;
+  setMovementDirector(director: MovementDirector | null, commandAuthority = false): boolean {
+    if (director === this.movementDirector
+      && commandAuthority === (this.movementCommands !== null)) return true;
     this.cancelMovement();
+    this.movementCommands?.dispose();
+    this.movementCommands = null;
     this.movementDirector?.release(this.agentId);
     this.movementDirector = null;
     if (!director) return true;
     const tile = director.register(this.agentId, this.getTilePosition());
     if (!tile) return false;
     this.movementDirector = director;
+    if (commandAuthority) this.movementCommands = new MovementCommands();
     const pixel = this.mapRenderer.projection.tileFootToWorld(tile.x, tile.y);
     this.px = pixel.x;
     this.py = pixel.y;
@@ -217,13 +223,27 @@ export class Character {
     return true;
   }
 
+  /** Keep an operational priority in force after its walk has arrived. */
+  setMovementFloor(owner: MovementOwner | null): void {
+    if (!this.movementCommands) return;
+    const previous = this.movementCommands.activeOwner;
+    const generation = this.movementGeneration;
+    this.movementCommands.setFloor(owner);
+    if (previous && !this.movementCommands.activeOwner
+      && generation === this.movementGeneration) this.cancelMovement();
+  }
+
   /** Invalidate the action immediately, but finish a reserved physical step so
    * neither its origin nor its edge becomes available underneath the sprite. */
-  cancelMovement(): void {
-    this.movementGeneration++;
-    const failure = this.failureCallback;
+  cancelMovement(owner?: MovementOwner): void {
+    if (owner && this.movementCommands?.activeOwner
+      && !this.movementCommands.owns(owner)) return;
+    const generation = ++this.movementGeneration;
+    const failure = this.movementCommands ? null : this.failureCallback;
     this.arrivalCallback = null;
     this.failureCallback = null;
+    this.movementCommands?.cancel(owner);
+    if (generation !== this.movementGeneration) return;
     this.pendingSit = false;
     this.pendingWork = null;
     this.idleLoop = false;
@@ -258,9 +278,10 @@ export class Character {
   }
 
   moveTo(tile: { x: number; y: number }, onArrive?: () => void,
-    onFailure?: (reason: MovementFailure) => void): void {
+    onFailure?: (reason: MovementFailure) => void, owner: MovementOwner = 'work'): void {
+    if (this.movementCommands?.request(owner, onArrive, onFailure) === false) return;
     const generation = ++this.movementGeneration;
-    const cancelled = this.failureCallback;
+    const cancelled = this.movementCommands ? null : this.failureCallback;
     this.arrivalCallback = null;
     this.failureCallback = null;
     this.path = [];
@@ -269,13 +290,14 @@ export class Character {
       onFailure?.('cancelled');
       return;
     }
-    const accepted = this.movementDirector?.request(this.agentId, tile);
+    const accepted = this.movementDirector?.request(this.agentId, tile,
+      this.movementCommands ? { priority: MOVEMENT_PRIORITY[owner] } : undefined);
     const first = this.movementDirector?.nextStep(this.agentId);
     const path = this.movementDirector
       ? (accepted ? (first ? [first] : []) : null)
       : findPath(this.mapRenderer, this.getTilePosition(), tile);
-    this.arrivalCallback = onArrive ?? null;
-    this.failureCallback = onFailure ?? null;
+    this.arrivalCallback = this.movementCommands ? null : onArrive ?? null;
+    this.failureCallback = this.movementCommands ? null : onFailure ?? null;
     if (path && (path.length > 0 || this.movementDirector?.status(this.agentId) === 'moving')) {
       this.sitting = false; // stand up before walking (clears the sit offset)
       this.sprite.setSeatedCrop(0); // show legs again while standing/walking
@@ -289,45 +311,55 @@ export class Character {
       this.pendingWork = null;
       this.arrivalCallback = null;
       this.failureCallback = null;
-      if (path) onArrive?.();
+      if (path) {
+        if (this.movementCommands) this.movementCommands.arrive(owner);
+        else onArrive?.();
+      } else if (this.movementCommands) this.movementCommands.fail('unreachable', owner);
       else onFailure?.('unreachable');
     }
   }
 
   walkToAndThen(tile: { x: number; y: number }, callback: () => void,
-    onFailure?: (reason: MovementFailure) => void): void {
+    onFailure?: (reason: MovementFailure) => void, owner: MovementOwner = 'work'): void {
+    if (this.movementCommands && !this.movementCommands.canRequest(owner)) {
+      onFailure?.('cancelled');
+      return;
+    }
     this.idleLoop = false; // a directed walk-and-do (e.g. a café break) owns the avatar
     this.wandering = false;
     this.pendingSit = false;
     this.pendingWork = null;
-    this.moveTo(tile, callback, onFailure);
+    this.moveTo(tile, callback, onFailure, owner);
   }
 
   /** Sit at the assigned desk, facing the monitor. Walks there first if away.
    *  `working` toggles the pulsing focus halo. This is the default pose — agents
    *  stay seated unless blocked. */
-  sitAtDesk(working: boolean): void {
+  sitAtDesk(working: boolean, owner: MovementOwner = 'work'): void {
+    if (this.movementCommands && !this.movementCommands.canRequest(owner)) return;
     this.idleLoop = false;     // an explicit desk command ends the idle loop
-    this.walkToDeskAndSit(working);
+    this.walkToDeskAndSit(working, owner);
   }
 
   /** Walk to the home desk (if away) and sit. `working` toggles the focus halo.
    *  Shared by sitAtDesk (real work/wait) and the idle-loop rest. */
-  private walkToDeskAndSit(working: boolean): void {
+  private walkToDeskAndSit(working: boolean, owner: MovementOwner = 'wander'): void {
+    if (this.movementCommands && !this.movementCommands.canRequest(owner)) return;
     this.glowOn = working;
     this.wandering = false;
     const t = this.getTilePosition();
     if (t.x === this.deskTile.x && t.y === this.deskTile.y
       && !this.movementDirector?.hasStep(this.agentId)) {
+      if (this.movementCommands && !this.movementCommands.request(owner)) return;
       const idleLoop = this.idleLoop;
-      this.cancelMovement();
+      this.cancelMovement(owner);
       this.idleLoop = idleLoop;
       this.applySit();
     } else {
       this.pendingSit = true;
       this.pendingWork = null;
       this.arrivalCallback = null;
-      this.moveTo(this.deskTile); // updateWalk() sits on arrival
+      this.moveTo(this.deskTile, undefined, undefined, owner); // updateWalk() sits on arrival
     }
   }
 
@@ -385,8 +417,12 @@ export class Character {
     }
   }
 
-  setIdle(): void {
-    this.cancelMovement();
+  setIdle(owner: MovementOwner = 'work'): void {
+    if (this.movementCommands) {
+      if (!this.movementCommands.canRequest(owner)) return;
+      if (!this.movementCommands.owns(owner) && !this.movementCommands.request(owner)) return;
+    }
+    this.cancelMovement(owner);
     this.idleLoop = false;
     this.state = this.path.length ? 'walk' : 'idle';
     this.pendingWork = null;
@@ -402,12 +438,13 @@ export class Character {
   /** Roam the office between tasks. Picks random walkable tiles and strolls
    *  to them until the agent is given work again. */
   startWandering(): void {
+    if (this.movementCommands && !this.movementCommands.canRequest('wander')) return;
     if (this.economyMode) {
-      this.setIdle();
+      this.setIdle('wander');
       return;
     }
     if (this.idleLoop && this.wandering) return; // already in the linger phase
-    this.cancelMovement();
+    this.cancelMovement('wander');
     // (Re)enter the idle loop at its linger phase, then begin roaming.
     this.idleLoop = true;
     this.idleLoopPhase = 'linger';
@@ -447,14 +484,15 @@ export class Character {
   }
 
   /** Walk to an arbitrary tile (e.g. the waiting area when blocked); stands on arrival. */
-  walkToTile(tile: { x: number; y: number }): void {
+  walkToTile(tile: { x: number; y: number }, owner: MovementOwner = 'blocked'): void {
+    if (this.movementCommands && !this.movementCommands.canRequest(owner)) return;
     this.idleLoop = false;
     this.pendingWork = null;
     this.pendingSit = false;
     this.sitting = false;
     this.wandering = false;
     this.arrivalCallback = null;
-    this.moveTo(tile);
+    this.moveTo(tile, undefined, undefined, owner);
   }
 
   repositionTo(tx: number, ty: number): void {
@@ -923,22 +961,27 @@ export class Character {
     if (this.movementDirector) {
       const step = this.movementDirector.nextStep(this.agentId);
       if (step) {
-        if (this.path.length !== 1 || this.path[0] !== step) this.path = [step];
+        const pending = this.path[0];
+        if (this.path.length !== 1 || !pending
+          || pending.x !== step.x || pending.y !== step.y) this.path = [step];
       } else if (this.path.length) this.path = [];
       if (!step && this.movementDirector.status(this.agentId) === 'moving') return;
       if (!step && this.movementDirector.status(this.agentId) === 'unreachable') {
         const failure = this.failureCallback;
+        const owner = this.movementCommands?.activeOwner ?? undefined;
         this.arrivalCallback = null;
         this.failureCallback = null;
         this.pendingSit = false;
         this.pendingWork = null;
-        this.setIdle();
-        failure?.('unreachable');
+        this.applyIdleStandingPose();
+        if (this.movementCommands) this.movementCommands.fail('unreachable', owner);
+        else failure?.('unreachable');
         return;
       }
     }
     if (this.path.length === 0) {
       const arrived = this.arrivalCallback;
+      const owner = this.movementCommands?.activeOwner ?? undefined;
       this.arrivalCallback = null;
       this.failureCallback = null;
       if (this.pendingSit) {
@@ -954,9 +997,10 @@ export class Character {
         this.idleWanderDelay = 1 + Math.random() * 3;
         this.sprite.setAnimation('idle', this.direction);
       } else {
-        this.setIdle();
+        this.applyIdleStandingPose();
       }
-      arrived?.();
+      if (this.movementCommands) this.movementCommands.arrive(owner);
+      else arrived?.();
       return;
     }
 
@@ -983,6 +1027,18 @@ export class Character {
     // four of them. See projection.ts.
     this.direction = this.mapRenderer.projection.facingForWorldStep(dx, dy);
     this.sprite.setAnimation('walk', this.direction);
+    this.sprite.setPosition(this.px, this.py);
+  }
+
+  private applyIdleStandingPose(): void {
+    this.state = 'idle';
+    this.pendingWork = null;
+    this.pendingSit = false;
+    this.sitting = false;
+    this.wandering = false;
+    this.glowOn = false;
+    this.sprite.setSeatedCrop(0);
+    this.sprite.setAnimation('idle', this.direction);
     this.sprite.setPosition(this.px, this.py);
   }
 
@@ -1047,7 +1103,7 @@ export class Character {
       if ((tx !== cur.x || ty !== cur.y) && this.mapRenderer.isWalkable(tx, ty)) {
         if (!biased) {
           const wasWandering = this.wandering;
-          this.moveTo({ x: tx, y: ty });   // moveTo() leaves state='walk'
+          this.moveTo({ x: tx, y: ty }, undefined, undefined, 'wander'); // moveTo() leaves state='walk'
           this.wandering = wasWandering;   // keep wandering through the walk
           return;
         }
@@ -1060,13 +1116,15 @@ export class Character {
     }
     if (best) {
       const wasWandering = this.wandering;
-      this.moveTo(best);
+      this.moveTo(best, undefined, undefined, 'wander');
       this.wandering = wasWandering;
     }
   }
 
   destroy(): void {
     this.cancelMovement();
+    this.movementCommands?.dispose();
+    this.movementCommands = null;
     this.movementDirector?.release(this.agentId);
     this.movementDirector = null;
     if (this.hideTimer) { clearTimeout(this.hideTimer); this.hideTimer = null; }

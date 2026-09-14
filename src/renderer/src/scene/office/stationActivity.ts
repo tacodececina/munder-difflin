@@ -6,6 +6,8 @@ import { StationConnections } from './stationConnections';
 
 interface Options {
   map: Walkable;
+  /** Phase 5 can own the scene-wide authority; never allocate a second one. */
+  movement?: MovementDirector;
   director: ConstructorParameters<typeof StationDirector>[0];
   onHook: (callback: (event: HookEvent) => void) => () => void;
   onParser: (callback: (event: HookEvent) => void) => () => void;
@@ -24,7 +26,7 @@ export function startStationActivity(enabled: boolean, resolve: () => Options): 
   if (!enabled) return null;
   const options = resolve();
   const director = new StationDirector(options.director);
-  const movement = new MovementDirector(options.map);
+  const movement = options.movement ?? new MovementDirector(options.map);
   const connections = new StationConnections({
     subscribe: options.onExit,
     disconnect: id => director.disconnect(id),
@@ -37,6 +39,7 @@ export function startStationActivity(enabled: boolean, resolve: () => Options): 
     if (!active) return;
     active = false;
     director.dispose(); // late callbacks lose authority before unsubscribing
-    offHook(); offParser(); connections.dispose(); movement.dispose();
+    offHook(); offParser(); connections.dispose();
+    if (!options.movement) movement.dispose();
   } };
 }
