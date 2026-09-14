@@ -977,6 +977,19 @@
       "looping": "循环中——断路器已启动",
       "runningFloor": "正在管理楼层",
       "idle": "空闲"
+    },
+    "wings": {
+      "title": "办公室视角",
+      "openTitle": "选择要查看的办公区域",
+      "all": "整个办公室",
+      "hint": "选中其他分区的智能体时，镜头会自动移过去。",
+      "names": {
+        "engineering": "工程区",
+        "warroom": "作战室",
+        "meeting": "会议室",
+        "deploy": "部署区",
+        "break": "休息区"
+      }
     }
   },
   "setupPanel": {

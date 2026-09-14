@@ -314,6 +314,23 @@ interface State {
    *  on switch). OfficeFloor depends on this and rebuilds the scene on change. */
   officeTheme: ThemeId;
   setOfficeTheme: (theme: ThemeId) => void;
+  /** The named wings (`wing-*` zones) the CURRENTLY LOADED map offers, in the
+   *  order its zones layer declares them. Published by OfficeFloor once the map
+   *  is parsed and cleared when the scene tears down — the picker cannot read
+   *  the map itself, and a hardcoded list would be a lie on any other theme.
+   *  Empty on the four themes with no wings, which is how the control knows not
+   *  to mount at all. */
+  officeWings: string[];
+  setOfficeWings: (wings: string[]) => void;
+  /** Which wing the camera is framing, or null for the whole floor.
+   *
+   *  null is the default and the way out: `Camera.fitToScreen()` also clears the
+   *  camera's `manualOverride`, so leaving a wing restores every pre-existing
+   *  camera behaviour (the resize refit, and the glance toward a newly selected
+   *  agent) exactly as it was. A non-null value here is the ONLY thing that puts
+   *  the camera under manual control. Rules live in scene/office/wingFraming.ts. */
+  officeWing: string | null;
+  setOfficeWing: (wing: string | null) => void;
   /** Mirror of config.visitorMode — "someone outside the team is looking at
    *  this screen". Every redacting surface subscribes to THIS, not to the
    *  config object, so the seal lands in one repaint across the whole window.
@@ -949,7 +966,28 @@ export const useStore = create<State>((set, get) => ({
   hasMinimaxKey: false,
   setHasMinimaxKey: (has) => set({ hasMinimaxKey: has }),
   officeTheme: 'office',
-  setOfficeTheme: (theme) => set({ officeTheme: theme }),
+  // Switching theme drops the wing selection with it: the wings of the map you
+  // just left do not exist on the one you are looking at, and a stale name would
+  // frame nothing. The scene republishes both fields as soon as the new map is
+  // parsed.
+  setOfficeTheme: (theme) => set({ officeTheme: theme, officeWings: [], officeWing: null }),
+  officeWings: [],
+  setOfficeWings: (wings) =>
+    set((s) => ({
+      officeWings: wings,
+      // A wing that is not on the map cannot stay selected — that would leave
+      // the camera under manual override with nothing framing it. An EMPTY list
+      // is exempt on purpose: it is what the scene publishes while it is torn
+      // down (a language change, a WebGL context rebuild), and it means "no map
+      // loaded right now", not "this map has no wings". A theme that genuinely
+      // has none is already covered — setOfficeTheme clears the selection.
+      officeWing:
+        wings.length === 0 || (s.officeWing && wings.includes(s.officeWing))
+          ? s.officeWing
+          : null,
+    })),
+  officeWing: null,
+  setOfficeWing: (wing) => set({ officeWing: wing }),
   // Starts OFF and stays off until App mirrors a config that says otherwise.
   // Never persisted here (localStorage is not the source of truth for it) and
   // never derived — see store/visitorMode.ts.

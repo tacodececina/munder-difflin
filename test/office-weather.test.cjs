@@ -170,9 +170,13 @@ test('forget() drops an agent outright', () => {
 test('weather.ts exports only readings-in / enum-out — no way to touch an agent', () => {
   const api = loadTs('src/renderer/src/scene/office/weather.ts');
   const surface = Object.keys(api).sort();
+  // `levelsOf` (and FloorWeather.fresh, which is built on it) is the second
+  // projection of the same readings: the operations wall draws one pip PER
+  // AGENT, where the sky only needs the counts. Still readings-in / data-out —
+  // it hands back levels and agent ids, and nothing that can reach an agent.
   assert.deepEqual(surface, [
     'BREAKER_BEAT_MS', 'FloorWeather', 'RAIN_AT', 'READING_TTL_MS',
-    'asBreakerLevel', 'deriveWeather', 'summarizeSky'
+    'asBreakerLevel', 'deriveWeather', 'levelsOf', 'summarizeSky'
   ]);
   // Everything the sky can ever say, exhaustively.
   const outcomes = new Set();

@@ -586,6 +586,22 @@ export class Character {
     else if (this.wandering && !heldByFx) this.updateWander(dt);
     if (this.idleLoop && !heldByFx) this.updateIdleLoop(dt);
 
+    // Depth is the FOOT anchor, per avatar, every frame. Two agents sharing a
+    // patch of floor therefore already overlap coherently — whoever is further
+    // down the screen is in front, the order never flickers (pixi's sort is
+    // stable and the zIndex setter is a no-op when the value has not moved),
+    // and a tall map tile between them sorts correctly against both (see
+    // ./tileOcclusion).
+    //
+    // WHAT THIS DOES NOT FIX, on purpose: two agents standing on the SAME tile
+    // are drawn in the same place, and no painter's order rescues that. The
+    // cause is one line up the stack — the pathfinder reads the map grid only,
+    // so avatars do not block each other (see `updateWander` below, whose
+    // social-lean branch already has to skip a colleague's own tile for exactly
+    // this reason). Repairing it properly means either agent-vs-agent collision in
+    // the path search or reserving destination tiles, both of which change how
+    // the floor MOVES — new ways to get stuck in a crowded office — and neither
+    // belongs in a rendering-order change. Left as a known, separate problem.
     const depth = this.mapRenderer.projection.depthAtWorldY(this.py);
     this.sprite.container.zIndex = depth;
     this.thoughtBubble.setPosition(this.px, this.py);

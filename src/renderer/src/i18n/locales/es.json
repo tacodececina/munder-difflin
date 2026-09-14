@@ -977,6 +977,19 @@
       "looping": "en bucle — cortacircuitos armado",
       "runningFloor": "dirigiendo la oficina",
       "idle": "inactivo"
+    },
+    "wings": {
+      "title": "VISTA DE LA OFICINA",
+      "openTitle": "Elige qué parte de la oficina quieres ver",
+      "all": "Toda la oficina",
+      "hint": "Si eliges un agente de otra ala, la cámara se mueve hasta allá.",
+      "names": {
+        "engineering": "Ingeniería",
+        "warroom": "Sala de crisis",
+        "meeting": "Sala de juntas",
+        "deploy": "Despliegues",
+        "break": "Área de descanso"
+      }
     }
   },
   "setupPanel": {

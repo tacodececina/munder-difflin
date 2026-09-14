@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const loadTs = require('../test/load-ts.cjs');
 const { TECH_PIECES: P, TECH_ATLAS_META, techGid } = loadTs('src/renderer/src/scene/office/techOfficeArt.ts');
-const { OFFICE_SIZE, OFFICE_SEATS, OFFICE_CAFE, OFFICE_ENTRANCE, OFFICE_ZONES } = loadTs('src/renderer/src/scene/office/officeLayout.ts');
+const { OFFICE_SIZE, OFFICE_SEATS, OFFICE_CAFE, OFFICE_ENTRANCE, OFFICE_ZONES, OFFICE_BINDINGS } = loadTs('src/renderer/src/scene/office/officeLayout.ts');
 const { validateOfficeMap } = require('./mapgen/validate-tech-office.cjs');
 const OUT = path.resolve(__dirname, '../src/renderer/src/assets/maps/office.tmj');
 
@@ -69,8 +69,12 @@ function buildOfficeMap() {
     prop('glass', x, y, 'walls'); block(x, y, 1, 3);
   }
 
-  // 01 — Operations: panoramic wall and staggered consoles.
-  prop('screen', 5, 1, 'furniture-above'); block(5, 3, 14, 2);
+  // 01 — Operations: panoramic wall and staggered consoles. The display is a
+  // LIVE surface (OfficeFloor composites a real readout over its glass), so its
+  // tile comes from the theme anchor rather than a literal here — one number,
+  // shared by the map and by the instrument drawn on top of it.
+  prop('screen', OFFICE_BINDINGS.anchors.opsScreen.x, OFFICE_BINDINGS.anchors.opsScreen.y, 'furniture-above');
+  block(5, 3, 14, 2);
   prop('signOps', 3, 5, 'furniture-above');
   prop('console', 3, 7); block(3, 8, 11, 1);
   prop('console', 16, 8); block(16, 9, 11, 1);
@@ -102,7 +106,7 @@ function buildOfficeMap() {
 
   // 04 — One generous table, content board and city window.
   prop('window', 30, 1, 'furniture-above');
-  prop('whiteboard', 36, 1, 'furniture-above');
+  prop('whiteboard', OFFICE_BINDINGS.anchors.planBoard.x, OFFICE_BINDINGS.anchors.planBoard.y, 'furniture-above');
   prop('meeting', 34, 6); block(34, 7, 8, 3);
   for (const x of [35, 38, 40]) {
     prop('chairNorth', x, 5, 'furniture-above');

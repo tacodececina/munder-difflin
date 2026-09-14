@@ -164,6 +164,19 @@ export interface AnchorConfig {
   boardPinStand: Tile;
   boardTakeStand: Tile;
   boardArchiveStand: Tile;
+  /** OPTIONAL — the panoramic wall display's TOP-LEFT tile, if the theme has
+   *  one. The only prop on this floor that is an INSTRUMENT: OfficeFloor
+   *  composites a live readout (breaker pips / CI chips / closures-per-hour)
+   *  over the baked glass at techOfficeArt's OPS_READOUT_RECT.
+   *
+   *  Undefined on every theme but `office`, and that is not an omission to be
+   *  filled in later: the display is a procedural tech-office prop, and the
+   *  other themes' maps have no wall it could hang on. No anchor, no readout —
+   *  not a readout drawn over a wall that is not a screen. */
+  opsScreen?: Tile;
+  /** OPTIONAL — the PLAN / BUILD / SHIP whiteboard's TOP-LEFT tile. Same
+   *  reasoning as `opsScreen`; the live note field is PLAN_READOUT_RECT. */
+  planBoard?: Tile;
 }
 
 /** Theme palette. `background` is the canvas clear color; `noteColors` are the

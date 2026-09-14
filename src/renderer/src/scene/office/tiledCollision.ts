@@ -53,6 +53,12 @@ export interface TiledTilesetRef {
   tilewidth?: number;
   tileheight?: number;
   tilecount?: number;
+  /** Atlas size in pixels. Tiled writes both, and every theme entry already
+   *  carries them (themeRegistry's TilesetEntry); TiledMapRenderer needs them
+   *  to read an atlas back cell-by-cell for ./tileOcclusion's bottom-edge test.
+   *  Optional because nothing else here depends on them. */
+  imagewidth?: number;
+  imageheight?: number;
 }
 
 export interface ZoneRect { x: number; y: number; width: number; height: number; }

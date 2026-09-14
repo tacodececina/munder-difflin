@@ -125,6 +125,40 @@ export function summarizeSky(
   return { armed, stopped, weather };
 }
 
+/**
+ * The same fresh readings the sky is computed from, as ONE LEVEL PER AGENT,
+ * ordered by agent id so the list is stable between reads.
+ *
+ * The sky only needs the counts; the operations wall (see wallReadout.ts) draws
+ * one pip per agent and needs to know which level each of them is at. Same
+ * inputs, same freshness rule, same `present` filter — this is a second
+ * projection of the readings, not a second source.
+ *
+ * An EMPTY array means "nobody is reporting", which is not the same as "everyone
+ * is healthy": main pushes `control:breakerState` only for live, unarchived,
+ * non-god agents, so an empty floor and a floor whose first beat has not landed
+ * yet both land here. Callers that DISPLAY this have to say so rather than draw
+ * an all-clear — that distinction is the whole reason this returns levels
+ * instead of a count.
+ */
+export function levelsOf(
+  readings: Iterable<BreakerReading>,
+  now: number,
+  present?: ReadonlySet<string>
+): BreakerLevel[] {
+  const latest = new Map<string, BreakerLevel>();
+  for (const r of readings) {
+    if (!r || typeof r.agentId !== 'string' || !r.agentId) continue;
+    const level = asBreakerLevel(r.level);
+    if (!level) continue;
+    if (!Number.isFinite(r.ts)) continue;
+    if (now - r.ts >= READING_TTL_MS) continue;
+    if (present && !present.has(r.agentId)) continue;
+    latest.set(r.agentId, level);
+  }
+  return [...latest.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([, l]) => l);
+}
+
 /** The rule, when only the answer is wanted. */
 export function deriveWeather(
   readings: Iterable<BreakerReading>,
@@ -175,5 +209,16 @@ export class FloorWeather {
   /** Current weather. */
   weather(now = Date.now(), present?: ReadonlySet<string>): Weather {
     return this.summary(now, present).weather;
+  }
+
+  /** The surviving readings themselves, for a consumer that needs more than a
+   *  weather enum (the operations wall draws one pip PER AGENT — see
+   *  wallReadout.ts). Prunes on read, exactly like `summary`, so the sky and
+   *  anything built from this can never disagree about who is reporting. */
+  fresh(now = Date.now(), present?: ReadonlySet<string>): BreakerReading[] {
+    for (const [id, r] of this.readings) {
+      if (now - r.ts >= READING_TTL_MS || (present && !present.has(id))) this.readings.delete(id);
+    }
+    return [...this.readings.values()];
   }
 }

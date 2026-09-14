@@ -977,6 +977,19 @@
       "looping": "looping — breaker armed",
       "runningFloor": "running the floor",
       "idle": "idle"
+    },
+    "wings": {
+      "title": "OFFICE VIEW",
+      "openTitle": "Choose which part of the office to look at",
+      "all": "Whole office",
+      "hint": "Picking an agent in another wing moves the camera there.",
+      "names": {
+        "engineering": "Engineering",
+        "warroom": "War room",
+        "meeting": "Meeting room",
+        "deploy": "Deploys",
+        "break": "Break room"
+      }
     }
   },
   "setupPanel": {

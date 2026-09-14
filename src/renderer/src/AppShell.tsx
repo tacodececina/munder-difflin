@@ -6,6 +6,7 @@ import type { AppTheme } from '@/design/theme';
 import { OfficeFloor } from '@/scene/office/OfficeFloor';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { MemoryPanel } from '@/components/MemoryPanel';
+import { OfficeWingPicker } from '@/components/OfficeWingPicker';
 import { AgentDetailPanel } from '@/components/AgentDetailPanel';
 import { AgentStrip } from '@/components/AgentStrip';
 import { MichaelBooting } from '@/components/MichaelBooting';
@@ -239,6 +240,13 @@ export function AppShell({
           <ErrorBoundary>
             <OfficeFloor />
           </ErrorBoundary>
+          {/* Which wing of the floor the camera frames. A sibling of the scene,
+              not a child: it is DOM chrome over a WebGL canvas, exactly like the
+              memory pill in the opposite corner. Renders nothing on a map with
+              no `wing-*` zones — which is every theme but the office — so the
+              other four are untouched. NOT gated on visitor mode: it reveals
+              nothing about the work, only where the camera is pointing. */}
+          <OfficeWingPicker />
           {/* VISITOR MODE — the memory search is a free-text window into
               everything every agent has ever remembered, and it floats over the
               floor. Gated at the mount so the panel, its status probe and its

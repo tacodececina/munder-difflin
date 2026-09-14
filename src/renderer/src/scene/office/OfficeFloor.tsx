@@ -19,6 +19,10 @@ import { getCustomCharacter, isCustomCharacterId } from './customCast';
 import { cafeMoodFor, beatSeconds, type BreakSpot, type CafeMood } from './cafeMood';
 import { speakOfficeLine, setOfficeVoicesEnabled, stopOfficeVoices } from './voicePlayback';
 import { pickIdleCompanion, type CompanionCandidate } from './idleAffinity';
+import {
+  computeWingFraming, wingsFromZones, wingContainingTile, wingForSelection, type Wing
+} from './wingFraming';
+import { probeRendererName, renderBudget } from './softwareRendering';
 import { FloorWeather } from './weather';
 import { WeatherOverlay } from './WeatherOverlay';
 import { colors } from '@/design/tokens';
@@ -29,7 +33,17 @@ import {
 import type { Tile, Facing, ErrandKind, ErrandSpot, TilesetEntry } from './themeRegistry';
 import { patchTilesetCanvas, TILE_PALETTES } from './tileArt';
 import { buildIsoAtlas } from './isoTileArt';
-import { buildTechOfficeAtlas } from './techOfficeArt';
+import {
+  buildTechOfficeAtlas, drawOpsReadout, drawPlanReadout, rgbFromHex,
+  OPS_READOUT_RECT, PLAN_READOUT_RECT, type ReadoutInk
+} from './techOfficeArt';
+import { WallPanel } from './WallPanel';
+import {
+  agentPips, bucketShipped, heldValue, planSignature, readoutSignature,
+  summarizeCIRuns, summarizePlanBoard, NO_READOUT,
+  CI_POLL_MS, CI_TTL_MS, PLAN_TTL_MS, SHIPPED_LOG_WINDOW, SHIPPED_POLL_MS, SHIPPED_TTL_MS,
+  type CIState, type Held, type OpsReadout, type PlanBoard, type ShippedBuckets
+} from './wallReadout';
 import { deskDisplayTop, deskCupPixelOffset } from './deskVisuals';
 
 // The map, tileset atlases, desk-claim order, errand spots, coffee-economy
@@ -336,6 +350,22 @@ export function OfficeFloor() {
     const init = async () => {
       // Load the active theme bundle (falls back to 'office' on a bad/absent bundle).
       const theme = await loadTheme(officeTheme);
+      // WHICH BACKEND DID THIS PROCESS GET? Chromium silently falls back to a
+      // CPU rasteriser (SwiftShader) after enough GPU-process crashes, or when
+      // it started without a usable device, and then a full-window animated
+      // scene costs SIX CORES in the gpu-process while the renderer looks
+      // perfectly healthy — measured, and the reason this call exists. See
+      // ./softwareRendering for the numbers and for what the budget does.
+      const budget = renderBudget(probeRendererName(), window.devicePixelRatio);
+      if (budget.software) {
+        console.warn(
+          '[OfficeFloor] no GPU: this window is being rendered in software '
+          + `(${budget.renderer}). The floor is dropping to 1:1 and capping its `
+          + `ticker at ${budget.maxFPS} fps to `
+          + 'stop the GPU process burning several cores. Restarting the app on the '
+          + 'physical console usually restores hardware rendering.'
+        );
+      }
       await app.init({
         background: hexNum(theme.palette.background),
         antialias: false,
@@ -346,12 +376,22 @@ export function OfficeFloor() {
         // with. Render at the real device pixel density instead, floored at 2
         // so the half-scale-supersampled bubble text stays legible even at
         // 100% scaling. autoDensity keeps the canvas CSS size in logical px.
-        resolution: Math.max(window.devicePixelRatio || 1, 2),
+        // (Unless there is no GPU to absorb those four-times-as-many pixels —
+        // renderBudget hands back 1 then, and crisp text is not worth cores.)
+        resolution: budget.resolution,
         autoDensity: true,
         width: host.clientWidth || 800,
         height: host.clientHeight || 600,
       });
       if (mountIdRef.current !== mountId) { safeDestroy(app); return; }
+      // Cost here is very close to linear in frames rendered, so on a software
+      // backend the frame cap is the only dial that actually moves the number.
+      // Pixi's cap is NOMINAL — it hands back whatever a frame overshot it by,
+      // so an irregular software backend lands above the number asked for (8 →
+      // ~11 fps measured; see ./softwareRendering for the table). Zero on every
+      // healthy machine, where Pixi's own default (uncapped, rAF-bound) is what
+      // the floor has always run at.
+      if (budget.maxFPS > 0) app.ticker.maxFPS = budget.maxFPS;
       while (host.firstChild) host.removeChild(host.firstChild);
       host.appendChild(app.canvas);
 
@@ -405,6 +445,45 @@ export function OfficeFloor() {
       camera.setViewSize(app.screen.width, app.screen.height);
       camera.fitToScreen();
 
+      // ─── WINGS ────────────────────────────────────────────────────────────
+      // The rebuilt office is roughly twice the area of the map this scene was
+      // written against, and fitToScreen() puts ALL of it in the panel: the
+      // whole floor shrank and the layout lost its air. The map answers that by
+      // being organised into named `wing-*` zones, and the camera has had the
+      // mechanism to frame one — `focusOn()` — sitting unused since it was
+      // ported. This is the wiring between them.
+      //
+      // The arithmetic (which point, which zoom, and what a selection does to
+      // the choice) lives in ./wingFraming, pure and unit-tested; this block
+      // only supplies the map's numbers and calls the camera.
+      const wings: Wing[] = wingsFromZones(mapRenderer.getAllZones());
+      // Published for OfficeWingPicker, which has no way to read a Tiled map.
+      // Empty on every theme without wings, and the picker does not mount then.
+      useStore.getState().setOfficeWings(wings.map((w) => w.name));
+      // Mirrors the store so the resize handler and the selection rule below can
+      // read it without a second subscription.
+      let activeWing: string | null = useStore.getState().officeWing;
+
+      /** Point the camera at `name`, or back at the whole floor for null. */
+      const applyWing = (name: string | null) => {
+        activeWing = name;
+        const wing = name ? wings.find((w) => w.name === name) : undefined;
+        if (!wing) {
+          // Also clears the camera's `manualOverride`, which is what restores
+          // the resize refit and the nudge-toward-selection glance.
+          camera.fitToScreen();
+          return;
+        }
+        const f = computeWingFraming({
+          zone: wing.rect,
+          projection: proj,
+          view: { width: app.screen.width, height: app.screen.height },
+          mapWorld,
+        });
+        camera.focusOn(f.x, f.y, f.zoom);
+      };
+      if (activeWing) applyWing(activeWing);
+
       // ─── The weather → CIRCUIT BREAKER ─────────────────────────────────────
       // The sky reports how many agents the guardrail currently has hold of:
       // nobody = clear, one or two = overcast, three or more (or anyone actually
@@ -441,6 +520,145 @@ export function OfficeFloor() {
       // status pin and the cost meter already read.
       const offBreaker = window.cth.onBreakerState?.((s) => floorWeather.record(s));
       (app as any).__offBreaker = offBreaker;
+
+      // ─── The wall instruments → REAL DATA, OR NOTHING ──────────────────────
+      // The panoramic display over 01/OPERATIONS and the PLAN / BUILD / SHIP
+      // whiteboard in 04/BRIEFING were drawn with invented contents: a fixed
+      // "99.98 UPTIME", a nine-bar chart that was a literal array, a service
+      // topology naming services that do not exist, and four sticky notes
+      // standing for no card. On a floor whose rule is that everything visible
+      // corresponds to something real — the rule the canned café dialogue was
+      // deleted for — a fake instrument is the worst kind of decoration,
+      // because it is the one people read.
+      //
+      // The props' chrome is still baked into the atlas; what they SAY is drawn
+      // here, from four sources the app already has, and every one of them
+      // renders NO DATA rather than a plausible number when it cannot be read.
+      // The derivation is in wallReadout.ts (pure, unit-tested); this block is
+      // the wiring and the cadence, and the cadence is the other half of the
+      // brief: nothing below adds a poll the floor was not already paying for,
+      // except two deliberately slow ones.
+      //
+      //   AGENTS  the breaker beat above — already subscribed, 30 s, free.
+      //   PLAN…   the cork boards' own 5 s ledger poll — free.
+      //   SHIPPED hive/log.jsonl, 60 s, a local file read.
+      //   CI      the `gh` CLI, 5 MINUTES, silent when there is no repo.
+      //
+      // Only a theme that declares the anchors gets any of this. The two props
+      // exist solely in the procedural tech-office atlas, so on every other
+      // floor these stay null and not one of the timers below is created.
+      const opsAnchor = hasWallProps ? theme.anchors.opsScreen : undefined;
+      const planAnchor = hasWallProps ? theme.anchors.planBoard : undefined;
+      const readoutPal = TILE_PALETTES[theme.tilesets[0]?.tilePaletteKey ?? 'office'] ?? TILE_PALETTES.office;
+      // The floor's existing colour language for work, borrowed verbatim: the
+      // same yellow that means "todo" on a cork note means "todo" on the board.
+      const readoutInk: ReadoutInk = {
+        todo: rgbFromHex(theme.palette.noteColors.todo ?? 0xf2df8a),
+        doing: rgbFromHex(theme.palette.noteColors.doing ?? 0x9ecbf0),
+        blocked: rgbFromHex(theme.palette.noteColors.blocked ?? 0xf0a3a3),
+        done: rgbFromHex(theme.palette.noteColors.done ?? 0xa8e0b0),
+      };
+      // Depth: the prop's LAST row, so the panel draws over the wall it hangs
+      // on and under anyone walking in front of it (see the calendar's note).
+      const opsPanel = opsAnchor
+        ? new WallPanel(opsAnchor, OPS_READOUT_RECT, proj, opsAnchor.y + 3)
+        : null;
+      const planPanel = planAnchor
+        ? new WallPanel(planAnchor, PLAN_READOUT_RECT, proj, planAnchor.y + 2)
+        : null;
+      if (opsPanel) charLayer.addChild(opsPanel.container);
+      if (planPanel) charLayer.addChild(planPanel.container);
+      (app as any).__wallPanels = [opsPanel, planPanel].filter(Boolean);
+
+      // Held readings + the instant each was taken. A poll that fails keeps the
+      // last answer for one TTL and then lapses to NO DATA — the floor does not
+      // flicker over a dropped read, and it does not display a stale one for
+      // ever either.
+      let heldCI: Held<CIState[]> | null = null;
+      let heldShipped: Held<ShippedBuckets> | null = null;
+      let heldPlan: Held<PlanBoard> | null = null;
+      let opsSignature = '';
+      let planSig = '';
+
+      /** Redraw the operations display if anything it shows actually changed. */
+      const paintOps = (): void => {
+        if (!opsPanel) return;
+        const now = Date.now();
+        const present = new Set(useStore.getState().agents.map((a) => a.id));
+        const readout: OpsReadout = {
+          agents: agentPips(floorWeather.fresh(now, present), now, present),
+          ci: heldValue(heldCI, now, CI_TTL_MS),
+          shipped: heldValue(heldShipped, now, SHIPPED_TTL_MS),
+        };
+        const sig = readoutSignature(readout);
+        if (sig === opsSignature) return;
+        opsSignature = sig;
+        opsPanel.paint(drawOpsReadout(readout, readoutPal, readoutInk));
+      };
+      /** Same, for the ledger board. */
+      const paintPlan = (): void => {
+        if (!planPanel) return;
+        const board = heldValue(heldPlan, Date.now(), PLAN_TTL_MS);
+        const sig = planSignature(board);
+        if (sig === planSig) return;
+        planSig = sig;
+        planPanel.paint(drawPlanReadout(board, readoutPal, readoutInk));
+      };
+      // Cold start: both surfaces say NO DATA until their first source answers.
+      // That is the honest opening state, and it is also what a floor with no
+      // hive and no repo keeps saying.
+      if (opsPanel) opsPanel.paint(drawOpsReadout(NO_READOUT, readoutPal, readoutInk));
+      if (planPanel) planPanel.paint(drawPlanReadout(null, readoutPal, readoutInk));
+
+      /** hive/log.jsonl → closures per hour. One local file read a minute.
+       *  The window is passed to BOTH calls on purpose: `hiveLog` returns a tail,
+       *  and `bucketShipped` can only tell a complete feed from a truncated one
+       *  if it knows how many rows were asked for. */
+      const pollShipped = async (): Promise<void> => {
+        if (!opsPanel) return;
+        try {
+          const log = await window.cth.hiveLog(SHIPPED_LOG_WINDOW);
+          const buckets = bucketShipped(log, Date.now(), SHIPPED_LOG_WINDOW);
+          if (buckets) heldShipped = { value: buckets, at: Date.now() };
+        } catch { /* held reading stands until its TTL */ }
+        paintOps();
+      };
+      /** The `gh` CLI → the CI strip. A subprocess and a network round trip, so
+       *  this is the slowest thing on the floor and the only one allowed to be
+       *  absent entirely: with no repo registered it never even spawns. */
+      let ciRepo: string | null = null;
+      const pollCI = async (): Promise<void> => {
+        if (!opsPanel) return;
+        if (!ciRepo) { heldCI = null; paintOps(); return; }
+        try {
+          const runs = summarizeCIRuns(await window.cth.githubCIRuns(ciRepo));
+          if (runs) heldCI = { value: runs, at: Date.now() };
+        } catch { /* gh unavailable — held reading stands until its TTL */ }
+        paintOps();
+      };
+      /** Which repo the CI strip watches: the first REGISTERED one, the same
+       *  list and the same default the Command Center's ISSUES section uses.
+       *  Re-read from every `config:changed` broadcast, so registering a repo
+       *  lights the strip without a remount — and un-registering the last one
+       *  drops it back to NO DATA immediately rather than leaving yesterday's
+       *  build hanging on the wall. */
+      const applyCIRepo = (repos: string[] | undefined): void => {
+        const next = repos?.[0] ?? null;
+        if (next === ciRepo) return;
+        ciRepo = next;
+        heldCI = null;
+        void pollCI();
+      };
+      if (opsPanel) {
+        void pollShipped();
+        (app as any).__wallPolls = [
+          setInterval(() => { void pollShipped(); }, SHIPPED_POLL_MS),
+          // Fires on its own schedule from here on; the FIRST call comes from
+          // applyCIRepo, because until getConfig answers there is no repo to ask
+          // about and spawning `gh` with nothing to look at is pure cost.
+          setInterval(() => { void pollCI(); }, CI_POLL_MS),
+        ];
+      }
 
       // ─── The boss's wall calendar → TRIGGERS ───────────────────────────────
       // A little tear-off month page hangs on the CEO office wall. Clicking it
@@ -729,12 +947,17 @@ export function OfficeFloor() {
         setOfficeVoicesEnabled(c.officeChatterEnabled === true && c.officeVoicesEnabled === true);
       };
       void window.cth.getConfig()
-        .then((c) => { applyChatterEnabled(c.officeChatterEnabled === true); applyVoicesEnabled(c); })
-        .catch(() => { /* flags stay off */ });
+        .then((c) => {
+          applyChatterEnabled(c.officeChatterEnabled === true);
+          applyVoicesEnabled(c);
+          applyCIRepo(c.registeredRepos);
+        })
+        .catch(() => { /* flags stay off, and the CI strip stays NO DATA */ });
       (app as any).__unsubChatterConfig =
         window.cth.onConfigChanged((c) => {
           applyChatterEnabled(c.officeChatterEnabled === true);
           applyVoicesEnabled(c);
+          applyCIRepo(c.registeredRepos);
         });
 
       const personaFor = (agent: Agent) => ({
@@ -2089,6 +2312,14 @@ export function OfficeFloor() {
         try {
           const raw = await window.cth.hiveTasks() as { tasks?: Array<{ id?: string; status?: string; assignee?: string; humanQA?: Array<{ q?: string; a?: string }> }> } | null;
           const arr = (raw && Array.isArray(raw.tasks)) ? raw.tasks : [];
+          // The PLAN / BUILD / SHIP whiteboard rides this same read — the
+          // ledger is already on the wire, and a second poll for the same file
+          // would be pure waste. Unlike the cork boards it is NOT lagged behind
+          // the note-carrying choreography: a written board states the ledger,
+          // not the walk.
+          const board = summarizePlanBoard(raw);
+          if (board) heldPlan = { value: board, at: Date.now() };
+          paintPlan();
           const ledger: LedgerTask[] = arr.map((t, i) => ({
             id: typeof t?.id === 'string' && t.id ? t.id : `idx-${i}`,
             status: String(t?.status ?? 'todo'),
@@ -2152,7 +2383,12 @@ export function OfficeFloor() {
           }
           if (instant) redrawVisual();
           lastLedger = ledger;
-        } catch { /* keep the last drawing */ }
+        } catch {
+          // Keep the last drawing — but the whiteboard's held reading is now
+          // one poll older, and paintPlan is what notices when it has been
+          // silent long enough to stop being believable.
+          paintPlan();
+        }
       };
       void pollTaskBoard();
       const taskBoardPoll = setInterval(() => { void pollTaskBoard(); }, 5000);
@@ -2443,6 +2679,10 @@ export function OfficeFloor() {
       let lastVisitor = useStore.getState().visitorMode;
       const unsubscribe = useStore.subscribe((s, prev) => {
         if (s.agents !== prev.agents) syncAgents();
+        // The wing picker's only effect on the scene. Ordered BEFORE the
+        // selection branch below so that when both change in one update, the
+        // camera ends up on the wing the selection asked for.
+        if (s.officeWing !== activeWing) applyWing(s.officeWing);
         if (s.visitorMode !== lastVisitor) {
           lastVisitor = s.visitorMode;
           for (const [id, rt] of runtimes) {
@@ -2454,8 +2694,22 @@ export function OfficeFloor() {
           lastSelected = s.selectedId;
           const rt = s.selectedId ? runtimes.get(s.selectedId) : undefined;
           if (rt) {
-            const p = rt.character.getPixelPosition();
-            camera.nudgeToward(p.x, p.y);
+            // Selecting an agent while a wing is framed used to do NOTHING:
+            // nudgeToward bails out under the camera's `manualOverride`, so the
+            // sidebar switched to someone who was off screen with no
+            // explanation. Decide where the camera should be first — the rule,
+            // and why each branch is what it is, is wingForSelection() in
+            // ./wingFraming — and let the picker's own label explain the move.
+            if (activeWing !== null) {
+              const agentWing = wingContainingTile(rt.character.getTilePosition(), wings);
+              const next = wingForSelection(activeWing, agentWing);
+              if (next !== activeWing) useStore.getState().setOfficeWing(next);
+              // Same wing: they are already in frame, and jogging a deliberately
+              // composed shot off its centre reads worse than holding it.
+            } else {
+              const p = rt.character.getPixelPosition();
+              camera.nudgeToward(p.x, p.y);
+            }
           }
         }
       });
@@ -2543,6 +2797,19 @@ export function OfficeFloor() {
       // Re-read the sky about once a second (the source only changes every 30 s
       // beat) and let the overlay animate toward it every frame.
       let weatherAcc = 0;
+      // The AGENTS pips are pushed, not polled — but the breaker's readings
+      // also LAPSE, and an agent that stopped reporting has to leave the wall
+      // on its own. One re-read a second (the weather's own cadence); a
+      // signature check upstream means an unchanged floor repaints nothing.
+      let opsAcc = 0;
+      const updateOpsPanel = (dt: number): void => {
+        if (!opsPanel) return;
+        opsAcc += dt;
+        if (opsAcc < 1) return;
+        opsAcc = 0;
+        paintOps();
+      };
+
       const updateWeather = (dt: number) => {
         if (!hasWeather) return;
         weatherAcc += dt;
@@ -2586,6 +2853,7 @@ export function OfficeFloor() {
         }
         clockHint.update(dt);
         updateWeather(dt);
+        updateOpsPanel(dt);
         resolveBubbleOverlaps();
         for (let i = envelopes.length - 1; i >= 0; i--) {
           if (envelopes[i].update(dt)) {
@@ -2605,6 +2873,12 @@ export function OfficeFloor() {
           if (width === 0 || height === 0) continue;
           app.renderer?.resize(width, height);
           camera.setViewSize(width, height);
+          // setViewSize refits the whole map for itself, but only while the
+          // camera is NOT under manual control — and framing a wing is exactly
+          // what puts it there. Without this, resizing the window (or opening
+          // the sidebar) while in a wing leaves the zoom that was computed for
+          // the old panel: the wing stops fitting, silently.
+          if (activeWing) applyWing(activeWing);
           weatherOverlay.setViewSize(width, height);
         }
       });
@@ -2650,6 +2924,11 @@ export function OfficeFloor() {
 
     return () => {
       mountIdRef.current++;
+      // The wing picker floats OVER this scene; leaving it offering rooms of a
+      // map that is no longer rendered (an error-boundary fallback, a theme
+      // swap) would be a control with nothing behind it. The selected wing
+      // survives — see setOfficeWings — so a rebuild comes back where it was.
+      try { useStore.getState().setOfficeWings([]); } catch { /* noop */ }
       // Silence the break room before the scene it belongs to is gone: a clip
       // still sounding (or still in the air) after the floor unmounts is a voice
       // with nothing on screen behind it. Unconditional — it is a no-op when
@@ -2664,6 +2943,15 @@ export function OfficeFloor() {
         try { (a as any).__offBreaker?.(); } catch { /* noop */ }
         try { clearInterval((a as any).__taskBoardPoll); } catch { /* noop */ }
         try { clearInterval((a as any).__relPoll); } catch { /* noop */ }
+        // The wall instruments own a texture each; `app.destroy(true)` reaches
+        // the sprites but not the TextureSource behind them, so they are
+        // released explicitly (see WallPanel.destroy).
+        for (const timer of ((a as any).__wallPolls ?? []) as ReturnType<typeof setInterval>[]) {
+          try { clearInterval(timer); } catch { /* noop */ }
+        }
+        for (const panel of ((a as any).__wallPanels ?? []) as Array<{ destroy(): void }>) {
+          try { panel.destroy(); } catch { /* noop */ }
+        }
         try { (a as any).__unsubChatterConfig?.(); } catch { /* noop */ }
         safeDestroy(a);
       }

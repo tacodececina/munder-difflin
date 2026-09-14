@@ -61,10 +61,36 @@ const FONT: Record<string, string> = {
   ':': '000010000010000', '.': '000000000000010', ' ': '000000000000000',
 };
 
-export function drawTechProp(key: TechProp | 'monitorOff' | 'monitorOn' | 'monitorBack' | 'monitorBackOn', pal: TilePalette) {
+/** A raw RGBA buffer plus its size — what every draw function in this file
+ *  returns, and what `buildTechOfficeAtlas` slices into tiles. */
+export interface PixelBuffer { data: Buf; width: number; height: number }
+
+/** The two pixel primitives, lifted out of `drawTechProp`'s closure so the LIVE
+ *  wall surfaces below (drawn on every data change, not baked into the atlas)
+ *  stamp letters and blocks through exactly the same code as the furniture. */
+function rectOn(buf: PixelBuffer, x: number, y: number, rw: number, rh: number, c: RGB, a = 255): void {
+  for (let py = Math.max(0, y); py < Math.min(buf.height, y + rh); py++)
+    for (let px = Math.max(0, x); px < Math.min(buf.width, x + rw); px++) setPx(buf.data, buf.width, px, py, c, a);
+}
+function textOn(buf: PixelBuffer, s: string, x: number, y: number, c: RGB, scale = 1): void {
+  for (const ch of s) {
+    const pixels = FONT[ch] ?? FONT[' '];
+    for (let i = 0; i < 15; i++)
+      if (pixels[i] === '1') rectOn(buf, x + (i % 3) * scale, y + Math.floor(i / 3) * scale, scale, scale, c);
+    x += 4 * scale;
+  }
+}
+/** Width in pixels of `s` in the prop alphabet, trailing gap included — the
+ *  measurement every "does this fit in the column?" decision below is made on. */
+export function techTextWidth(s: string, scale = 1): number {
+  return s.length * 4 * scale;
+}
+
+export function drawTechProp(key: TechProp | 'monitorOff' | 'monitorOn' | 'monitorBack' | 'monitorBackOn', pal: TilePalette): PixelBuffer {
   const [wt, ht] = key === 'monitorOff' || key === 'monitorOn' || key === 'monitorBack' || key === 'monitorBackOn' ? [2, 2] : sizes[key];
   const w = wt * TECH_CELL, h = ht * TECH_CELL;
   const data = new Uint8ClampedArray(w * h * 4);
+  const buf: PixelBuffer = { data, width: w, height: h };
   const [hi, steel, dark] = shades(pal.wall.base, 1.14, 0.8);
   const ink = shades(pal.floor.mortar, 1.16, 0.72)[2];
   const surface = mix(pal.wall.base, pal.floor.fleck, 0.3);
@@ -74,15 +100,10 @@ export function drawTechProp(key: TechProp | 'monitorOff' | 'monitorOn' | 'monit
   const wood = pal.floor.fleck;
   const shadow = mix(ink, pal.floor.base, 0.35);
   function rect(x: number, y: number, rw: number, rh: number, c: RGB, a = 255) {
-    for (let py = Math.max(0, y); py < Math.min(h, y + rh); py++)
-      for (let px = Math.max(0, x); px < Math.min(w, x + rw); px++) setPx(data, w, px, py, c, a);
+    rectOn(buf, x, y, rw, rh, c, a);
   }
   function text(s: string, x: number, y: number, c = paper, scale = 1) {
-    for (const ch of s) {
-      const pixels = FONT[ch] ?? FONT[' '];
-      for (let i = 0; i < 15; i++) if (pixels[i] === '1') rect(x + (i % 3) * scale, y + Math.floor(i / 3) * scale, scale, scale, c);
-      x += 4 * scale;
-    }
+    textOn(buf, s, x, y, c, scale);
   }
   function panel(x: number, y: number, rw: number, rh: number, c = steel) {
     rect(x + 2, y + 3, rw, rh, shadow, 180);
@@ -150,30 +171,27 @@ export function drawTechProp(key: TechProp | 'monitorOff' | 'monitorOn' | 'monit
       rect(8, 0, 1, h, accent, 130); rect(3, 28, 8, 2, hi); rect(3, 45, 8, 3, dark);
       break;
     case 'screen': {
+      // CHROME ONLY. What used to live inside this glass — a "99.98 UPTIME", a
+      // service topology naming API / CORE / DB / CI, and a nine-bar chart
+      // whose heights were a literal array two lines down — was invented, and
+      // an invented instrument is worse than no instrument. The bezel, the
+      // glass, the sign and the rules are stage furniture and stay baked; the
+      // readings are drawn LIVE over OPS_READOUT_RECT by drawOpsReadout, from
+      // the breaker beat, the ledger's event log and the `gh` CLI.
       panel(1, 1, w - 4, h - 5, dark);
       rect(5, 5, w - 12, h - 14, ink);
       text('OPERATIONS / LIVE', 11, 9, accent);
-      text('99.98', 165, 9, paper); text('UPTIME', 166, 18, muted);
-      rect(10, 20, 138, 1, dark);
-      // Service topology with deliberate hierarchy and routed connectors.
-      rect(28, 33, 95, 2, muted); rect(63, 27, 2, 22, muted);
-      for (const [x, y, label] of [[12, 28, 'API'], [53, 23, 'CORE'], [99, 28, 'DB'], [53, 44, 'CI']] as const) {
-        rect(x, y, 28, 12, muted); rect(x + 1, y + 1, 26, 10, ink); text(label, x + 4, y + 4, accent);
-      }
-      rect(152, 26, 1, 28, dark);
-      for (let i = 0; i < 9; i++) {
-        const bh = [7, 12, 10, 17, 14, 22, 19, 24, 22][i];
-        rect(160 + i * 5, 52 - bh, 3, bh, i < 6 ? muted : accent);
-      }
+      rect(10, 20, w - 26, 1, dark);
       rect(6, h - 8, w - 16, 1, accent); break;
     }
     case 'whiteboard': {
+      // CHROME ONLY, same reasoning as the screen: the four sticky notes that
+      // used to hang under this header stood for no card on any board. The
+      // header is a real heading written on a real board and stays; the notes
+      // and the column rules are drawn live over PLAN_READOUT_RECT by
+      // drawPlanReadout, one note per card in hive/tasks.json.
       panel(2, 2, w - 5, h - 9, paper);
       rect(6, 7, w - 13, 2, dark); text('PLAN / BUILD / SHIP', 9, 12, dark);
-      for (let x = 31; x < 80; x += 27) rect(x, 21, 1, 15, muted);
-      for (const [x, y, rw] of [[10, 22, 14], [10, 30, 10], [38, 22, 16], [65, 26, 17]]) {
-        rect(x, y, rw, 5, muted); rect(x + 2, y + 1, rw - 5, 1, dark);
-      }
       rect(4, h - 7, w - 9, 3, dark); rect(w - 22, h - 9, 10, 2, accent); break;
     }
     case 'server': case 'network': {
@@ -309,7 +327,7 @@ export function drawTechProp(key: TechProp | 'monitorOff' | 'monitorOn' | 'monit
       rect(1, 3, w - 2, 11, dark); rect(1, 3, 2, 11, accent); text(labels[key], 7, 6, paper); break;
     }
   }
-  return { data, width: w, height: h };
+  return buf;
 }
 
 export function buildTechOfficeAtlas(pal = TILE_PALETTES[TECH_PALETTE_KEY]) {
@@ -335,4 +353,272 @@ export function buildTechOfficeAtlas(pal = TILE_PALETTES[TECH_PALETTE_KEY]) {
     gids.forEach((gid, i) => cell(src, i % 2, Math.floor(i / 2), gid));
   }
   return { data, width, height, columns: TECH_COLUMNS, cell: TECH_CELL, tilecount: TECH_TILECOUNT };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LIVE WALL SURFACES
+//
+// Two props in this atlas are INSTRUMENTS rather than furniture: the panoramic
+// display over 01/OPERATIONS and the planning whiteboard in 04/BRIEFING. Their
+// chrome is baked above; the readings are redrawn here whenever the underlying
+// data changes, and composited over the prop by OfficeFloor.
+//
+// They live in this file, and not next to the Pixi code that mounts them, for
+// the same reason every other prop does: they are drawn with `rectOn`/`textOn`,
+// in the theme's palette, in the same three-pixel alphabet as the room signs —
+// one hand, one vocabulary. And like `drawTechProp` they are PURE functions
+// from data to an RGBA buffer, so what they draw is testable without a GPU.
+//
+// WHAT THEY MAY NOT DO: invent. Every `null` below is a source that could not
+// be read, and every one of them draws the words NO DATA. See wallReadout.ts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The live region of the `screen` prop, in prop-local pixels: the glass BELOW
+ *  the header rule. The bezel, the glass edge and the OPERATIONS / LIVE sign
+ *  above it are baked and never repaint. */
+export const OPS_READOUT_RECT = { x: 5, y: 21, w: 212, h: 34 } as const;
+
+/** The live region of the `whiteboard` prop: the note field under the written
+ *  header. The board, its header and the marker tray are baked. */
+export const PLAN_READOUT_RECT = { x: 4, y: 18, w: 86, h: 20 } as const;
+
+/**
+ * Status colours, supplied by the theme rather than derived from the tile
+ * palette.
+ *
+ * The floor ALREADY has a colour language for work — `theme.palette.noteColors`
+ * paints the cork boards' cards and the sticky notes on the desks. The wall
+ * instruments borrow it verbatim so a yellow mark means the same thing on the
+ * whiteboard, on the cork board and on a desk, and so a re-themed floor
+ * re-tints all three together.
+ */
+export interface ReadoutInk { todo: RGB; doing: RGB; blocked: RGB; done: RGB }
+
+/** `theme.palette.noteColors` are Pixi 0xRRGGBB numbers; this file speaks RGB. */
+export function rgbFromHex(hex: number): RGB {
+  return [(hex >> 16) & 255, (hex >> 8) & 255, hex & 255];
+}
+
+/** Fallback status colours, matching OFFICE_THEME.palette.noteColors. Only ever
+ *  used by a caller that does not pass its theme's own — the tests, and any
+ *  future surface with no theme in hand. */
+const DEFAULT_INK: ReadoutInk = {
+  todo: rgbFromHex(0xf2df8a), doing: rgbFromHex(0x9ecbf0),
+  blocked: rgbFromHex(0xf0a3a3), done: rgbFromHex(0xa8e0b0)
+};
+
+/** Mirrors BreakerLevel in weather.ts / src/main/breaker.ts. Declared locally so
+ *  the art file stays a leaf — it imports the tile palette and nothing else. */
+type Level = 'healthy' | 'steering' | 'constrained' | 'stopped';
+
+/** What `drawOpsReadout` needs, structurally identical to wallReadout's
+ *  OpsReadout (the module that derives it). Declared here rather than imported
+ *  for the leaf reason above; the readout tests assert one satisfies the other. */
+export interface OpsReadoutData {
+  agents: readonly Level[] | null;
+  ci: readonly ('pass' | 'fail' | 'running' | 'other')[] | null;
+  /** Per hour: a count, or `null` for an hour the event feed never covered. */
+  shipped: readonly (number | null)[] | null;
+}
+/** Ditto, for wallReadout's PlanBoard. */
+export interface PlanReadoutData { plan: number; build: number; blocked: number; ship: number }
+
+// Panel geometry, in READOUT-LOCAL pixels. Three columns of equal width with a
+// rule between them; the widths are what a 212px glass divides into, and every
+// label and mark below is placed against these rather than against the prop.
+const OPS_COLS = [4, 75, 146] as const;
+const OPS_RULES = [70, 141] as const;
+const OPS_LABEL_Y = 2;
+const PIP = 4, PIP_PITCH = 6, PIP_ROW = 7, PIPS_PER_ROW = 10, PIP_ROWS = 3, PIP_TOP = 12;
+const CHIP_W = 10, CHIP_H = 7, CHIP_PITCH = 12, CHIP_TOP = 13, CHIP_SLOTS = 5;
+const BAR_W = 4, BAR_PITCH = 5, BAR_UNIT = 3, BAR_FULL = 8, BAR_BASE = 31, BARS = 9;
+
+/**
+ * The operations wall's three live panels.
+ *
+ * AGENTS  one pip per agent the breaker beat is currently reporting, coloured
+ *         by level. Deliberately not a count: "how many" is already on the
+ *         status pin, and at this size a shape reads where a number does not.
+ * CI      up to five recent workflow runs, oldest → newest left to right, so
+ *         the rightmost chip is the latest build. Slots with no run behind them
+ *         are drawn as empty outlines, which is what a repo with fewer than
+ *         five runs honestly looks like.
+ * SHIPPED one bar per hour of real closures over the last nine hours. A bar is
+ *         three pixels per closure; an hour at or beyond BAR_FULL saturates and
+ *         says so with a capped top rather than being clipped in silence. An
+ *         hour with nothing in it keeps a one-pixel stub, so "measured and
+ *         empty" cannot be mistaken for "not drawn" — and an hour the event
+ *         feed never reached (a `null` bucket) gets NO stub, leaving the bare
+ *         axis, so it cannot be mistaken for "measured and empty" either. When
+ *         every hour is unmeasured the column says NO DATA outright: a chart of
+ *         nine blanks is not a reading.
+ */
+export function drawOpsReadout(
+  data: OpsReadoutData,
+  pal: TilePalette = TILE_PALETTES[TECH_PALETTE_KEY],
+  ink: ReadoutInk = DEFAULT_INK
+): PixelBuffer {
+  const { w, h } = OPS_READOUT_RECT;
+  const buf: PixelBuffer = { data: new Uint8ClampedArray(w * h * 4), width: w, height: h };
+  const [, steel, dark] = shades(pal.wall.base, 1.14, 0.8);
+  const glass = shades(pal.floor.mortar, 1.16, 0.72)[2];
+  const accent = pal.wall.line;
+  const muted = mix(steel, accent, 0.32);
+
+  rectOn(buf, 0, 0, w, h, glass);
+  for (const x of OPS_RULES) rectOn(buf, x, 1, 1, h - 2, dark);
+  const labels = ['AGENTS', 'CI', 'SHIPPED'] as const;
+  OPS_COLS.forEach((x, i) => textOn(buf, labels[i], x, OPS_LABEL_Y, muted));
+  const noData = (x: number): void => { textOn(buf, 'NO DATA', x, PIP_TOP + 3, mix(muted, glass, 0.45)); };
+
+  // ── AGENTS ────────────────────────────────────────────────────────────────
+  if (!data.agents) noData(OPS_COLS[0]);
+  else {
+    const levelInk: Record<Level, RGB> = {
+      healthy: ink.done, steering: ink.todo, constrained: ink.blocked, stopped: ink.blocked
+    };
+    const shown = Math.min(data.agents.length, PIPS_PER_ROW * PIP_ROWS);
+    for (let i = 0; i < shown; i++) {
+      const x = OPS_COLS[0] + (i % PIPS_PER_ROW) * PIP_PITCH;
+      const y = PIP_TOP + Math.floor(i / PIPS_PER_ROW) * PIP_ROW;
+      const level = data.agents[i];
+      rectOn(buf, x, y, PIP, PIP, levelInk[level] ?? muted);
+      // A STOPPED agent is not just "worse than constrained", it is a run that
+      // was actually killed. Same coral, hollowed out — a pip with nothing in it.
+      if (level === 'stopped') rectOn(buf, x + 1, y + 1, PIP - 2, PIP - 2, glass);
+    }
+    // More agents than slots: the last pip becomes a pile, the same overflow
+    // gesture the cork boards use for their thirteenth card.
+    if (data.agents.length > shown) {
+      const x = OPS_COLS[0] + (PIPS_PER_ROW - 1) * PIP_PITCH;
+      const y = PIP_TOP + (PIP_ROWS - 1) * PIP_ROW;
+      rectOn(buf, x + 1, y - 1, PIP, PIP, muted);
+      rectOn(buf, x, y, PIP, PIP, ink.done);
+    }
+  }
+
+  // ── CI ────────────────────────────────────────────────────────────────────
+  if (!data.ci) noData(OPS_COLS[1]);
+  else {
+    const chipInk = { pass: ink.done, fail: ink.blocked, running: ink.doing, other: muted };
+    for (let slot = 0; slot < CHIP_SLOTS; slot++) {
+      const x = OPS_COLS[1] + slot * CHIP_PITCH;
+      const run = data.ci[data.ci.length - CHIP_SLOTS + slot];
+      rectOn(buf, x, CHIP_TOP, CHIP_W, CHIP_H, dark);
+      if (!run) continue;                                   // empty slot: outline only
+      rectOn(buf, x + 1, CHIP_TOP + 1, CHIP_W - 2, CHIP_H - 2, chipInk[run]);
+      // A run still going gets a hollow core, so "green" can never be read as
+      // "green so far".
+      if (run === 'running') rectOn(buf, x + 3, CHIP_TOP + 2, CHIP_W - 6, CHIP_H - 4, dark);
+    }
+  }
+
+  // ── SHIPPED ───────────────────────────────────────────────────────────────
+  rectOn(buf, OPS_COLS[2], BAR_BASE, BARS * BAR_PITCH + 2, 1, dark);
+  const hours = data.shipped;
+  // Nine unmeasured hours is not a chart of nine empty hours; it is the panel
+  // failing to read its source, spelled the way every other failure is.
+  const measured = hours?.some((n, i) => i < BARS && n !== null && n !== undefined) ?? false;
+  if (!measured) noData(OPS_COLS[2]);
+  else {
+    for (let i = 0; i < BARS; i++) {
+      const x = OPS_COLS[2] + 2 + i * BAR_PITCH;
+      const n = hours?.[i];
+      // An hour the feed never covered gets no mark at all — bare axis. Any
+      // stub here would claim the hour was looked at and found quiet.
+      if (n === null || n === undefined) continue;
+      // An hour with nothing in it still gets a mark, a shade up from the axis
+      // it sits on: "measured, and empty" has to be visibly different from the
+      // bare axis an unmeasured hour leaves.
+      if (n <= 0) { rectOn(buf, x, BAR_BASE - 1, BAR_W, 1, mix(dark, muted, 0.55)); continue; }
+      const units = Math.min(n, BAR_FULL);
+      const height = units * BAR_UNIT;
+      rectOn(buf, x, BAR_BASE - height, BAR_W, height, accent);
+      if (n > BAR_FULL) rectOn(buf, x, BAR_BASE - height, BAR_W, 1, ink.done);
+    }
+  }
+  return buf;
+}
+
+// Note geometry on the whiteboard, in READOUT-LOCAL pixels. The two rules fall
+// under the two slashes of the header written above them (prop-local x 31 and
+// 61, i.e. readout-local 27 and 57), so each column hangs off its own word.
+const PLAN_COLS = [2, 30, 60] as const;
+const PLAN_RULES = [27, 57] as const;
+const NOTE_W = 5, NOTE_H = 4, NOTE_PITCH = 7, NOTE_ROW = 6, NOTES_PER_ROW = 3, NOTE_ROWS = 2, NOTE_TOP = 7;
+
+/**
+ * The planning board's three columns, one note per real card.
+ *
+ * The header written on this board — PLAN / BUILD / SHIP — is the ledger's own
+ * three states, so the mapping needs no invention: `todo` plans, `doing` builds,
+ * `done` ships. `blocked` rides in BUILD, drawn in the blocked colour: a card
+ * somebody picked up and got stuck on has left PLAN and has not reached SHIP.
+ *
+ * Each column prints its count (see `countLabelOf` — three digits is what fits,
+ * and past that the number is dropped rather than clamped into a lie) above a
+ * note stack that saturates at six and then piles.
+ */
+export function drawPlanReadout(
+  board: PlanReadoutData | null,
+  pal: TilePalette = TILE_PALETTES[TECH_PALETTE_KEY],
+  ink: ReadoutInk = DEFAULT_INK
+): PixelBuffer {
+  const { w, h } = PLAN_READOUT_RECT;
+  const buf: PixelBuffer = { data: new Uint8ClampedArray(w * h * 4), width: w, height: h };
+  const [, steel, dark] = shades(pal.wall.base, 1.14, 0.8);
+  const pin = shades(pal.floor.mortar, 1.16, 0.72)[2];
+  const accent = pal.wall.line;
+  const muted = mix(steel, accent, 0.32);
+  const paper = mix(pal.floor.fleck, [255, 255, 255], 0.55);
+
+  rectOn(buf, 0, 0, w, h, paper);
+  if (!board) {
+    textOn(buf, 'NO DATA', PLAN_COLS[1], NOTE_TOP, muted);
+    return buf;
+  }
+  for (const x of PLAN_RULES) rectOn(buf, x, 0, 1, h, muted);
+
+  // Column → the notes it holds, in drawing order. BUILD shows its blocked
+  // cards first so they are the ones that survive the six-note cap: a stuck
+  // card is what a glance at this board needs to find.
+  const columns: RGB[][] = [
+    new Array<RGB>(Math.max(0, board.plan)).fill(ink.todo),
+    [
+      ...new Array<RGB>(Math.max(0, board.blocked)).fill(ink.blocked),
+      ...new Array<RGB>(Math.max(0, board.build)).fill(ink.doing)
+    ],
+    new Array<RGB>(Math.max(0, board.ship)).fill(ink.done)
+  ];
+  const counts = [board.plan, board.blocked + board.build, board.ship];
+
+  columns.forEach((notes, col) => {
+    const cx = PLAN_COLS[col];
+    const label = countLabelOf(counts[col]);
+    if (label) textOn(buf, label, cx, 0, dark);
+    const shown = Math.min(notes.length, NOTES_PER_ROW * NOTE_ROWS);
+    for (let i = 0; i < shown; i++) {
+      const x = cx + (i % NOTES_PER_ROW) * NOTE_PITCH;
+      const y = NOTE_TOP + Math.floor(i / NOTES_PER_ROW) * NOTE_ROW;
+      rectOn(buf, x, y, NOTE_W, NOTE_H, notes[i]);
+      rectOn(buf, x + 2, y, 1, 1, pin);                      // the pin
+    }
+    if (notes.length > shown && shown > 0) {
+      const x = cx + (NOTES_PER_ROW - 1) * NOTE_PITCH;
+      const y = NOTE_TOP + (NOTE_ROWS - 1) * NOTE_ROW;
+      rectOn(buf, x + 1, y - 1, NOTE_W, NOTE_H, mix(notes[shown - 1], accent, 0.4));
+      rectOn(buf, x, y, NOTE_W, NOTE_H, notes[shown - 1]);
+      rectOn(buf, x + 2, y, 1, 1, pin);
+    }
+  });
+  return buf;
+}
+
+/** Local copy of wallReadout's `countLabel` rule — the art file is a leaf and
+ *  imports no sibling module; `office-wall-readout.test.cjs` pins the two to
+ *  each other so they cannot drift. */
+function countLabelOf(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '';
+  const whole = Math.floor(n);
+  return whole <= 999 ? String(whole) : '';
 }

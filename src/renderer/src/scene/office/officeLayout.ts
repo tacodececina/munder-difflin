@@ -51,6 +51,11 @@ export const OFFICE_BINDINGS = {
     boards: { x: 18, y: 14 }, askBoard: { x: 3, y: 14 }, coffeeSteam: { x: 31, y: 29 },
     boardPinStand: { x: 20, y: 15 }, boardTakeStand: { x: 21, y: 15 },
     boardArchiveStand: { x: 24, y: 15 },
+    // The two LIVE surfaces. `gen-tech-office.cjs` stamps the `screen` and
+    // `whiteboard` props at exactly these tiles, so the generator and the
+    // renderer's readout overlay cannot drift apart: move the prop here and the
+    // map and the instrument move together.
+    opsScreen: { x: 5, y: 1 }, planBoard: { x: 36, y: 1 },
   },
   errandSpots: [
     { kind: 'water', stand: { x: 2, y: 27 }, facing: 'up', fx: { x: 2, y: 26 }, duration: 4.5, godOnly: true },

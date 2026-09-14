@@ -227,6 +227,15 @@ export function validateManifestShape(raw: unknown): BundleValidation {
         anchors[key] = { x: raw.anchors.boards.x + dx, y: raw.anchors.boards.y + dy };
       }
     }
+    // TRULY OPTIONAL, and the only anchors here with NO default. They name the
+    // two live instrument surfaces (see techOfficeArt's OPS_READOUT_RECT /
+    // PLAN_READOUT_RECT), which exist only in the procedural tech-office
+    // atlas — inventing a position for them on a map that has no such prop
+    // would paint a floating readout onto a bare wall. Absent stays absent;
+    // a malformed value is dropped rather than half-honoured.
+    for (const key of ['opsScreen', 'planBoard']) {
+      if (key in anchors && !isTile(anchors[key])) delete anchors[key];
+    }
   }
 
   if (!Array.isArray(raw.errandSpots)) {
