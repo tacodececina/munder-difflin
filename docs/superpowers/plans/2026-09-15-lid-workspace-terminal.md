@@ -338,7 +338,7 @@ def test_repeat_receives_same_command(journal):
 
 ```text
 LID-0 -> LID-1 -> LID-2
-                   | 
+                   |
                    +--> LID-3 oficina ------+
                    +--> LID-4 terminal -----+--> LID-5 encargos
                                                   |
