@@ -1,0 +1,4 @@
+__pycache__/
+.coverage*
+# One-off private backup procedure contains a fixed production destination.
+/probes/kvm_business_source_backup.sh

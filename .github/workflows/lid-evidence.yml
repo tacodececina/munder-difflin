@@ -1,0 +1,47 @@
+name: LID inventory evidence
+
+on:
+  push:
+    paths:
+      - 'tools/deploy/lid/**'
+      - 'docs/deploy/lid/**'
+      - '.github/workflows/lid-evidence.yml'
+  pull_request:
+    paths:
+      - 'tools/deploy/lid/**'
+      - 'docs/deploy/lid/**'
+      - '.github/workflows/lid-evidence.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install coverage tool
+        run: python -m pip install coverage==7.16.1
+      - name: Python syntax
+        run: python -m compileall -q tools/deploy/lid
+      - name: Report regression tests
+        run: python -m coverage run --branch --source=tools/deploy/lid -m unittest discover -s tools/deploy/lid -p 'test_report.py' -v
+      - name: Report coverage at least 80 percent
+        run: python -m coverage report --include='*/tools/deploy/lid/report.py' --fail-under=80
+      - name: Validate synthetic example and generate static report
+        run: python tools/deploy/lid/report.py --evidence tools/deploy/lid/fixtures --output /tmp/lid-phase0-example.html
+      - name: Probe sanitization regression tests with synthetic data
+        run: python -m coverage run --data-file=.coverage-probes --branch --source=tools/deploy/lid/probes tools/deploy/lid/probes/test_kvm_probe_sanitization.py
+      - name: Sanitizer coverage at least 80 percent
+        run: python -m coverage report --data-file=.coverage-probes --include='*/tools/deploy/lid/probes/kvm_probe_sanitize.py' --fail-under=80
+      - name: Windows probe helpers with synthetic data only
+        shell: pwsh
+        run: ./tools/deploy/lid/probes/xeon_inventory.ps1 -SelfTest
+      - name: Parse shell probes without running them
+        run: |
+          for probe in tools/deploy/lid/probes/*.sh; do
+            bash -n "$probe" || exit "$?"
+          done

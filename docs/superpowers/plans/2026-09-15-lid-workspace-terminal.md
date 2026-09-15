@@ -10,7 +10,7 @@
 
 **Spec:** [Propuesta del workspace](../../proposals/lid-hermes-workspace.md) y [maqueta](../../proposals/lid-terminal-concept.html). Aclaración de Alex: varios agentes en Hermes Workspace, con su gerente conectado a la oficina visual de Lex Laboratory. Lidia como gerente sigue siendo la propuesta de identidad.
 
-**Estado:** plan completo para revisión de Alex, 2026-09-15. No se ha iniciado ninguna fase LID. La numeración **LID-0…LID-9** es independiente de las fases Astra/gráficas anteriores.
+**Estado:** Alex autorizó la ejecución por entregas comprobables visualmente el 2026-09-15: constructores GPT-5.6 y auditorías GPT-6 Astra. LID-0 iniciada; herramientas y evidencia de inventario en revisión. La numeración **LID-0…LID-9** es independiente de las fases Astra/gráficas anteriores. No se ha promovido operación nueva a producción.
 
 ## Global Constraints
 
@@ -130,9 +130,11 @@ Estados de encargo: `received`, `dispatched`, `running`, `blocked`, `completed`,
 
 **Entrega:** mapa actual, respaldos restaurables, versiones fijadas y destino de piloto elegido por evidencia. Ninguna automatización cambia de dueño.
 
+**Aclaración de topología, Alex 2026-09-15:** Xeon es laboratorio en casa; KVM4 es el VPS de producción de Licencia Digital. El piloto será aislado en laboratorio y no acreditará continuidad ante un apagón doméstico. KVM4 sigue sujeto a evaluación antes de añadir carga. El [índice de la entrega](../../deploy/lid/README.md) separa herramientas públicas de observaciones y capturas privadas; una auditoría del código no completa por sí sola las puertas operativas siguientes.
+
 - [ ] Inventariar GPD, Xeon y servidores candidatos: origen/commit o copia sin Git, modificaciones, artefactos, perfil, memoria, colas, sesiones activas, agenda, supervisor, dependencias, permisos y forma de acceso de cada herramienta. Consultar metadatos, no volcar secretos/correos.
 - [ ] Mapear cada chequeo de correo/pedido/soporte a un disparador, frecuencia, propietario, credencial referenciada, cursor, última ejecución confirmada y último efecto confirmado. Identificar qué aún depende de archivos, escritorio o sesión del PC desconectado.
-- [ ] Hacer snapshot consistente y manifest SHA256, preservar cambios sin commit, copiar a segundo equipo y restaurar una muestra de ledger/config/cola en aislamiento. El respaldo previo del Xeon sirve de antecedente, no de snapshot vigente.
+- [x] Hacer snapshot consistente y manifest SHA256, preservar cambios sin commit, copiar a segundo equipo y restaurar una muestra de ledger/config/cola en aislamiento. Comprobado 2026-09-15: VSS en Xeon, backup online de SQLite en KVM4 y fuente/overlay/Git preservados; hashes cotejados en destino y muestras restauradas. Consistencia por base/archivo donde no hubo snapshot global; exclusiones reconstruibles y memoria de procesos fuera del alcance, documentadas en recibos privados.
 - [ ] Verificar versiones y endpoints reales de Hermes Workspace/Agent, fuente de estado, persistencia de jobs/workers y limitaciones de reinicio. Medir el servicio con reinicios reportados antes de elegirlo como motor.
 - [ ] Medir ubicación eléctrica/red, recursos y carga de candidatos. Preferir servidor con energía/red independientes y aislamiento de LID; si KVM4 no tiene margen estable, no alojar allí más carga. No reactivar Electron/noVNC ni aprovisionar una compra nueva como efecto colateral.
 - [ ] Fijar versiones/lock para el piloto, presupuestos máximos explícitos y plan de saneamiento de vulnerabilidades. Registrar si una capacidad upstream necesita actualización aislada antes de ser usable.

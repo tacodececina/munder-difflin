@@ -1,0 +1,5 @@
+# Probes are copied from Windows worktrees to Linux over SSH.
+*.sh text eol=lf
+*.py text eol=lf
+*.ps1 text eol=lf
+*.json text eol=lf

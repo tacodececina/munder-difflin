@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "collectedAt": "2000-01-01T00:00:00Z",
+  "collector": "GPT-6-Astra",
+  "scope": "LID-0 inventory",
+  "records": [
+    {
+      "id": "synthetic-example-only",
+      "title": "EJEMPLO SINTÉTICO: host sin lectura válida",
+      "category": "fixture",
+      "host": "example.invalid",
+      "status": "unknown",
+      "observedAt": "2000-01-01T00:00:00Z",
+      "source": "fixture:example.json; ningún host consultado",
+      "summary": "Datos inventados exclusivamente para probar el formato. No representan producción ni una medición real.",
+      "details": {"workers": null, "lastConfirmedEffect": null},
+      "limitations": ["Ejemplo sintético; no debe usarse para decisiones operativas."],
+      "remeasure": "Sustituir con una observación autorizada en un directorio privado y conservar su fecha real."
+    }
+  ]
+}
