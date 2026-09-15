@@ -1,0 +1,22 @@
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+const { createRequire } = require('node:module');
+const resultPath = path.join(__dirname, 'native-result.json');
+fs.rmSync(resultPath, {force:true});
+const requireApp = createRequire(path.join(__dirname, 'resources/app.asar/package.json'));
+const DB = requireApp('better-sqlite3');
+const db = new DB(':memory:');
+assert.equal(db.prepare('select 1 as ok').get().ok, 1);
+db.close();
+const p = requireApp('node-pty').spawn('cmd.exe', ['/d', '/c', 'echo MUNDER_NATIVE_OK'], {cols:80, rows:24, env:process.env});
+let output = '';
+const timeout = setTimeout(() => {p.kill(); process.exit(2);}, 10000);
+p.onData(data => {output += data;});
+p.onExit(event => {
+  clearTimeout(timeout);
+  const ok = event.exitCode === 0 && output.includes('MUNDER_NATIVE_OK');
+  fs.writeFileSync(resultPath, JSON.stringify({at:new Date().toISOString(), electron:process.versions.electron, abi:process.versions.modules, sqlite:true, pty:ok}));
+  process.exit(ok ? 0 : 1);
+});
