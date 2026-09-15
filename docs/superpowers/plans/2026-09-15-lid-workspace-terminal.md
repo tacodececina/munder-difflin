@@ -10,7 +10,7 @@
 
 **Spec:** [Propuesta del workspace](../../proposals/lid-hermes-workspace.md) y [maqueta](../../proposals/lid-terminal-concept.html). Aclaración de Alex: varios agentes en Hermes Workspace, con su gerente conectado a la oficina visual de Lex Laboratory. Lidia como gerente sigue siendo la propuesta de identidad.
 
-**Estado:** Alex autorizó la ejecución por entregas comprobables visualmente el 2026-09-15: constructores GPT-5.6 y auditorías GPT-6 Astra. LID-0 iniciada; herramientas y evidencia de inventario en revisión. La numeración **LID-0…LID-9** es independiente de las fases Astra/gráficas anteriores. No se ha promovido operación nueva a producción.
+**Estado:** Alex autorizó la ejecución por entregas comprobables visualmente el 2026-09-15: constructores GPT-5.6 y auditorías GPT-6 Astra. En LID-0 quedaron completadas la preservación y su revisión estática; siguen pendientes los gates Linux/runtime de Workspace, la elección comprobada del host piloto y el smoke del conjunto. No hay un piloto instalado ni operación nueva promovida a producción. La numeración **LID-0…LID-9** es independiente de las fases Astra/gráficas anteriores.
 
 ## Global Constraints
 
@@ -21,6 +21,7 @@
 - Cerrar terminal/oficina no detiene el workspace. Un apagón del servidor sí puede detenerlo; recuperación y continuidad son garantías diferentes.
 - Roles iniciales: gerente, correo, pedidos y soporte. Reutilizar identidades adecuadas existentes; no duplicar Lidia ni reemplazar su memoria silenciosamente.
 - Concurrencia inicial propuesta: máximo dos ejecuciones de modelo en todo el workspace, incluido el gerente. Esperar a un worker no consume un bucle de razonamiento. Colas restantes durables, no descartadas.
+- Una cuenta/suscripción de ChatGPT usada por Codex y una cuenta de API facturada son autoridades, cuotas y credenciales distintas. No inferir saldo, reset, acceso a un modelo ni permiso de API de una a partir de la otra.
 - Herramientas por rol y permisos vigentes comprobados contra destino. Sin shell arbitrario ni ampliación de acceso a host como requisito para integrar.
 - Secretos, claves de licencia y contenido de clientes no entran en el repositorio/vault ni se envían a proveedores externos por esta integración. Usar identificadores y metadatos mínimos en UI/modelos; resolver datos operativos dentro de las herramientas autorizadas.
 - Ningún dato de producción en fixtures, capturas públicas o logs de CI. Logs de operaciones sin cuerpos de correo, tokens o claves.
@@ -126,6 +127,22 @@ Separar `availability` (lectura técnica), `freshness` (antigüedad de evidencia
 
 Estados de encargo: `received`, `dispatched`, `running`, `blocked`, `completed`, `failed`, `unknown`, `cancel_requested`, `cancelled`. Cancelado sólo tras acuse; conexión perdida no cancela ni completa. `completed` requiere resultado verificable de la tarea; un efecto de negocio exige su propio comprobante.
 
+## R0 — Recuperación urgente ante cuota/capacidad, pendiente de implementación
+
+Procedimiento aplicable a la oficina actual: [recuperación de proveedores](../../deploy/lid/provider-recovery.md). La evidencia de cada intervención se conserva en almacenamiento privado; este plan no acredita el estado en vivo de los agentes.
+
+Este apartado documenta el checklist de respuesta operacional manual que se está trabajando para el incidente observado, sin declararlo resuelto ni añadir otra fase numerada. **R0 está pendiente y no está implementado hoy como software, panel o failover.** Su primer propósito es conservar trabajo, detener reintentos improductivos y producir evidencia suficiente para continuar manualmente mientras LID-2/LID-5/LID-7/LID-9 incorporan la solución durable futura.
+
+- [ ] Clasificar cada fallo con la evidencia del transporte y del proveedor, sin reducirlos todos a “cuota”: `quota_or_billing` con reset sólo si la respuesta lo aporta; `selected_model_at_capacity` como disponibilidad transitoria del modelo seleccionado; `auth_or_permission`; `network_or_timeout`; `provider_error`; o `unknown`. Conservar código HTTP/RPC saneado, código del proveedor, `retry-after`/reset si existe y hora de observación.
+- [ ] Registrar en cada intento el proveedor, modelo solicitado, modelo realmente aceptado/observado y perfil de autenticación por identificador no secreto. Si alguno no puede comprobarse, guardar `null`/`unknown`; una etiqueta configurada no demuestra qué modelo atendió la llamada.
+- [ ] Añadir una prueba `models_catalog_available` autenticada y de sólo lectura para el proveedor/perfil que se pretende usar. El catálogo es evidencia de descubrimiento en ese instante, no garantía de capacidad, cuota o éxito de inferencia.
+- [ ] Aplicar pausa durable por ámbito afectado y conservar la cola completa. Una espera por cuota/capacidad no elimina ni recrea el encargo, y `hold` debe sobrevivir al reinicio. No usar temporizadores por frame ni iniciar watchers, sockets, cachés o sondeos cuando las banderas correspondientes están apagadas.
+- [ ] Antes de despachar, adquirir un lease acotado y persistir `inflight` con el mismo `taskId`/`requestId`. Tras timeout, desconexión o caída entre llamada y checkpoint, conservar la operación en `unknown`; consultar/reconciliar por el mismo ID y no hacer replay automático. El checkpoint es neutral: registra evidencia y cursor, no interpreta texto del modelo como efecto de negocio.
+- [ ] Proponer fallback secuencial y acotado, nunca automático en esta respuesta urgente: como máximo un candidato alterno por episodio de fallo del proveedor. Cada candidato debe pasar permisos de herramientas, capacidad del contexto, política de privacidad/datos, proveedor/modelo realmente disponible y perfil de autenticación autorizado. El presupuesto de intentos y tiempo por encargo será explícito, configurable y medido; no limita el diálogo válido del gerente/worker a dos turnos. Si el alterno no pasa o agota el presupuesto, mantener `hold`/pendiente sin pérdida.
+- [ ] Probar por separado cuota con reset conocido, cuota sin reset, modelo seleccionado a capacidad, autenticación denegada, red interrumpida y error desconocido. Ninguno puede convertirse en `completed`, ni activar un proveedor alterno por similitud del mensaje.
+
+**Checklist operacional R0:** registrar estado del incidente, clase y evidencia observada, trabajos conocidos en `hold`/`inflight`/`unknown`, próximo intento permitido sólo cuando exista un reset verificable y decisión manual de reanudar. No inventar cuenta regresiva ni asumir que este plan ya ofrece una pantalla. **Visual futuro propuesto:** panel/CLI con esa misma evidencia. **Gate de salida futuro:** cola íntegra y reiniciable, cero replay de operaciones `unknown`, máximo global de dos ejecuciones simultáneas demostrado y auditoría Astra del cambio. Hasta entonces, la recuperación sigue siendo manual y el incidente permanece abierto.
+
 ## LID-0 — Inventario real, preservación y decisiones de plataforma
 
 **Entrega:** mapa actual, respaldos restaurables, versiones fijadas y destino de piloto elegido por evidencia. Ninguna automatización cambia de dueño.
@@ -185,6 +202,7 @@ def test_failure_preserves_evidence_time():
 
 - [ ] Preparar entorno piloto aislado de la agenda, colas y credenciales de escritura productivas. Reutilizar el runtime compatible; no copiar la memoria de Lidia sin registrar origen y estrategia de actualización.
 - [ ] Configurar gerente propuesto Lidia y roles correo/pedidos/soporte, con contratos de entrada/salida, herramientas por rol y escalado de bloqueos. Modelos/costos fijados antes de habilitar llamadas; máximo dos ejecuciones simultáneas.
+- [ ] Definir por rol una lista ordenada de candidatos con proveedor, modelo, perfil de autenticación, ventana de contexto/capacidad necesaria, herramientas permitidas y clase de datos admisible. Resolverla desde evidencia del catálogo y un smoke autenticado; no presentar GPT-5.6, GPT-6 Astra ni otro nombre como disponible en el runtime por haber sido autorizado como rol de construcción/auditoría.
 - [ ] Arrancar bajo supervisor independiente de la sesión SSH. Persistir configuración, pendientes, checkpoints y registros en volumen/local filesystem apropiado, no en memoria del terminal ni en share con SQLite activo.
 - [ ] Ejecutar tareas sintéticas: gerente asigna al rol correcto, worker devuelve resultado verificable, fallo queda visible y no se etiqueta completado. Probar entrada maliciosa en un correo fixture como datos, sin conceder nuevas herramientas al agente.
 - [ ] Cerrar y reconectar clientes; observar que el trabajo y sus comprobantes continúan. En esta fase no se afirma supervivencia al reinicio del host.
@@ -247,6 +265,7 @@ lid status --workspace lid --ascii --no-color
 
 - [ ] Definir permisos `dispatch`, hash de contenido y `requestId` UUID creado una sola vez por envío lógico. Persistir recepción antes del acuse HTTP. Misma clave/mismo hash devuelve mismo recibo; misma clave/otro contenido devuelve 409.
 - [ ] Probar pérdida de respuesta después de persistir y reenvío del cliente. Correlacionar el encargo con la ejecución nativa. Si el upstream no permite saber si recibió el envío, clasificar `unknown` y reconciliar; no reenviar a ciegas.
+- [ ] Persistir lease, `inflight`, intento, proveedor/modelo/perfil observados y checkpoint neutral bajo el mismo `taskId`/`requestId`. Expirar un lease permite reconciliar, no repetir una operación `unknown`; el fallback sólo puede continuar si la llamada anterior se demuestra no aceptada, usa como máximo un candidato alterno por episodio y respeta el presupuesto configurable de intentos/tiempo del encargo. Independientemente del número de turnos válidos, nunca puede haber más de dos ejecuciones de modelo simultáneas en todo el workspace, incluido el gerente.
 - [ ] Añadir `lidWorkspaceDispatchEnabled=false`, comprobada tanto en cliente como servidor. Apagarla impide nuevos encargos; los ya aceptados no desaparecen ni se matan. UI de lectura no abre este canal.
 - [ ] Reutilizar el Command Center como entrada explícita: workspace/destinatario visibles, borrador revisable y confirmar una solicitud. Cancelar no envía; error conserva borrador y requestId. No insertar controles de escritura en el inspector.
 - [ ] Incorporar conversación dirigida al gerente con sesión/autoría reales. Separar respuesta textual, encargo aceptado y efecto confirmado. El texto del modelo no tiene autoridad para marcar pagos/entregas/completados.
@@ -294,6 +313,7 @@ def test_repeat_receives_same_command(journal):
 - [ ] Cortar sólo SSH/oficina, después red cliente-servidor, después puente, worker y gateway. Hacer reinicio de host únicamente en el piloto aislado. Identificar qué procesos sobreviven realmente y qué trabajos se reanudan desde checkpoint.
 - [ ] Inyectar fallo antes de persistir encargo, después de persistir, después de despachar y después de un efecto externo simulado antes de guardar su respuesta. El último caso debe quedar desconocido hasta reconciliar por ID con el simulador.
 - [ ] Ensayar caída del proveedor, almacenamiento lleno y volumen no montado: detener admisión cuando no se puede persistir; no confirmar recepción en memoria ni entrar en bucle de reinicios.
+- [ ] Ensayar la matriz R0: cuota/reset, modelo seleccionado a capacidad, autenticación, red y error desconocido; reiniciar con trabajos en `hold`, `inflight` y `unknown`; comprobar cola sin pérdida, lease recuperable, mismo ID y ausencia de replay automático.
 - [ ] Desconectar el PC operador durante 24 h mientras el servidor independiente atiende la carga sintética prevista. Comparar conjunto esperado/recibido/resuelto/pending, no sólo número total.
 - [ ] Hacer backup consistente de registros/cursores y restaurarlo en una instancia aislada. Para promover otro host: comprobar parada o fencing del escritor anterior; un archivo lock local o perder SSH no prueba exclusión entre máquinas.
 - [ ] Medir recuperación propuesta RTO ≤15 min ante fallo simple de proceso y restauración documentada; réplica/backup cada ≤15 min como objetivo RPO para desastre del host. Una transacción persistida soporta reinicio con disco intacto; no implica RPO=0 si desaparece el disco/host. Reportar valores reales obtenidos.
@@ -328,6 +348,7 @@ def test_repeat_receives_same_command(journal):
 - [ ] Observar desde otro host: último éxito por flujo, antigüedad de pendientes, fallos repetidos, provider caído, disco y supervisor. Heartbeat del proceso y éxito de negocio son señales distintas.
 - [ ] Probar una alerta de monitor en destino de prueba; activar entrega al canal autorizado según configuración existente, sin enviar mensajes a terceros como efecto del despliegue.
 - [ ] Medir CPU/RAM/red y consumo real por rol/flujo durante al menos 72 h estables. Desglosar interfaz, puente, runtime e inferencia; costo ausente se marca desconocido. Si se supera el presupuesto de LID-0, limitar nuevas ejecuciones y mantener pendientes, no inventar costos ni descartarlas.
+- [ ] Medir por rol la tasa de éxito del modelo primario, cada clase de fallo, llamadas por encargo, esperas y uso de fallback. Habilitar un candidato secundario sólo después de smoke autenticado, evaluación de calidad, permisos/capacidad/privacidad y presupuesto; rollback inmediato devuelve los trabajos a `hold`, no cambia silenciosamente de proveedor.
 - [ ] Entregar uso de consola, lectura de bloqueos/comprobantes, pausa coordinada, recuperación, backup/restauración y procedimiento de volver al sistema anterior.
 - [ ] Conservar las fuentes/releases anteriores y el acceso de reversión por al menos 7 días después de aceptar cada flujo. No borrar memoria, respaldos o sesiones históricas durante el cierre del proyecto.
 - [ ] Registrar evidencia y límites: fases efectivamente desplegadas, flags activos, host, commit, hashes, tests/cobertura, mediciones y brechas abiertas. Code push, CI verde, paquete copiado, proceso levantado y operación aceptada son cinco hechos diferentes.
@@ -335,6 +356,20 @@ def test_repeat_receives_same_command(journal):
 **Aceptación final:** correo/pedidos/soporte operan sin GPD ni oficina abierta; gerente/TUI concuerdan con registros; frescura y desconocidos correctos; prueba de apagón del cliente y restauración aprobadas; sin defectos críticos conocidos en los flujos habilitados; presupuesto y monitor comprobados.
 
 **Reversión:** por flujo usando LID-8, con preservación de estado y diagnóstico. No desinstalar el motor completo como primera respuesta a una regresión de UI.
+
+## Siguiente entrega visible y rollout de modelos por rol
+
+| Entrega | Demostración visible | Gate para avanzar | Estado actual |
+|---|---|---|---|
+| R0 evidencia y contención | Checklist manual distingue cuota/reset, capacidad transitoria, auth, red y unknown; el panel/CLI equivalente queda como entrega futura | Evidencia manual completa hoy; el futuro software debe conservar `hold`/`inflight`/`unknown`, mismo ID, cero replay y máximo dos ejecuciones simultáneas globales | Incidente abierto; checklist en curso; no hay panel ni failover automático implementados |
+| LID-0 cierre operativo | Informe de Xeon laboratorio y KVM4 producción con Linux/runtime, recursos, versiones, supervisor y smoke autenticado | Host piloto elegido por evidencia; locks y compatibilidad real pasan; KVM4 no recibe carga por defecto | Preservación completada; gates Linux/runtime pendientes |
+| LID-1 contrato de lectura | Fixtures/API muestran disponibilidad, frescura, cobertura, epoch/secuencia y errores sin convertir desconocidos en cero | Contrato TS/Python equivalente, principal `read` sin POST, lifecycle y cobertura ≥80% aprobados | Pendiente; debe cerrar antes del piloto LID-2 |
+| LID-2 piloto aislado | Lidia asigna fixtures a correo/pedidos/soporte y expone proveedor/modelo/perfil realmente observados | Supervisor, persistencia, permisos y catálogo/smoke pasan; ninguna credencial o dato productivo | No instalado |
+| LID-3/LID-4 clientes | Oficina y TUI muestran el mismo snapshot y estados R0 sin iniciar modelos por abrir la vista | Cero recursos con flags apagados, cero trabajo por frame, accesibilidad y concordancia de epoch/secuencia | Pendiente de LID-1/LID-2 |
+| LID-5/LID-7 durabilidad | Corte controlado conserva encargo, lease, checkpoint neutral y reconciliación | Cola sin pérdida, `unknown` sin replay, fallback acotado probado con fixtures | Pendiente |
+| LID-9 promoción por rol | Tablero compara primario/secundario por calidad, errores, costo y llamadas | Alex acepta el rol; Astra audita; 72 h estables; rollback a `hold` probado | Pendiente; no afirmar disponibilidad de candidatos |
+
+El rollout empieza con un solo modelo primario por rol en fixtures. Correo, pedidos, soporte y gerente se habilitan por separado porque requieren herramientas, contexto y datos distintos. Un secundario se prueba después, también por rol, y permanece deshabilitado hasta cumplir catálogo autenticado, smoke, calidad, permisos, capacidad, privacidad y costo. En un episodio de fallo sólo se propone un candidato alterno, bajo un presupuesto configurable y medido de intentos/tiempo por encargo. La promoción del primario o secundario no cambia el máximo global de dos ejecuciones simultáneas, incluido el gerente, ni autoriza failover automático; cualquier cambio de proveedor exige evidencia nueva del perfil de autenticación y de la política de datos.
 
 ## Orden y trabajo paralelo
 
